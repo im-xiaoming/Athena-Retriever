@@ -118,7 +118,7 @@ def ForwardModelsTrain(
 
     task_count[task_id] += 1
     # get the batch
-    batch = task_iter_train[task_id].next()
+    batch = next(task_iter_train[task_id])  # .next() bi xoa tu torch 2.0
 
     losses = model(batch, task_id, task_cfg[task_id]['task_type'])
 
