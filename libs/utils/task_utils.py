@@ -1,7 +1,7 @@
 import logging
 from tensorboardX import SummaryWriter
 from functools import partial, wraps
-from torch._six import inf
+from math import inf  # torch._six da bi xoa tu torch 2.0
 import torch.distributed as dist
 from torch.utils.data import RandomSampler
 from torch.utils.data.distributed import DistributedSampler

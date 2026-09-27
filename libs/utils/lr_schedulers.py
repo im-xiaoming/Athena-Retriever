@@ -4,7 +4,10 @@ from collections import Counter
 from bisect import bisect_right
 
 import torch
-from torch.optim.lr_scheduler import _LRScheduler
+try:
+    from torch.optim.lr_scheduler import LRScheduler as _LRScheduler
+except ImportError:  # torch < 2.0
+    from torch.optim.lr_scheduler import _LRScheduler
 
 
 class LinearWarmupCosineAnnealingLR(_LRScheduler):
