@@ -160,7 +160,7 @@ if __name__ == '__main__':
                         help='print frequency (default: 10 iterations)')
     parser.add_argument('--tasks', default='1', type=str,
                         help='task id list')  
-    parser.add_argument('--local_rank', default=-1, type=int,
+    parser.add_argument('--local_rank', '--local-rank', default=-1, type=int,
                         help='whether to use distributed training')
     args = parser.parse_args()
     main(args)

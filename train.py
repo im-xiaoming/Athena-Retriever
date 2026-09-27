@@ -314,7 +314,7 @@ if __name__ == '__main__':
                         help='task id list')  
     parser.add_argument('--num_train_epochs', default=40, type=int,
                         help='total number of training epochs')  
-    parser.add_argument('--local_rank', default=-1, type=int,
+    parser.add_argument('--local_rank', '--local-rank', default=-1, type=int,
                         help='whether to use distributed training')
     args = parser.parse_args()
     main(args)
