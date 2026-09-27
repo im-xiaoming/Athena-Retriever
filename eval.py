@@ -86,12 +86,16 @@ def main(args):
             args, cfg, task_cfg, args.tasks.split("-"), split='test_split')
 
     # load text embeddings pre-extracted from ONE-PEACE text encoder for each dataset
-    class_feature_anet = np.load('./data/activitynet13/anet_prompt.npy')
-    class_feature_unav = np.load('./data/unav100/unav100_prompt.npy')
-    class_feature_dcase = np.load('./data/dcase/dcase_prompt.npy')
-    task_cfg['TASK1']['clip_class_feature'] = torch.tensor(class_feature_anet, dtype=torch.float32).to(device)
-    task_cfg['TASK2']['clip_class_feature'] = torch.tensor(class_feature_unav, dtype=torch.float32).to(device)
-    task_cfg['TASK3']['clip_class_feature'] = torch.tensor(class_feature_dcase, dtype=torch.float32).to(device)
+    # duong dan lay tu config (khoa 'prompt_file'), fallback ve 3 bo goc
+    _default_prompt = {
+        'TASK1': './data/activitynet13/anet_prompt.npy',
+        'TASK2': './data/unav100/unav100_prompt.npy',
+        'TASK3': './data/desed/dcase_prompt.npy',
+    }
+    for _task, _fallback in _default_prompt.items():
+        _pf = task_cfg[_task].get('prompt_file', _fallback)
+        task_cfg[_task]['clip_class_feature'] = torch.tensor(
+            np.load(_pf), dtype=torch.float32).to(device)
 
     """3. create model and evaluator"""
     if cfg['multi_modal']:

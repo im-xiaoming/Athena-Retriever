@@ -111,12 +111,16 @@ def main(args):
             threshold=0.001,)  
     
     # load text embeddings pre-extracted from ONE-PEACE text encoder for each dataset
-    class_feature_anet = np.load('./data/activitynet13/anet_prompt.npy') 
-    class_feature_unav = np.load('./data/unav100/unav100_prompt.npy')
-    class_feature_dcase = np.load('./data/dcase/dcase_prompt.npy')
-    task_cfg['TASK1']['clip_class_feature'] = torch.tensor(class_feature_anet, dtype=torch.float32).to(device)
-    task_cfg['TASK2']['clip_class_feature'] = torch.tensor(class_feature_unav, dtype=torch.float32).to(device)
-    task_cfg['TASK3']['clip_class_feature'] = torch.tensor(class_feature_dcase, dtype=torch.float32).to(device)
+    # duong dan lay tu config (khoa 'prompt_file'), fallback ve 3 bo goc
+    _default_prompt = {
+        'TASK1': './data/activitynet13/anet_prompt.npy',
+        'TASK2': './data/unav100/unav100_prompt.npy',
+        'TASK3': './data/desed/dcase_prompt.npy',
+    }
+    for _task, _fallback in _default_prompt.items():
+        _pf = task_cfg[_task].get('prompt_file', _fallback)
+        task_cfg[_task]['clip_class_feature'] = torch.tensor(
+            np.load(_pf), dtype=torch.float32).to(device)
     
     logdir = os.path.join(ckpt_folder, 'logs')
     savePath = ckpt_folder
@@ -158,6 +162,18 @@ def main(args):
     model_ema = ModelEma(model)
 
     """4. Resume from model / Misc"""
+    # fine-tune: chi nap trong so, giu start_epoch = 0 va optimizer/scheduler moi tinh
+    if args.pretrain:
+        if not os.path.isfile(args.pretrain):
+            print("=> no checkpoint found at '{}'".format(args.pretrain))
+            return
+        checkpoint = torch.load(args.pretrain, map_location='cpu')
+        model.load_state_dict(checkpoint['state_dict'])
+        model_ema.module.load_state_dict(checkpoint['state_dict_ema'])
+        print("=> fine-tune tu '{:s}' (ckpt goc o epoch {:d})".format(
+            args.pretrain, checkpoint['epoch']))
+        del checkpoint
+
     # resume from a checkpoint?
     if args.resume:
         if os.path.isfile(args.resume):
@@ -291,6 +307,9 @@ if __name__ == '__main__':
                         help='name of exp folder (default: none)')
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='path to a checkpoint (default: none)')
+    parser.add_argument('--pretrain', default='', type=str, metavar='PATH',
+                        help='fine-tune tu checkpoint: chi nap trong so model, '
+                             'reset epoch va tao optimizer/scheduler moi')
     parser.add_argument('--tasks', default='1', type=str,
                         help='task id list')  
     parser.add_argument('--num_train_epochs', default=40, type=int,
