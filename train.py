@@ -103,6 +103,13 @@ def main(args):
             task_cfg[task_id]['epochs'] * num_iter
             / args.num_train_epochs
             )
+        if task_ave_iter[task_id] < 1:
+            raise ValueError(
+                "{}: so buoc moi epoch = 0. Config co epochs={} nhung "
+                "--num_train_epochs={}, va dataloader chi co {} batch. "
+                "Dat 'epochs' trong config bang --num_train_epochs.".format(
+                    task_id, task_cfg[task_id]['epochs'],
+                    args.num_train_epochs, num_iter))
         task_stop_controller[task_id] = utils.MultiTaskStopOnPlateau(
             mode='max',
             patience=1,

@@ -1,6 +1,9 @@
 # Smoke test: fine-tune UniAV tren YouCook2 (TAL), chi chay TASK1.
 # TASK2/TASK3 phai giu lai vi libs/core/config.py:126-128 liet ke cung ca ba khe,
 # nhung chung khong duoc nap khi chay --tasks 1.
+# QUAN TRONG: 'epochs' cua moi task PHAI bang --num_train_epochs.
+# task_ave_iter = int(epochs * len(dataloader) / num_train_epochs) (train.py:102).
+# Lech nhau -> ra 0 -> moi epoch chay 0 buoc, khong bao loi.
 TASK1:
   task_type: TAL
   dataset_name: anet            # dung lai libs/datasets/anet.py, dung dinh dang anet
@@ -34,7 +37,7 @@ TASK1:
   }
   batch_size: 16                  # nho cho vua 12GB VRAM va chay nhanh
   learning_rate: 0.0001          # thap hon goc 10 lan vi dang fine-tune
-  epochs: 2
+  epochs: 40
 
 TASK2:
   task_type: AVEL
@@ -59,7 +62,7 @@ TASK2:
   test_cfg: { multiclass_nms: True, ext_score_file: , nms_sigma: 0.4 }
   batch_size: 4
   learning_rate: 0.0001
-  epochs: 2
+  epochs: 40
 
 TASK3:
   task_type: SED
@@ -84,4 +87,4 @@ TASK3:
   test_cfg: { multiclass_nms: True, ext_score_file: , nms_sigma: 0.4 }
   batch_size: 4
   learning_rate: 0.0001
-  epochs: 2
+  epochs: 40
