@@ -274,9 +274,21 @@ def eval_only(a, cfg, model, dlv, dev, pool_raw, pool_text):
                   + '  '.join('%s %.3f' % (k, v) for k, v in m.items()), flush=True)
 
 
+def apply_overrides(cfg, items):
+    """--set a.b.c=giá_trị: ghi đè config, giá trị đọc theo cú pháp YAML (số, true, list...)."""
+    for it in items:
+        key, val = it.split('=', 1)
+        node, parts = cfg, key.split('.')
+        for k in parts[:-1]:
+            node = node.setdefault(k, {})
+        node[parts[-1]] = yaml.safe_load(val)
+        print('Override     : %s = %r' % (key, node[parts[-1]]), flush=True)
+
+
 def main(a):
     with open(a.config) as f:
         cfg = yaml.safe_load(f)
+    apply_overrides(cfg, a.set)
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     rng = fix_random_seed(cfg.get('init_rand_seed', 1234567891), include_cuda=True)
     out_dir = os.path.join(cfg['output_folder'], a.output)
@@ -348,4 +360,6 @@ if __name__ == '__main__':
     p.add_argument('--iou-power', default='0.5',
                    help='trọng số điểm IoU khi xếp hạng đoạn, 0 là chỉ dùng điểm sự kiện')
     p.add_argument('--fast', action='store_true', help='--eval: bỏ các biến thể chậm')
+    p.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
+                   help='ghi đè config, ví dụ --set init_rand_seed=2 model.train_cfg.loss_weight_omni_av=0.5')
     main(p.parse_args())
