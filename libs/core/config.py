@@ -14,7 +14,7 @@ DEFAULTS = {
         # downsampling rate of features, 1 to use original resolution
         "downsample_rate": 1,
         # set to a tuple (e.g., (0.9, 1.0)) to enable random feature cropping
-        "crop_ratio": [0.9, 1.0],
+        "crop_ratio": [0.7, 1.0],
         "file_prefix": "",
         "file_ext": ".npy",
         "force_upsampling": True,
@@ -61,7 +61,7 @@ DEFAULTS = {
         # dropout ratios for tranformers
         "dropout": 0.0,
         # ratio for drop path
-        "droppath": 0.1,
+        "droppath": 0.2,
         # if to use label smoothing (>0.0)
         "label_smoothing": 0.0,
         "evaluate": True, 
