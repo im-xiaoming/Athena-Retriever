@@ -25,13 +25,14 @@ def build_caption_pool(caption_emb, annotations, out):
             continue
         seen.add(text); texts.append(text); embs.append(emb)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    np.savez_compressed(out, texts=np.array(texts, dtype=object), emb=np.stack(embs).astype(np.float16))
+    # plain unicode array, no pickle: readable by any numpy version (1.x and 2.x)
+    np.savez_compressed(out, texts=np.array(texts, dtype=str), emb=np.stack(embs).astype(np.float16))
     return len(texts)
 
 
 class Captioner:
     def __init__(self, pool_path, model, device):
-        z = np.load(pool_path, allow_pickle=True)
+        z = np.load(pool_path)
         self.texts = [str(t) for t in z['texts']]
         raw = torch.from_numpy(z['emb'].astype(np.float32)).to(device)
         with torch.no_grad():
