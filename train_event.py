@@ -89,26 +89,27 @@ def mbr_pick(s, pool_n, scale, k=20):
 
 
 def meteor(gts, hyp, timeout=300):
-    """METEOR via pycocoevalcap (java), in a daemon thread with a time limit.
+    """METEOR via pycocoevalcap (java), in a separate Python process with a time limit.
 
-    On Colab the java helper can die mid-way and leave the call blocked forever, so
-    a failure or timeout returns None instead of hanging the whole evaluation.
+    On Colab the java helper can die mid-call while pycocoevalcap holds its lock;
+    the object's __del__ then waits on that lock forever. Isolating it in a child
+    process means a failure or hang only costs this metric, never the evaluation.
     """
-    import threading
-    res = {}
-
-    def run():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, 'in.json')
+        with open(src, 'w') as f:
+            json.dump({'gts': {str(k): v for k, v in gts.items()}, 'hyp': {str(k): v for k, v in hyp.items()}}, f)
+        code = ('import json,sys; from pycocoevalcap.meteor.meteor import Meteor; '
+                'd=json.load(open(sys.argv[1])); print(Meteor().compute_score(d["gts"], d["hyp"])[0]*100, flush=True)')
         try:
-            from pycocoevalcap.meteor.meteor import Meteor
-            res['v'] = Meteor().compute_score(gts, hyp)[0] * 100
-        except Exception as e:
-            res['err'] = e
-
-    t = threading.Thread(target=run, daemon=True)
-    t.start(); t.join(timeout)
-    if 'v' not in res:
-        print('METEOR skipped: %s' % res.get('err', 'timed out after %ds' % timeout), flush=True)
-    return res.get('v')
+            r = subprocess.run([sys.executable, '-c', code, src], capture_output=True, text=True, timeout=timeout)
+            return float(r.stdout.strip().splitlines()[-1])
+        except subprocess.TimeoutExpired:
+            print('METEOR skipped: timed out after %ds' % timeout, flush=True)
+        except (ValueError, IndexError):
+            print('METEOR skipped: %s' % (r.stderr.strip().splitlines() or ['no output'])[-1][:200], flush=True)
+    return None
 
 
 @torch.no_grad()
