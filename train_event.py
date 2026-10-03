@@ -88,7 +88,7 @@ def mbr_pick(s, pool_n, scale, k=20):
     return int(top.indices[0]), int(top.indices[agree.argmax()])
 
 
-def meteor(gts, hyp, timeout=300):
+def meteor(gts, hyp, timeout=60):
     """METEOR via pycocoevalcap (java), in a separate Python process with a time limit.
 
     On Colab the java helper can die mid-call while pycocoevalcap holds its lock;
