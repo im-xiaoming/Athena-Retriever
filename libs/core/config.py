@@ -8,7 +8,7 @@ DEFAULTS = {
     "model_name": "LocPointTransformer",
     "multi_modal": True,  
     "output_folder": "./ckpt", ##file path to save checkpoint
-    "train_iter_gap": 4, 
+    "train_iter_gap": 1,   # 1 = tat co che bop iteration khi plateau (chi co y nghia khi da nhiem)
     "num_workers": 2,
     "dataset": {
         # downsampling rate of features, 1 to use original resolution
