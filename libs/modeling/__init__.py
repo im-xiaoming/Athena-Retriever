@@ -4,7 +4,8 @@ from .models import (make_multimodal_backbone,
                      make_multimodal_meta_arch,
                      )
 from . import multimodal_backbones
-from . import multimodal_archs_multi_task 
+from . import multimodal_archs_multi_task
+from . import event_archs 
 
 __all__ = ['MaskedConv1D', 'MaskedMHCA', 'LayerNorm'
            'TransformerBlock', 'Scale', 'AffineDropPath',
