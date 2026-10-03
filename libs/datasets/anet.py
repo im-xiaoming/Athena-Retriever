@@ -66,7 +66,7 @@ class ActivityNetDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.trunc_thresh = trunc_thresh
         self.num_classes = num_classes
-        self.label_dict = None
+        self.label_dict = None # for store label_id in anntations file ex "Cat": 6
         self.crop_ratio = crop_ratio
 
         # load database and select the subset
@@ -110,7 +110,7 @@ class ActivityNetDataset(Dataset):
     def get_attributes(self):
         return self.db_attributes
 
-    def _load_json_db(self, json_file):
+    def _load_json_db(self, json_file): # json file is annotation file
         # load database and select the subset
         with open(json_file, 'r') as fid:
             json_data = json.load(fid)
@@ -146,6 +146,8 @@ class ActivityNetDataset(Dataset):
             duration = value['duration']
 
             # get annotations if available
+            segments = None
+            labels = None
             if ('annotations' in value) and (len(value['annotations']) > 0):
                 valid_acts = remove_duplicate_annotations(value['annotations'])
                 num_acts = len(valid_acts)
@@ -154,13 +156,17 @@ class ActivityNetDataset(Dataset):
                 for idx, act in enumerate(valid_acts):
                     segments[idx][0] = act['segment'][0]
                     segments[idx][1] = act['segment'][1]
+                    """
+                    segments: np.array[
+                        [2, 3],
+                        [3, 5]
+                    ], dtype=float32
+                    """
                     if self.num_classes == 1:
                         labels[idx] = 0
                     else:
                         labels[idx] = label_dict[act['label']]
-            else:
-                segments = None
-                labels = None
+ 
             dict_db += ({'id': key,
                          'fps' : fps,
                          'duration' : duration,
@@ -217,7 +223,7 @@ class ActivityNetDataset(Dataset):
         elif self.feat_stride > 0 and self.force_upsampling:
             feat_stride = float(
                 (feats_visual.shape[0] - 1) * self.feat_stride + self.num_frames
-            ) / self.max_seq_len
+            ) / self.max_seq_len 
             # center the features
             num_frames = feat_stride
         # case 3: fixed length features for input
@@ -252,7 +258,7 @@ class ActivityNetDataset(Dataset):
                     align_corners=False
                 )
                 feats_visual = resize_feats_visual.squeeze(0)
-                feats_audio = resize_feats_audio.squeeze(0)
+                feats_audio = resize_feats_audio.squeeze(0) # (C, T)
                 feats = {'visual': feats_visual, 'audio': feats_audio}
         else:
             # T x C -> C x T
@@ -308,7 +314,7 @@ class ActivityNetDataset(Dataset):
         data_dict = {'video_id'        : video_item['id'],
                      'feats'           : feats,      # C x T
                      'segments'        : segments,   # N x 2
-                     'labels'          : labels,     # N
+                     'labels'          : labels,     # N x 1
                      'fps'             : video_item['fps'],
                      'duration'        : video_item['duration'],
                      'feat_stride'     : feat_stride,
@@ -316,6 +322,7 @@ class ActivityNetDataset(Dataset):
 
         # no truncation is needed
         # truncate the features during training
+        # data agumentation
         if self.is_training and (segments is not None):
             data_dict = truncate_feats(
                 data_dict, self.max_seq_len, self.trunc_thresh, feat_offset, 

@@ -48,7 +48,7 @@ class MaskedConv1D(nn.Module):
         # input length must be divisible by stride
         assert T % self.stride == 0
         # conv
-        out_conv = self.conv(x)
+        out_conv = self.conv(x) # B, C, T_out 
         # compute the mask
         if self.stride > 1:
             # downsample the mask using nearest neighbor
@@ -165,7 +165,9 @@ class MaskedMHCA(nn.Module):
 
         # query conv (depthwise)
         kernel_size = self.n_qx_stride + 1 if self.n_qx_stride > 1 else 3
-        stride, padding = self.n_kv_stride, kernel_size // 2
+        # stride, padding = self.n_kv_stride, kernel_size // 2
+        stride, padding = self.n_qx_stride, kernel_size // 2 # original code set stride = self.n_kv_stride
+        
         # 1d depthwise conv
         self.query_conv = MaskedConv1D(
             self.n_embd, self.n_embd, kernel_size,
@@ -225,7 +227,9 @@ class MaskedMHCA(nn.Module):
 
         # move head forward to be the batch dim
         # (B, nh * hs, T'/T'') -> (B, nh, T'/T'', hs)
-        k = k.view(B, self.n_head, self.n_channels, -1).transpose(2, 3)
+        # nh = number of heads
+        # hs = head size
+        k = k.view(B, self.n_head, self.n_channels, -1).transpose(2, 3) # (B, H, T_new, C)
         q = q.view(B, self.n_head, self.n_channels, -1).transpose(2, 3)
         v = v.view(B, self.n_head, self.n_channels, -1).transpose(2, 3)
 
@@ -245,10 +249,10 @@ class MaskedMHCA(nn.Module):
         # (B, nh, T', T'') x (B, nh, T'', hs) -> (B, nh, T', hs)
         out = att @ (v * kv_mask[:, :, :, None].to(v.dtype))
         # re-assemble all head outputs side by side
-        out = out.transpose(2, 3).contiguous().view(B, C, -1)
+        out = out.transpose(2, 3).contiguous().view(B, self.n_embd, -1) # (B, C_new, T_new)
 
-        # output projection + skip connection
-        out = self.proj_drop(self.proj(out)) * qx_mask.to(out.dtype)
+        # output projection
+        out = self.proj_drop(self.proj(out)) * qx_mask.to(out.dtype) # (B, C_new, T_new)
 
         return out, qx_mask
 
@@ -292,7 +296,7 @@ class TransformerBlock(nn.Module):
             self.pool_skip = nn.MaxPool1d(
                 kernel_size, stride=stride, padding=padding)
         else:
-            self.pool_skip = nn.Identity()
+            self.pool_skip = nn.Identity() # do nothing layer
 
         # two layer mlp
         if n_hidden is None:
@@ -329,8 +333,8 @@ class TransformerBlock(nn.Module):
 
         # drop path
         if path_pdrop > 0.0:
-            self.drop_path_attn = AffineDropPath(n_embd, drop_prob = path_pdrop)
-            self.drop_path_mlp = AffineDropPath(n_out, drop_prob = path_pdrop)
+            self.drop_path_attn = AffineDropPath(n_embd, drop_prob=path_pdrop)
+            self.drop_path_mlp = AffineDropPath(n_out, drop_prob=path_pdrop)
         else:
             self.drop_path_attn = nn.Identity()
             self.drop_path_mlp = nn.Identity()
@@ -339,9 +343,9 @@ class TransformerBlock(nn.Module):
         # pre-LN transformer: https://arxiv.org/pdf/2002.04745.pdf
         out, out_mask = self.attn(self.ln11(x1), self.ln12(x2), mask) 
         out_mask_float = out_mask.to(out.dtype)
-        out = self.pool_skip(x1) * out_mask_float + self.drop_path_attn(out) 
+        out = self.pool_skip(x1) * out_mask_float + self.drop_path_attn(out) # x1: K, V
         
-        # FFN 
+        # FFN & skip connection
         if task_type == 'TAL':
             out = out + self.drop_path_mlp(self.mlp_TAL(self.ln2_TAL(out)) * out_mask_float)
         elif task_type == 'AVEL':
@@ -353,7 +357,7 @@ class TransformerBlock(nn.Module):
         if pos_embd is not None:
             out += pos_embd * out_mask_float
         
-        return out, out_mask 
+        return out, out_mask
 
 # drop path: from https://github.com/facebookresearch/SlowFast/blob/master/slowfast/models/common.py
 class Scale(nn.Module):

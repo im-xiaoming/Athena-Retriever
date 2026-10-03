@@ -29,7 +29,7 @@ def LoadDatasetsTrain(args, cfg, task_cfg, ids, generator):
         if args.local_rank != -1:
             batch_size = int(batch_size / dist.get_world_size())
             num_workers = int(num_workers / dist.get_world_size())
-        task_datasets_train[task] =None
+        task_datasets_train[task] = None
         task_datasets_train[task] = make_dataset(
                         task_cfg[task]['dataset_name'], 
                         True, 

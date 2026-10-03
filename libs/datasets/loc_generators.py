@@ -43,7 +43,7 @@ class PointGenerator(nn.Module):
         super().__init__()
         # sanity check, # fpn levels and length divisible
         assert len(regression_range) == fpn_levels
-        max_seq_len = max_seq_len_ori * max_buffer_len_factor 
+        max_seq_len = max_seq_len_ori * max_buffer_len_factor # 256
         assert max_seq_len % scale_factor**(fpn_levels - 1) == 0
 
         # save params
@@ -73,7 +73,7 @@ class PointGenerator(nn.Module):
             # pad the time stamp with additional regression range / stride
             reg_range = reg_range[None].repeat(points.shape[0], 1)
             fpn_stride = fpn_stride[None].repeat(points.shape[0], 1)
-            # size: T x 4 (ts, reg_range, stride)
+            # size: T_l x 4 (ts, reg_range, stride)
             points_list.append(torch.cat((points, reg_range, fpn_stride), dim=1))
 
         return BufferList(points_list)

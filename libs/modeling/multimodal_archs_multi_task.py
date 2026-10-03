@@ -65,14 +65,14 @@ class PtTransformerClsHead(nn.Module):
                             feat_dim, feat_dim, 
                             kernel_size, stride=1,
                             padding=kernel_size//2)
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07)) # scaler
 
     def forward(self, fpn_feats, fpn_masks, clip_class_feature, task_id):
         assert len(fpn_feats) == len(fpn_masks)
         # apply the classifier for each pyramid level
         out_logits = tuple()
         clip_class_feature = clip_class_feature[task_id].type(fpn_feats[0].dtype)
-        clip_class_feature = self.clip_proj(clip_class_feature)
+        clip_class_feature = self.clip_proj(clip_class_feature) # 1536 -> 512
         clip_class_feature = F.normalize(clip_class_feature, dim=1) 
         logit_scale = self.logit_scale.exp()
 
@@ -84,7 +84,7 @@ class PtTransformerClsHead(nn.Module):
             #clip  
             cur_out, _ = self.vis_proj(cur_out, cur_mask)
             cur_out = F.normalize(cur_out, dim=1)   
-            cur_logits = logit_scale * cur_out.permute(0, 2, 1) @ clip_class_feature.t()
+            cur_logits = logit_scale * cur_out.permute(0, 2, 1) @ clip_class_feature.t() # cosine
             cur_logits = cur_logits * cur_mask.permute(0, 2, 1).type(cur_out.dtype)
             out_logits += (cur_logits, )
 
@@ -201,7 +201,7 @@ class PtTransformer(nn.Module):
         task_cfg,              # task-specific cfg
     ):
         super().__init__()
-        self.fpn_strides = [scale_factor**i for i in range(backbone_arch[-1]+1)]
+        self.fpn_strides = [scale_factor**i for i in range(backbone_arch[-1]+1)] # [1, 2, 4, 8, 16, 32]
         self.reg_range = regression_range
         assert len(self.fpn_strides) == len(self.reg_range)
         self.scale_factor = scale_factor
@@ -215,7 +215,7 @@ class PtTransformer(nn.Module):
 
         class_list = {}
         clip_class_feature = {}
-        max_div_factor = 1
+        max_div_factor = 1 # variable to find maximum temporal division
         for task in task_cfg.keys():  
             max_seq_len[task] = task_cfg[task]['dataset']['max_seq_len']
             for l, stride in enumerate(self.fpn_strides):
@@ -225,13 +225,13 @@ class PtTransformer(nn.Module):
         self.max_div_factor = max_div_factor
         self.max_seq_len = max_seq_len 
         for task in task_cfg.keys(): 
-            class_aware[task] = task_cfg[task]['dataset']['class_aware']
+            class_aware[task] = task_cfg[task]['dataset']['class_aware'] # True to sovle overlaped event
             num_classes[task] = task_cfg[task]['dataset']['num_classes']
             train_loss_weight[task] = task_cfg[task]['train_cfg']['loss_weight']
             train_label_smoothing[task] = task_cfg[task]['train_cfg']['label_smoothing']
             loss_normalizer[task] = task_cfg[task]['train_cfg']['init_loss_norm']
             # class_list[task] = task_cfg[task]['class_list'] 
-            clip_class_feature[task] = task_cfg[task]['clip_class_feature']
+            clip_class_feature[task] = task_cfg[task]['clip_class_feature'] # npy matrix for category embedding
 
         self.class_aware = class_aware 
         self.num_classes = num_classes
@@ -251,7 +251,7 @@ class PtTransformer(nn.Module):
         self.test_pre_nms_topk = test_cfg['pre_nms_topk']
         self.test_iou_threshold = test_cfg['iou_threshold']
         self.test_min_score = test_cfg['min_score']
-        self.test_max_seg_num = test_cfg['max_seg_num']
+        self.test_max_seg_num = test_cfg['max_seg_num'] # maximum segment/action processing for 1 video
         self.test_nms_method = test_cfg['nms_method']
         assert self.test_nms_method in ['soft', 'hard', 'none']
         self.test_duration_thresh = test_cfg['duration_thresh']
@@ -340,10 +340,10 @@ class PtTransformer(nn.Module):
         # return loss during training
         if self.training:
             # generate segment/lable List[N x 2] / List[N] with length = B
-            assert video_list[0]['segments'] is not None, "GT action labels does not exist"
-            assert video_list[0]['labels'] is not None, "GT action labels does not exist"
+            assert video_list[0]['segments'] is not None, "GT (ground-truth) action labels does not exist"
+            assert video_list[0]['labels'] is not None, "GT (ground-truth) action labels does not exist"
             gt_offsets = [x['gt_offsets'] for x in video_list]
-            gt_cls_labels = [x['gt_cls_labels'] for x in video_list]
+            gt_cls_labels = [x['gt_cls_labels'] for x in video_list] # x[gt_cls_labels] is one hot B (list) [F T, K]
 
             # compute the loss and return
             losses = self.losses(
@@ -367,7 +367,7 @@ class PtTransformer(nn.Module):
         """
         feats_visual = [x['feats']['visual'] for x in video_list]
         feats_audio = [x['feats']['audio'] for x in video_list]
-        feats_lens = torch.as_tensor([feat_visual.shape[-1] for feat_visual in feats_visual])
+        feats_lens = torch.as_tensor([feat_visual.shape[-1] for feat_visual in feats_visual]) # (1536, T)
         max_len = feats_lens.max(0).values.item() 
 
         if self.training:
@@ -395,14 +395,14 @@ class PtTransformer(nn.Module):
             pad_feat_audio[..., :feat_audio.shape[-1]].copy_(feat_audio) 
    
         # generate the mask 
-        batched_masks = torch.arange(max_len)[None, :] < feats_lens[:, None]
+        batched_masks = torch.arange(max_len)[None, :] < feats_lens[:, None] # None to add new dimension, (B, T)
         # push to device
         batched_inputs_visual = batched_inputs_visual.to(self.device)
         batched_inputs_audio = batched_inputs_audio.to(self.device)
         
-        batched_masks = batched_masks.unsqueeze(1).to(self.device)
+        batched_masks = batched_masks.unsqueeze(1).to(self.device) # (B, 1, T)
 
-        return batched_inputs_visual, batched_inputs_audio, batched_masks
+        return batched_inputs_visual, batched_inputs_audio, batched_masks  # B, 1536, T
 
     def losses(
         self, fpn_masks,
@@ -411,11 +411,11 @@ class PtTransformer(nn.Module):
     ):
         # fpn_masks, out_*: F (List) [B, T_i, C]
         # gt_* : B (list) [F T, C]
-        # fpn_masks -> (B, FT)
+        # fpn_masks -> (B, F T)
         valid_mask = torch.cat(fpn_masks, dim=1)
 
         # 1. classification loss
-        # stack the list -> (B, FT) -> (# Valid, )
+        # stack the list -> (B, FT, K) -> (B, FT)
         gt_cls = torch.stack(gt_cls_labels)
         pos_mask = torch.logical_and((gt_cls.sum(-1) > 0), valid_mask)
         
@@ -432,7 +432,7 @@ class PtTransformer(nn.Module):
         # gt_cls is already one hot encoded now, simply masking out
         gt_target = gt_cls[valid_mask]
 
-        # optinal label smoothing
+        # optional label smoothing
         gt_target *= 1 - self.train_label_smoothing[task_id]
         gt_target += self.train_label_smoothing[task_id] / (self.num_classes[task_id] + 1)
 

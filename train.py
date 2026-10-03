@@ -261,13 +261,22 @@ def main(args):
                     for task_id in task_ids:
                         if avg_mAP[task_id] > best_mAP[task_id]:
                             best_mAP[task_id] = avg_mAP[task_id]
-                            save_states = {
+                            best_states = {
                                 'epoch': epoch,
                                 'state_dict': model.state_dict(),
-                                'scheduler': scheduler.state_dict(),
-                                'optimizer': optimizer.state_dict(),
+                                'state_dict_ema': model_ema.module.state_dict(),
                             }
-                        save_states['state_dict_ema'] = model_ema.module.state_dict()
+                            # goc: dung save_states roi bo di, khong bao gio ghi ra dia
+                            save_checkpoint(
+                                best_states,
+                                task_cfg[task_id]['dataset_name'],
+                                True,
+                                file_folder=ckpt_folder,
+                            )
+                            logger.info(
+                                "[Best] {} epoch {:d}: mAP {:.2f}% -> luu {}_model_best.pth.tar".format(
+                                    task_id, epoch, avg_mAP[task_id] * 100,
+                                    task_cfg[task_id]['dataset_name']))
                 
         if default_gpu:
             # save ckpt once in a while

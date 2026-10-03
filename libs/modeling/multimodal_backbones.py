@@ -180,7 +180,7 @@ class ConvTransformerBackbone(nn.Module):
             x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A, task_type)
 
         x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A, mask_V, task_type) 
-        x_Av, mask_V = self.ori_cross_att_Av(x_A, x_V, mask_A, task_type) 
+        x_Av, mask_A = self.ori_cross_att_Av(x_A, x_V, mask_A, task_type) 
 
         # prep for outputs
         out_feats_V = tuple()

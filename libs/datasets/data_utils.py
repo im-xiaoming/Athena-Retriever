@@ -156,25 +156,26 @@ def label_points_single_video(concat_points,
 
         # compute the lengths of all segments -> F T x N
         lens = gt_segment[:, 1] - gt_segment[:, 0]
-        lens = lens[None, :].repeat(num_pts, 1)
+        lens = lens[None, :].repeat(num_pts, 1) # (P, N)
 
         # compute the distance of every point to each segment boundary
         # auto broadcasting for all reg target-> F T x N x2
-        gt_segs = gt_segment[None].expand(num_pts, num_gts, 2)
-        left = concat_points[:, 0, None] - gt_segs[:, :, 0] 
+        gt_segs = gt_segment[None].expand(num_pts, num_gts, 2) # (P, N, 2)
+        left = concat_points[:, 0, None] - gt_segs[:, :, 0] # (P, 1) - (P, N) = (P, N)
         right = gt_segs[:, :, 1] - concat_points[:, 0, None]
-        reg_targets = torch.stack((left, right), dim=-1)
+        reg_targets = torch.stack((left, right), dim=-1) # (P, N, 2)
 
         # inside an gt action
-        inside_gt_seg_mask = reg_targets.min(-1)[0] > 0 
+        inside_gt_seg_mask = reg_targets.min(-1)[0] > 0 # (P, N)
 
         # limit the regression range for each location
         max_regress_distance = reg_targets.max(-1)[0]
         # F T x N
         inside_regress_range = torch.logical_and(
+            # (P, N) >= (P, 1)
             (max_regress_distance >= concat_points[:, 1, None]),
             (max_regress_distance <= concat_points[:, 2, None])
-        )
+        ) # (P, N)
 
         lens.masked_fill_(inside_gt_seg_mask==0, float('inf')) 
         lens.masked_fill_(inside_regress_range==0, float('inf'))
@@ -186,17 +187,18 @@ def label_points_single_video(concat_points,
             # if there are still more than one actions for one moment
             # pick the one with the shortest duration (easiest to regress)
             # F T x N -> F T
-            min_len, min_len_inds = lens.min(dim=1)
+            min_len, min_len_inds = lens.min(dim=1) # (P,), (P,)
             # corner case: multiple actions with very similar durations 
             min_len_mask = torch.logical_and(
+                # (P, N) <= (P, 1) + 1e-3 and (P, N) < inf
                 (lens <= (min_len[:, None] + 1e-3)), (lens < float('inf'))
-            ).to(reg_targets.dtype) 
+            ).to(reg_targets.dtype) # (P, N)
 
         # cls_targets: F T x C; reg_targets F T x 2
         gt_label_one_hot = F.one_hot(
             gt_label, num_classes
         ).to(reg_targets.dtype)
-        cls_targets = min_len_mask @ gt_label_one_hot
+        cls_targets = min_len_mask @ gt_label_one_hot # (P, N) @ (N, C) = (P, C)
         # to prevent multiple GT actions with the same label and boundaries
         cls_targets.clamp_(min=0.0, max=1.0)
         
@@ -208,8 +210,8 @@ def label_points_single_video(concat_points,
             new_reg_targets /= concat_points[:, 3, None, None]
         else:        
             # OK to use min_len_inds
-            new_reg_targets = reg_targets[range(num_pts), min_len_inds] 
+            new_reg_targets = reg_targets[range(num_pts), min_len_inds] # (P, 2)
             # normalization based on stride
             new_reg_targets /= concat_points[:, 3, None]
 
-        return cls_targets, new_reg_targets
+        return cls_targets, new_reg_targets # (P, C), (P, 2)
