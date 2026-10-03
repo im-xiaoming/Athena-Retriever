@@ -43,6 +43,19 @@ def stub_flash_attn():
     sys.modules[m.__name__] = m
 
 
+def _sdpa_attn(self, x):
+    """Drop-in for InternVideo2's Attention._naive_attn using F.scaled_dot_product_attention.
+    Default SDPA scale is 1/sqrt(head_dim), identical to self.scale."""
+    B, N, C = x.shape
+    q, k, v = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4).unbind(0)
+    if self.qk_normalization:
+        B_, H_, N_, D_ = q.shape
+        q = self.q_norm(q.transpose(1, 2).flatten(-2, -1)).view(B_, N_, H_, D_).transpose(1, 2)
+        k = self.k_norm(k.transpose(1, 2).flatten(-2, -1)).view(B_, N_, H_, D_).transpose(1, 2)
+    x = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(B, N, C)
+    return self.proj_drop(self.proj(x))
+
+
 def register_packages(repo):
     """Register InternVideo2's packages as empty namespaces so importing one backbone file
     does not run the package __init__ files, which import every model (and flash_attn)."""
@@ -74,7 +87,9 @@ class EasyDict(dict):
 def build_video_model(repo, ckpt, device):
     register_packages(repo)
     stub_flash_attn()
+    from models.backbones.internvideo2 import internvideo2 as iv2
     from models.backbones.internvideo2.internvideo2 import pretrain_internvideo2_1b_patch14_224
+    iv2.Attention._naive_attn = _sdpa_attn   # same maths, PyTorch's fused attention kernel
     cfg = EasyDict(vision_encoder=EasyDict(
         clip_embed_dim=768, use_flash_attn=False, use_fused_rmsnorm=False, use_fused_mlp=False,
         num_frames=4, tubelet_size=1, sep_image_video_pos_embed=True, use_checkpoint=False,
