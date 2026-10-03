@@ -44,6 +44,8 @@ dataset:
   file_ext: .npy
   force_upsampling: true
   multi_modal: true
+  # thay OmniRetriever-7B, sinh bang tools/omni_youcook2.py. Bo comment de bat
+  # omni_emb_file: ./data/youcookii/omni_emb.npz
 model:
   backbone_type: convTransformer
   backbone_arch:
@@ -80,15 +82,17 @@ model:
   clip_dim: 1536
   train_cfg:
     loss_weight_reg: 1.0
-    loss_weight_emb: 1.0
+    loss_weight_emb: 0.2
     cls_prior_prob: 0.01
     init_loss_norm: 400
+    loss_weight_span: 0.2
     dropout: 0.0
     droppath: 0.1
   test_cfg:
     score_thresh: 0.05
     duration_thresh: 0.05
     max_seg_num: 100
+    iou_power: 0.3
 train_cfg:
   clip_grad_l2norm: 1.0
 opt:
@@ -97,7 +101,7 @@ opt:
   weight_decay: 0.0001
   learning_rate: 0.0001
   clip_proj_lr: 0.001
-  epochs: 40
+  epochs: 10
   warmup: true
   warmup_epochs: 2
   schedule_type: cosine

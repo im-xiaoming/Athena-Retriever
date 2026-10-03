@@ -27,7 +27,7 @@ class YouCook2CaptionDataset(Dataset):
         feat_stride, num_frames, default_fps, downsample_rate, max_seq_len,
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch,
         class_aware, trunc_thresh, crop_ratio, num_classes, file_prefix,
-        file_ext, force_upsampling, multi_modal,
+        file_ext, force_upsampling, multi_modal, omni_emb_file=None,
     ):
         assert os.path.exists(feat_folder) and os.path.exists(json_file)
         assert os.path.exists(caption_emb_file)
@@ -56,6 +56,10 @@ class YouCook2CaptionDataset(Dataset):
         self.emb_dim = z['emb'].shape[1]
 
         self.data_list = self._load_json_db(json_file)
+        self._build_pool()
+        self.omni = bool(omni_emb_file) and is_training   # chi tap train can thay
+        if self.omni:
+            self._load_omni(omni_emb_file)
         self.db_attributes = {
             'dataset_name': 'YouCook2 caption grounding',
             'tiou_thresholds': np.array([0.3, 0.5, 0.7]),
@@ -76,6 +80,51 @@ class YouCook2CaptionDataset(Dataset):
             'regression_range': self.reg_range,
             'max_div_factor': self.max_div_factor,
         })
+
+    def _build_pool(self):
+        """Kho caption duy nhất của split này. Caption trùng chữ dùng chung một chỉ số.
+
+        Chỉ kho của tập train được dùng: làm mẫu âm khi huấn luyện và làm kho để
+        lấy câu mô tả khi suy luận.
+        """
+        self.pool_text, self.pool_index, emb = [], {}, []
+        self.cap_pool_idx = {}
+        for it in self.data_list:
+            for i in range(it['n_cap']):
+                k = '%s#%d' % (it['id'], i); t = str(self.cap_text[k])
+                if t not in self.pool_index:
+                    self.pool_index[t] = len(self.pool_text)
+                    self.pool_text.append(t); emb.append(self.cap_emb[k])
+                self.cap_pool_idx[k] = self.pool_index[t]
+        self.pool_emb = np.stack(emb).astype(np.float32)
+
+    def _load_omni(self, path):
+        """Vector OmniRetriever-7B của từng clip sự kiện, khoá "<video>#<i>__av" và "__text".
+
+        Sinh ra hai kho thẳng hàng với kho caption:
+          omni_text_pool (N, 3584) : vector caption, cùng thứ tự với pool_text
+          omni_av_pool   (K, 3584) : vector audio+video của từng clip GT, dùng làm thầy
+        Clip nào trích lỗi thì đánh dấu không hợp lệ và bị loại khỏi loss.
+        """
+        z = np.load(path)
+        have = set(z.files)
+        self.omni_dim = z[z.files[0]].shape[0]
+        txt = np.zeros((len(self.pool_text), self.omni_dim), dtype=np.float16)
+        self.omni_text_ok = np.zeros(len(self.pool_text), dtype=bool)
+        av, self.cap_av_idx = [], {}
+        for it in self.data_list:
+            for i in range(it['n_cap']):
+                k = '%s#%d' % (it['id'], i)
+                j = self.cap_pool_idx[k]
+                if not self.omni_text_ok[j] and k + '__text' in have:
+                    txt[j] = z[k + '__text']; self.omni_text_ok[j] = True
+                if k + '__av' in have:
+                    self.cap_av_idx[k] = len(av); av.append(z[k + '__av'])
+        self.omni_text_pool = txt
+        self.omni_av_pool = (np.stack(av) if av else
+                             np.zeros((0, self.omni_dim), dtype=np.float16))
+        print('Omni teacher : %d/%d caption vectors, %d clip vectors from %s' % (
+            self.omni_text_ok.sum(), len(self.pool_text), len(av), path), flush=True)
 
     def get_attributes(self):
         return self.db_attributes
@@ -164,11 +213,19 @@ class YouCook2CaptionDataset(Dataset):
         emb = np.zeros((NMAX, self.emb_dim), dtype=np.float32)
         cmask = np.zeros((NMAX,), dtype=bool)
         texts = [''] * NMAX
+        pidx = np.full((NMAX,), -1, dtype=np.int64)
         for i in range(item['n_cap']):
             k = '%s#%d' % (vid, i)
             emb[i] = self.cap_emb[k]; cmask[i] = True; texts[i] = str(self.cap_text[k])
+            pidx[i] = self.cap_pool_idx[k]
         data_dict['cap_emb'] = torch.from_numpy(emb)
         data_dict['cap_mask'] = torch.from_numpy(cmask)
+        data_dict['cap_pool_idx'] = torch.from_numpy(pidx)
+        if self.omni:
+            aidx = np.full((NMAX,), -1, dtype=np.int64)
+            for i in range(item['n_cap']):
+                aidx[i] = self.cap_av_idx.get('%s#%d' % (vid, i), -1)
+            data_dict['cap_av_idx'] = torch.from_numpy(aidx)
         data_dict['cap_text'] = texts
         # bien goc tinh bang giay, chi dung de cham diem
         data_dict['segments_sec'] = item['segments'].tolist()

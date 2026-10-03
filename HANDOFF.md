@@ -168,24 +168,25 @@ chạy một task thì nó chỉ làm chậm học.
 
 ## 7. Công cụ sinh nhúng caption
 
-`ONEPEACE_embed_text/` chứa bản viết lại text encoder của ONE-PEACE bằng PyTorch
-thuần, **không cần fairseq**, và checkpoint rút gọn chỉ nhánh text 6 GB thay vì 15 GB.
+`ONEPEACE_extract_embd_code/onepeace_text.py` là bản viết lại text encoder của ONE-PEACE
+bằng PyTorch thuần, **không cần fairseq**. Checkpoint rút gọn chỉ nhánh text nằm ở
+`ONEPEACE_extract_embd_code/models/one-peace-text.pt`, 6 GB thay vì 15 GB.
 
 Đã kiểm chứng: tái tạo 10 lớp DESED và so với file gốc của tác giả, sai lệch
 tuyệt đối lớn nhất 1.6e-07, cosine đường chéo bằng 1.000 cho cả 10 lớp.
 
-**Cần torch 2.x** vì dùng `weights_only`, trong khi `uniav-env` là torch 1.11.
-Dựng venv riêng với `torch==2.4.1+cpu` và `numpy==1.24.4`.
+Chạy được trong `uniav-env` (torch 1.11, đã cài thêm `regex`), không cần venv riêng.
+Đã kiểm: sai lệch so với `caption_emb.npz` 3e-5, đúng mức làm tròn float16.
 
-Nhúng 11594 caption mất 52 phút trên CPU. Script có lưu tiến độ sau mỗi 640 câu
-nên dừng giữa chừng chạy tiếp được.
+Sinh lại toàn bộ: `python tools/embed_captions.py`, 52 phút trên CPU, lưu tiến độ
+sau mỗi 640 câu nên dừng giữa chừng chạy tiếp được.
 
 ---
 
 ## 8. Việc tiếp theo, xếp theo thứ tự
 
-1. **Chạy đủ 42 epoch hướng B**, một tiếng trên RTX 3060 hoặc nửa tiếng trên A100.
-   Theo dõi `cos_gt` so với `cos_nền`.
+1. **Sinh vector thầy OmniRetriever cho 11594 clip** rồi train lại với `omni_emb_file`, xem mục 10.
+   Video gốc nằm ở máy Windows đã chạy cut.ipynb, cần A100 vì model 7B.
 2. **Trích feature cho 290 video còn lại**, pipeline nằm ở `ONEPEACE_extract_embd_code/`.
    Thêm 19% dữ liệu.
 3. **Kiểm tra thủ công 50 đoạn validation** đối chiếu video thật. Nửa tiếng làm
@@ -205,10 +206,67 @@ ngữ sinh và chưa kiểm chứng. Mong con số ngang ActivityNet là không 
 
 | Đường dẫn | Dung lượng | Có cần không |
 |---|---|---|
-| `ONEPEACE_extract_embd_code/` | 23 GB | cần, để trích 290 video còn lại |
+| `ONEPEACE_extract_embd_code/` | 18 GB | ba model text, video, audio ở `models/`, cần để trích 290 video còn lại |
 | `data/` | 12 GB | cần |
-| `ONEPEACE_embed_text/` | 7 GB | cần, nếu muốn sinh lại nhúng caption |
 | `ckpt/multi_task_anet_unav_dcase_reproduce/` | 2 GB | checkpoint UniAV gốc, khó tải lại |
 
 Đã xoá trong phiên này: hai thư mục checkpoint cũ của hướng phân loại, bản clone
 `ONE-PEACE/`, các file log, và ba file của thiết kế trung gian đã bị thay thế.
+
+---
+
+## 10. Phiên 2026-10-03: nâng cấp hướng B
+
+Kết quả chạy 10 epoch trên RTX 3060, checkpoint `ckpt/sched10/best_cap.pth.tar` (epoch 7):
+
+| Chỉ số | Bản cũ (Colab, epoch 8) | Bản mới |
+|---|---|---|
+| R@0.5 | 47.5 | **49.3** |
+| R@0.7 | 24.6 | **26.6** |
+| ret_sim | 0.669 | **0.748** |
+| CIDEr | chưa đo | **88.0** (METEOR 14.4) |
+
+ret_sim có sàn 0.46 (chọn bừa) và trần 0.896 (chọn câu tốt nhất có trong kho).
+
+**Những thay đổi có tác dụng, đã đo riêng từng cái:**
+- Chọn câu theo đồng thuận (MBR trên top 20), đổi lúc suy luận: CIDEr 71 → 88
+- Loss nhúng so với toàn kho 8218 câu, nhãn mềm theo độ giống ONE-PEACE: ret_sim top-1 0.694 → 0.711
+- Nhánh dự đoán IoU dùng để xếp hạng đoạn, `iou_power: 0.3`: R@0.5 +1.0, R@0.7 +1.4 trên cùng checkpoint
+- Trọng số loss nhúng 0.2: ở trọng số 1.0 loss nhúng chiếm hết gradient sau clip, R@0.5 tụt 2 điểm
+- Lịch 10 epoch: 40 epoch overfit từ epoch 7, R@0.5 rơi từ 50.8 xuống 42.9 ở epoch 12
+
+**Đã thử, không có tác dụng:**
+- Nạp checkpoint UniAV gốc (`--pretrain`): kém hơn ở cả hai lần thử
+- `max_seq_len: 512`: ngang 256
+- NMS cứng hoặc ngưỡng thấp: kém hơn soft-NMS 0.7
+- Chính quy hoá mạnh (weight decay 0.05, dropout 0.1, cắt 50–100%): ngang bản thường
+- Trung bình vector trên cả đoạn so với tại một mốc: ngang nhau, giữ vì cần cho thầy Omni
+
+**Mô tả trên đoạn GT ngang trên đoạn dự đoán** (ret_sim 0.742 so với 0.748), nên nút thắt
+của phần mô tả nằm ở chất lượng vector chứ không ở việc tách đoạn.
+
+**Thầy OmniRetriever-7B, code xong, chưa có dữ liệu.** Ý fusion-as-teacher của bài
+OmniRetriever: vector đoạn được chiếu sang không gian 3584 chiều, kéo về vector av của
+clip GT do model 7B sinh, và so với kho caption trong không gian đó. Đã chạy thông với
+vector giả. Quy trình ở `tools/omni_youcook2.py` (cut → manifest → extract trên A100 →
+`teacher` để đo zero-shot), rồi bỏ comment `omni_emb_file` trong config.
+Video gốc YouCook2 không có trên máy WSL này.
+
+**Chấm checkpoint:** `python train_event.py configs/youcook2_event.yaml --eval <ckpt>`
+in đủ các biến thể, kể cả `[oracle]` là mô tả trên đoạn GT.
+Cần `pip install pycocoevalcap` (METEOR cần java, chỉ dùng trong `--eval`).
+
+---
+
+## 11. Dọn môi trường ngày 2026-10-03
+
+`ONEPEACE_embed_text/` đã gộp vào `ONEPEACE_extract_embd_code/`, phần notebook cũ nằm ở
+`text_embed/`. Ba model ONE-PEACE **không phải bản sao**: chúng dùng chung các lớp
+attention, khoảng 1.5 GB mỗi file, còn lại là FFN và adapter riêng của từng modality.
+
+Đã xoá ba môi trường Windows nằm trong WSL (`venv`, `op310`, `ONEPEACE_embed_text/venv`).
+Gọi từ WSL thì Python khởi động nhưng không thấy gói nào. Danh sách gói lưu ở
+`ONEPEACE_extract_embd_code/envs/` để dựng lại khi cần. Notebook `EXTRACT_local.ipynb`
+vẫn trỏ tới hai môi trường đó.
+
+Môi trường Linux còn lại duy nhất cho repo này là `/home/minh/uniav-env`.

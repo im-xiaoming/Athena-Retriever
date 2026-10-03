@@ -1,7 +1,9 @@
 """Huấn luyện mô hình tách sự kiện và sinh mô tả.
 
-  python train_event.py configs/youcook2_event.yaml --output run1 --epochs 40 \
-      --pretrain ckpt/multi_task_anet_unav_dcase_reproduce/model_epoch_006.pth.tar
+  python train_event.py configs/youcook2_event.yaml --output run1
+  python train_event.py configs/youcook2_event.yaml --eval ckpt/run1/best_cap.pth.tar
+
+--pretrain nạp checkpoint UniAV gốc, nhưng đo hai lần đều kém hơn train từ đầu.
 """
 import argparse, os, time, yaml
 import numpy as np
@@ -44,19 +46,48 @@ def iou(a, b):
     return i / u if u > 0 else 0.0
 
 
+def mbr_pick(s, pool_n, scale, k=20):
+    """Chọn câu theo đồng thuận thay vì lấy câu điểm cao nhất.
+
+    s (N,) là điểm của từng câu trong kho. Lấy k câu điểm cao nhất, đổi điểm thành
+    xác suất, rồi chọn câu giống nhất với cả nhóm (minimum Bayes risk). Câu được
+    nhiều ứng viên mạnh cùng ủng hộ thắng câu chỉ tình cờ đứng đầu.
+    """
+    top = s.topk(k)
+    p = F.softmax(scale * top.values, dim=0)
+    cand = pool_n[top.indices]
+    agree = (cand @ cand.t()) @ p
+    return int(top.indices[0]), int(top.indices[agree.argmax()])
+
+
 @torch.no_grad()
-def evaluate(model, loader, device, pool_proj, pool_raw, pool_text, ths=(0.3, 0.5, 0.7)):
+def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), full=False):
     """Chấm hai việc: tách đoạn có đúng không, và mô tả có đúng không.
 
+    Phần mô tả chỉ chấm trên các GT có đoạn dự đoán khớp IoU >= 0.3.
     cos_gt   : cosine giữa vector đoạn dự đoán và caption THẬT của đoạn đó
     cos_rand : cùng phép đo nhưng với một caption ngẫu nhiên, đây là mức sàn
-    ret_sim  : caption lấy ra từ kho giống caption thật tới đâu, đo trong
-               không gian ONE-PEACE gốc
+    ret_sim  : câu chọn ra giống câu thật tới đâu, trong không gian ONE-PEACE
+    CIDEr    : thước đo chuẩn của bài toán sinh mô tả, so chữ với câu thật,
+               độc lập hoàn toàn với ONE-PEACE
+    full     : chấm thêm các biến thể (câu đứng đầu, vector tại một mốc, từng không
+               gian riêng khi có thầy OmniRetriever) để so sánh
+    Khi có thầy, điểm của một câu là tổng cosine trong hai không gian.
     """
+    from pycocoevalcap.cider.cider import Cider
     model.eval()
+    pool_f = F.normalize(model.embed_head.clip_proj(pool_raw), dim=-1)
+    pool_n = F.normalize(pool_raw, dim=-1)
+    scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
+    omni = model.omni_dim > 0
+    if omni:
+        o_txt = model.omni_text.masked_fill(~model.omni_text_ok[:, None], 0)
     cov = {t: 0 for t in ths}
     n_gt = n_pred = 0
-    best_ious, cos_gt, cos_rand, ret_sim = [], [], [], []
+    best_ious, cos_gt, cos_rand = [], [], []
+    ret = {v: [] for v in ('top1', 'mbr', 'pt_top1', 'mbr_onepeace', 'mbr_omni', 'oracle')}
+    gts_txt, hyp = {}, {v: {} for v in ret}
+    gts_or, hyp_or = {}, {}
     g = torch.Generator().manual_seed(0)
     for batch in loader:
         for x in batch:
@@ -66,10 +97,21 @@ def evaluate(model, loader, device, pool_proj, pool_raw, pool_text, ths=(0.3, 0.
             gts, texts = r['gt_segments'], r['gt_text']
             k = min(len(gts), r['segments'].shape[0])
             preds = r['segments'][:k].tolist()
-            emb = r['embeds'][:k].to(device)
+            emb = r['embeds'][:k].to(device).float()
+            emb_pt = r['embeds_pt'][:k].to(device).float()
             n_pred += k
-            cap_raw = x['cap_emb'].to(device).float()          # (NMAX, 1536) chua chieu
+            cap_raw = x['cap_emb'].to(device).float()
             cap_proj = F.normalize(model.embed_head.clip_proj(cap_raw), dim=-1)
+            cap_n = F.normalize(cap_raw, dim=-1)
+            if full:
+                # mo ta tren chinh doan GT: chi do phan mo ta, khong phu thuoc tach doan
+                for gi in range(len(gts)):
+                    s = pool_f @ r['embeds_gt'][gi].to(device).float()
+                    if omni:
+                        s = s + o_txt @ r['embeds_gt_omni'][gi].to(device).float()
+                    i = mbr_pick(s, pool_n, scale)[1]
+                    ret['oracle'].append(float(pool_n[i] @ cap_n[gi]))
+                    okey = len(gts_or); gts_or[okey] = [texts[gi]]; hyp_or[okey] = [pool_text[i]]
             for gi, gt in enumerate(gts):
                 n_gt += 1
                 if not preds:
@@ -81,20 +123,45 @@ def evaluate(model, loader, device, pool_proj, pool_raw, pool_text, ths=(0.3, 0.
                     cov[t] += (best >= t)
                 if best < 0.3:
                     continue
-                q = F.normalize(emb[j].float(), dim=-1)
+                q = F.normalize(emb[j], dim=-1)
                 cos_gt.append(float(q @ cap_proj[gi]))
-                ridx = int(torch.randint(len(pool_proj), (1,), generator=g))
-                cos_rand.append(float(q @ pool_proj[ridx]))
-                top = int((pool_proj @ q).argmax())
-                ret_sim.append(float(F.normalize(pool_raw[top], dim=-1) @
-                                      F.normalize(cap_raw[gi], dim=-1)))
+                ridx = int(torch.randint(len(pool_f), (1,), generator=g))
+                cos_rand.append(float(q @ pool_f[ridx]))
+                key = len(gts_txt); gts_txt[key] = [texts[gi]]
+                s_op = pool_f @ q
+                s = s_op
+                if omni:
+                    s_om = o_txt @ r['embeds_omni'][j].to(device).float()
+                    s = s_op + s_om
+                t1, mb = mbr_pick(s, pool_n, scale)
+                picks = {'top1': t1, 'mbr': mb}
+                if full:
+                    picks['pt_top1'] = int((pool_f @ F.normalize(emb_pt[j], dim=-1)).argmax())
+                    if omni:
+                        picks['mbr_onepeace'] = mbr_pick(s_op, pool_n, scale)[1]
+                        picks['mbr_omni'] = mbr_pick(s_om, pool_n, scale)[1]
+                for v, i in picks.items():
+                    ret[v].append(float(pool_n[i] @ cap_n[gi]))
+                    hyp[v][key] = [pool_text[i]]
     model.train()
+    mean = lambda xs: float(np.mean(xs)) if xs else 0.0
+    cider = lambda v: Cider().compute_score(gts_txt, hyp[v])[0] * 100 if hyp[v] else 0.0
     out = {'R@%.1f' % t: 100.0 * cov[t] / max(n_gt, 1) for t in ths}
-    out['mIoU'] = 100.0 * float(np.mean(best_ious)) if best_ious else 0.0
-    out['cos_gt'] = float(np.mean(cos_gt)) if cos_gt else 0.0
-    out['cos_rand'] = float(np.mean(cos_rand)) if cos_rand else 0.0
-    out['ret_sim'] = float(np.mean(ret_sim)) if ret_sim else 0.0
+    out['mIoU'] = 100.0 * mean(best_ious)
     out['seg/vid'] = n_pred / max(len(loader.dataset), 1)
+    out['cos_gt'] = mean(cos_gt)
+    out['cos_rand'] = mean(cos_rand)
+    out['ret_sim'] = mean(ret['mbr'])
+    out['CIDEr'] = cider('mbr')
+    if full:
+        from pycocoevalcap.meteor.meteor import Meteor
+        for v in ('top1', 'pt_top1') + (('mbr_onepeace', 'mbr_omni') if omni else ()):
+            out['ret_sim[%s]' % v] = mean(ret[v])
+            out['CIDEr[%s]' % v] = cider(v)
+        out['METEOR'] = Meteor().compute_score(gts_txt, hyp['mbr'])[0] * 100
+        out['ret_sim[oracle]'] = mean(ret['oracle'])
+        out['CIDEr[oracle]'] = Cider().compute_score(gts_or, hyp_or)[0] * 100
+        out['n_captioned'] = len(gts_txt)
     return out
 
 
@@ -131,27 +198,80 @@ def load_pretrain(model, path):
           % (n_new, n_all, ', '.join(fresh) or 'none'), flush=True)
 
 
-# Bảng log một dòng mỗi epoch, đánh dấu * khi lưu best
-KEY = {'R@0.3': 'r3', 'R@0.5': 'r5', 'R@0.7': 'r7', 'mIoU': 'miou', 'cos_gt': 'cg',
-       'cos_rand': 'cr', 'ret_sim': 'rs', 'seg/vid': 'spv'}
-HEAD = ('{:>6} {:>5} {:>8} | {:>6} {:>6} {:>6} {:>6} | {:>6} {:>6} {:>6} {:>6} {:>7}'
-        ' | {:>6} {:>8} {:>7}').format(
-    'epoch', 'time', 'lr', 'event', 'reg', 'embed', 'total',
-    'R@0.3', 'R@0.5', 'R@0.7', 'mIoU', 'seg/vid', 'cos_gt', 'cos_rand', 'ret_sim')
-ROW = ('{ep:>6} {t:>4.0f}s {lr:>8.1e} | {ev_loss:>6.3f} {reg_loss:>6.3f} {emb_loss:>6.3f}'
-       ' {final_loss:>6.3f} | {r3:>6.2f} {r5:>6.2f} {r7:>6.2f} {miou:>6.2f} {spv:>7.2f}'
-       ' | {cg:>6.3f} {cr:>8.3f} {rs:>7.3f}{mark}')
-RULE = '-' * len(HEAD)
+# Bảng log một dòng mỗi epoch. Mỗi cột: (tên in ra, khoá, độ rộng, định dạng)
+GROUPS = [
+    ('train loss', [('event', 'ev_loss', 6, '.3f'), ('reg', 'reg_loss', 6, '.3f'), ('iou', 'iou_loss', 6, '.3f'),
+                    ('embed', 'emb_loss', 6, '.3f'), ('span', 'span_loss', 6, '.3f'),
+                    ('total', 'final_loss', 6, '.3f')]),
+    ('segmentation (val)', [('R@0.3', 'R@0.3', 6, '.2f'), ('R@0.5', 'R@0.5', 6, '.2f'),
+                            ('R@0.7', 'R@0.7', 6, '.2f'), ('mIoU', 'mIoU', 6, '.2f'),
+                            ('seg/vid', 'seg/vid', 7, '.2f')]),
+    ('captioning (val)', [('cos_gt', 'cos_gt', 6, '.3f'), ('cos_rand', 'cos_rand', 8, '.3f'),
+                          ('ret_sim', 'ret_sim', 7, '.3f'), ('CIDEr', 'CIDEr', 6, '.2f')]),
+]
+LEAD = '{:>6} {:>5} {:>8}'
+
+
+def use_omni_columns():
+    """Thêm hai cột loss của thầy OmniRetriever vào bảng."""
+    global HEAD, RULE
+    GROUPS[0][1][5:5] = [('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f')]
+    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+    RULE = '-' * (len(HEAD) + 4)
+
+
+def _cells(fn):
+    return ' | '.join(' '.join(fn(c) for c in cols) for _, cols in GROUPS)
+
+
+HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+RULE = '-' * (len(HEAD) + 4)
 
 
 def print_header():
-    print('Legend       : * = new best R@0.5 (checkpoint saved), cos_rand = cosine to a random'
-          ' caption (floor),\n               ret_sim = similarity of retrieved caption to GT caption')
+    print('Legend       : S = new best R@0.5, C = new best CIDEr (each saves its checkpoint)')
+    print('               cos_rand = cosine to a random caption (floor), ret_sim = similarity of')
+    print('               chosen caption to GT caption (ONE-PEACE space), CIDEr = word overlap')
     print(RULE)
-    print('{:>6} {:>5} {:>8} | {:^27} | {:^35} | {:^23}'.format(
-        '', '', '', 'train loss', 'segmentation (val)', 'captioning (val)'))
+    widths = [sum(c[2] for c in cols) + len(cols) - 1 for _, cols in GROUPS]
+    print(LEAD.format('', '', '') + ' | ' + ' | '.join(
+        '{:^{}}'.format(name, w) for (name, _), w in zip(GROUPS, widths)))
     print(HEAD)
     print(RULE, flush=True)
+
+
+def print_row(ep, t, lr, vals, mark):
+    row = LEAD.format(ep, '%.0fs' % t, '%.1e' % lr) + ' | ' + _cells(
+        lambda c: format(vals.get(c[1], float('nan')), '>%d%s' % (c[2], c[3])))
+    print(row + ('  ' + mark if mark else ''), flush=True)
+
+
+def build_loaders(cfg, rng):
+    ds = make_dataset('youcook2_cap', True, cfg['train_split'], **cfg['dataset'])
+    dv = make_dataset('youcook2_cap', False, cfg['val_split'], **cfg['dataset'])
+    dl = DataLoader(ds, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
+                    sampler=RandomSampler(ds), collate_fn=trivial_batch_collator,
+                    worker_init_fn=worker_init_reset_seed, drop_last=True, generator=rng,
+                    persistent_workers=cfg['num_workers'] > 0)
+    dlv = DataLoader(dv, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
+                     sampler=SequentialSampler(dv), collate_fn=trivial_batch_collator)
+    return ds, dv, dl, dlv
+
+
+def eval_only(a, cfg, model, dlv, dev, pool_raw, pool_text):
+    """Chấm một checkpoint với nhiều cấu hình NMS, in đủ các biến thể."""
+    ck = torch.load(a.eval, map_location='cpu')
+    model.load_state_dict(ck['state_dict'])
+    print('Checkpoint   : %s (epoch %d)' % (a.eval, ck['epoch'] + 1), flush=True)
+    for power in a.iou_power.split(','):
+        model.iou_power = float(power)
+        for spec in a.nms.split(','):
+            kind, *rest = spec.split(':')
+            model.nms_cfg = {'soft': kind == 'soft', 'iou': float(rest[0]),
+                             'sigma': float(rest[1]) if len(rest) > 1 else 0.5}
+            m = evaluate(model, dlv, dev, pool_raw, pool_text, full=not a.fast)
+            print('\niou_power %s  NMS %-14s' % (power, spec)
+                  + '  '.join('%s %.3f' % (k, v) for k, v in m.items()), flush=True)
 
 
 def main(a):
@@ -159,18 +279,14 @@ def main(a):
         cfg = yaml.safe_load(f)
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     rng = fix_random_seed(cfg.get('init_rand_seed', 1234567891), include_cuda=True)
-    out_dir = os.path.join(cfg['output_folder'], a.output); os.makedirs(out_dir, exist_ok=True)
+    out_dir = os.path.join(cfg['output_folder'], a.output)
 
-    ds = make_dataset('youcook2_cap', True, cfg['train_split'], **cfg['dataset'])
-    dv = make_dataset('youcook2_cap', False, cfg['val_split'], **cfg['dataset'])
+    ds, dv, dl, dlv = build_loaders(cfg, rng)
     print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
-    dl = DataLoader(ds, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                    sampler=RandomSampler(ds), collate_fn=trivial_batch_collator,
-                    worker_init_fn=worker_init_reset_seed, drop_last=True, generator=rng,
-                    persistent_workers=cfg['num_workers'] > 0)
-    dlv = DataLoader(dv, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                     sampler=SequentialSampler(dv), collate_fn=trivial_batch_collator)
 
+    if ds.omni:
+        cfg['model']['omni_dim'] = ds.omni_dim
+        use_omni_columns()
     model = make_multimodal_meta_arch('EventCaptionTransformer', **cfg['model'])
     if a.pretrain:
         load_pretrain(model, a.pretrain)
@@ -178,19 +294,22 @@ def main(a):
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
     # kho caption lay tu TAP TRAIN, khong dung caption cua tap val
-    seen, pool_raw, pool_text = set(), [], []
-    for it in ds.data_list:
-        for i in range(it['n_cap']):
-            k = '%s#%d' % (it['id'], i); t = str(ds.cap_text[k])
-            if t in seen: continue
-            seen.add(t); pool_raw.append(ds.cap_emb[k]); pool_text.append(t)
-    pool_raw = torch.from_numpy(np.stack(pool_raw).astype(np.float32)).to(dev)
-    print('Caption pool : %d unique train captions' % len(pool_text), flush=True)
+    pool_raw = torch.from_numpy(ds.pool_emb).to(dev)
+    model.set_caption_pool(pool_raw)
+    if ds.omni:
+        model.set_omni_pool(torch.from_numpy(ds.omni_text_pool).to(dev),
+                            torch.from_numpy(ds.omni_text_ok).to(dev),
+                            torch.from_numpy(ds.omni_av_pool).to(dev))
+    print('Caption pool : %d unique train captions' % len(ds.pool_text), flush=True)
+    if a.eval:
+        return eval_only(a, cfg, model, dlv, dev, pool_raw, ds.pool_text)
+    os.makedirs(out_dir, exist_ok=True)
     print('Output       : %s' % out_dir, flush=True)
 
     opt = build_optimizer(model, cfg['opt'])
     sch = make_scheduler(opt, cfg['opt'], len(dl), a.epochs)
-    best, n_ep = -1.0, a.epochs + cfg['opt']['warmup_epochs']
+    n_ep = a.epochs + cfg['opt']['warmup_epochs']
+    best = {'R@0.5': (-1.0, 0, 'best_seg'), 'CIDEr': (-1.0, 0, 'best_cap')}
     print_header()
     for ep in range(n_ep):
         t0 = time.time(); acc = {}
@@ -202,26 +321,31 @@ def main(a):
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train_cfg']['clip_grad_l2norm'])
             opt.step(); sch.step()
             for k, v in L.items(): acc[k] = acc.get(k, 0.0) + v.detach().item()
-        with torch.no_grad():
-            pool = F.normalize(model.embed_head.clip_proj(pool_raw), dim=-1)
-        m = evaluate(model, dlv, dev, pool, pool_raw, pool_text)
-        is_best = m['R@0.5'] > best
-        if is_best:
-            best, best_ep = m['R@0.5'], ep
-            torch.save({'epoch': ep, 'state_dict': model.state_dict(), 'metrics': m},
-                       os.path.join(out_dir, 'best.pth.tar'))
-        loss = {k: v / len(dl) for k, v in acc.items()}
-        print(ROW.format(ep='%d/%d' % (ep + 1, n_ep), t=time.time() - t0,
-                         lr=sch.get_last_lr()[0], **loss, **{KEY[k]: v for k, v in m.items()},
-                         mark=' *' if is_best else ''), flush=True)
+        m = evaluate(model, dlv, dev, pool_raw, ds.pool_text)
+        mark = ''
+        for key, (val, _, name) in best.items():
+            if m[key] > val:
+                best[key] = (m[key], ep, name); mark += 'S' if key == 'R@0.5' else 'C'
+                torch.save({'epoch': ep, 'state_dict': model.state_dict(), 'metrics': m},
+                           os.path.join(out_dir, name + '.pth.tar'))
+        vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})
+        print_row('%d/%d' % (ep + 1, n_ep), time.time() - t0, sch.get_last_lr()[0], vals, mark)
     print(RULE)
-    print('Done. Best R@0.5 = %.2f at epoch %d, saved to %s'
-          % (best, best_ep + 1, os.path.join(out_dir, 'best.pth.tar')), flush=True)
+    for key, (val, ep, name) in best.items():
+        print('Best %-6s = %6.2f at epoch %d -> %s' % (
+            key, val, ep + 1, os.path.join(out_dir, name + '.pth.tar')), flush=True)
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('config'); p.add_argument('--output', default='ev1')
-    p.add_argument('--epochs', type=int, default=40)
+    p.add_argument('--epochs', type=int, default=10,
+                   help='40 epoch overfit tu epoch 7, 10 la du')
     p.add_argument('--pretrain', default='', help='checkpoint UniAV gốc để khởi tạo')
+    p.add_argument('--eval', default='', help='chỉ chấm checkpoint này, không train')
+    p.add_argument('--nms', default='soft:0.7:0.5,soft:0.5:0.5,hard:0.5,hard:0.3',
+                   help='các cấu hình NMS để chấm khi dùng --eval')
+    p.add_argument('--iou-power', default='0.5',
+                   help='trọng số điểm IoU khi xếp hạng đoạn, 0 là chỉ dùng điểm sự kiện')
+    p.add_argument('--fast', action='store_true', help='--eval: bỏ các biến thể chậm')
     main(p.parse_args())
