@@ -1,0 +1,12 @@
+# Python >= 3.9. Install PyTorch first for your platform (https://pytorch.org):
+#   NVIDIA (Windows/Linux): pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   Apple Silicon / CPU    : pip install torch
+torch>=2.1
+numpy<2.1
+opencv-python-headless
+librosa
+resampy
+einops
+pyyaml
+regex
+imageio-ffmpeg

@@ -21,3 +21,5 @@ InternVideo/
 data/demo_videos/
 data/demo_cache/
 uniav_api/index/
+!uniav_api/encoders/bpe/dict.txt
+!uniav_api/requirements.txt
