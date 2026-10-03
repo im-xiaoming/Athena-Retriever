@@ -38,13 +38,24 @@ def stub_flash_attn():
     sys.modules['flash_attn.flash_attn_interface'].flash_attn_varlen_qkvpacked_func = None
 
 
+def register_packages(repo):
+    """Register InternVideo2's packages as empty namespaces so importing one backbone file
+    does not run the package __init__ files, which import every model (and flash_attn)."""
+    base = os.path.join(repo, 'InternVideo2', 'multi_modality', 'models')
+    for name, path in (('models', base), ('models.backbones', os.path.join(base, 'backbones')),
+                       ('models.backbones.internvideo2', os.path.join(base, 'backbones', 'internvideo2')),
+                       ('models.backbones.beats', os.path.join(base, 'backbones', 'beats'))):
+        if name not in sys.modules:
+            m = types.ModuleType(name); m.__path__ = [path]; sys.modules[name] = m
+
+
 class EasyDict(dict):
     __getattr__ = dict.get
 
 
 def build_video_model(repo, ckpt, device):
     stub_flash_attn()
-    sys.path.insert(0, os.path.join(repo, 'InternVideo2', 'multi_modality'))
+    register_packages(repo)
     from models.backbones.internvideo2.internvideo2 import pretrain_internvideo2_1b_patch14_224
     cfg = EasyDict(vision_encoder=EasyDict(
         clip_embed_dim=768, use_flash_attn=False, use_fused_rmsnorm=False, use_fused_mlp=False,
@@ -68,7 +79,7 @@ def build_video_model(repo, ckpt, device):
 
 
 def build_audio_model(repo, ckpt, device):
-    sys.path.insert(0, os.path.join(repo, 'InternVideo2', 'multi_modality'))
+    register_packages(repo)
     from models.backbones.beats.BEATs import BEATs, BEATsConfig
     ck = torch.load(ckpt, map_location='cpu', weights_only=False)
     model = BEATs(BEATsConfig(ck['cfg']))
