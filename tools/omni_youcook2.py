@@ -1,38 +1,39 @@
-"""Chuẩn bị clip sự kiện YouCook2 cho OmniRetriever-7B, làm thầy cho train_event.py.
+"""Prepare YouCook2 event clips for OmniRetriever-7B, the teacher of train_event.py.
 
-Bước 1, chạy ở máy có video gốc YouCook2 (Windows được, chỉ cần python và ffmpeg):
+Step 1, on a machine with the original YouCook2 videos (Windows works, needs python and ffmpeg):
 
   python tools/omni_youcook2.py cut --videos D:/YouCookII/videos --out clips --workers 8
 
-  Cắt mỗi đoạn GT thành một clip riêng, mã hoá lại để mốc bắt đầu chính xác
-  (cắt kiểu -c copy nhảy về keyframe gần nhất, lệch tới vài giây). Hạ xuống
-  360p vì OmniRetriever chỉ lấy vài khung hình mỗi clip. Chạy lại thì bỏ qua
-  clip đã có.
+  Cuts every GT segment into its own clip, re-encoding so the start is exact
+  (stream copy with -c copy snaps to the previous keyframe, off by seconds). Scales to
+  360p since OmniRetriever only samples a few frames per clip. Existing clips are skipped.
 
-  Đã có sẵn clip cắt bằng cut.ipynb ở data/youcook2_cut/videos, tên "<video>_<start>_<end>.mp4",
-  thì bỏ qua bước này và dùng --naming range ở bước 2 (mặc định). Clip đó cắt kiểu
-  -c copy nhưng đo 200 clip thì độ dài lệch tối đa 0.26 giây, dùng được.
+  If the clips cut by cut.ipynb already exist in data/youcook2_cut/videos, named
+  "<video>_<start>_<end>.mp4", skip this step and use --naming range in step 2 (the
+  default). Those were cut with -c copy, but on 200 clips the duration error was at
+  most 0.26 s, which is fine.
 
-Bước 2, tạo manifest với đường dẫn clip ở nơi sẽ chạy OmniRetriever:
+Step 2, write a manifest with clip paths as seen by the machine running OmniRetriever:
 
   python tools/omni_youcook2.py manifest --clips /content/videos --out youcook2_omni.jsonl
 
-  Thêm --pilot 500 để có bản chạy thử rẻ: vector text cho kho caption tập train cộng
-  500 clip tập val, đủ để chạy bước 4 trả lời câu hỏi thầy có đáng dùng không.
+  Add --pilot 500 for a cheap trial: text vectors for the train caption pool plus 500
+  val clips, enough for step 4 to tell whether the teacher is worth using.
 
-Bước 3, trên Colab A100 với mã nguồn OmniRetriever đã sửa:
+Step 3, on a Colab A100 with the patched OmniRetriever source:
 
   python -m omniretriever.cli extract youcook2_omni.jsonl \\
       --base-model /content/WAVE_HOME/WAVE-7B --adapter /content/adapters/omniretriever-7b \\
       --output omni_emb.npz --modalities text av --device cuda --dtype bfloat16
 
-  Rồi đặt omni_emb.npz vào data/youcookii/ và bật omni_emb_file trong config.
+  Text-only records can use --batch-size 32 (left padding keeps them exact); av needs 1.
+  Then put omni_emb.npz in data/youcookii/ and set omni_emb_file in the config.
 
-Bước 4, đo thầy mạnh tới đâu trước khi train, zero-shot trên clip GT tập val:
+Step 4, measure the teacher zero-shot on GT val clips before training:
 
   python tools/omni_youcook2.py teacher --omni data/youcookii/omni_emb.npz
 
-  So với dòng ret_sim[oracle] / CIDEr[oracle] khi chạy train_event.py --eval.
+  Compare with ret_sim[oracle] / CIDEr[oracle] from train_event.py --eval.
 """
 import argparse
 import json
@@ -50,7 +51,7 @@ ANNOTATIONS = os.path.join(ROOT, 'data', 'youcookii', 'annotations',
 
 
 def events():
-    """Mọi đoạn GT mà train_event.py dùng, khoá "<video>#<i>" giống caption_emb.npz."""
+    """Every GT segment used by train_event.py, keyed "<video>#<i>" like caption_emb.npz."""
     z = np.load(CAPTION_EMB, allow_pickle=True)
     with open(ANNOTATIONS) as f:
         db = json.load(f)['database']
@@ -61,8 +62,8 @@ def events():
 
 
 def clip_name(key, start, end, naming='range'):
-    """'range': tên do cut.ipynb đặt, "<video>_<start>_<end>.mp4" theo giây nguyên.
-    'key': tên do lệnh cut của script này đặt, "<video>_<chỉ số đoạn>.mp4"."""
+    """'range': names from cut.ipynb, "<video>_<start>_<end>.mp4" in whole seconds.
+    'key': names from this script's cut command, "<video>_<segment index>.mp4"."""
     if naming == 'key':
         return key.replace('#', '_') + '.mp4'
     fmt = lambda x: '%d' % x if float(x).is_integer() else str(x)
@@ -127,11 +128,11 @@ def manifest(a):
             clip = os.path.join(a.clips, clip_name(key, start, end, a.naming)).replace('\\', '/')
             if a.check and not os.path.isfile(clip):
                 skipped += 1; continue
-            # av doc ca hinh lan tieng tu cung file video, truong audio chi can co mat
+            # av reads frames and sound from the same video file; the audio field just has to be set
             rec = {'id': key, 'text': text, 'video': clip, 'audio': clip}
             if pilot_val is not None:
                 if subset[vid] == 'training':
-                    if text in seen:          # kho caption chi can moi cau mot vector
+                    if text in seen:          # the caption pool needs one vector per unique sentence
                         continue
                     seen.add(text); rec = {'id': key, 'text': text}
                 elif key not in pilot_val:
@@ -142,8 +143,8 @@ def manifest(a):
 
 
 def teacher(a):
-    """OmniRetriever tự mô tả clip GT tập val: vector av của clip so với vector text
-    của kho caption tập train, chọn câu theo đồng thuận giống train_event.py."""
+    """OmniRetriever captions the GT val clips on its own: the clip's av vector against
+    the text vectors of the train caption pool, consensus pick as in train_event.py."""
     import sys
     import torch
     import torch.nn.functional as F
@@ -185,19 +186,19 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest='cmd', required=True)
     c = sub.add_parser('cut')
-    c.add_argument('--videos', required=True, help='thư mục video gốc YouCook2, tên <id>.mp4')
+    c.add_argument('--videos', required=True, help='folder of original YouCook2 videos named <id>.mp4')
     c.add_argument('--out', default='clips')
     c.add_argument('--workers', type=int, default=8)
     m = sub.add_parser('manifest')
-    m.add_argument('--clips', required=True, help='thư mục clip, đúng đường dẫn ở máy chạy Omni')
+    m.add_argument('--clips', required=True, help='clip folder as seen by the machine running OmniRetriever')
     m.add_argument('--out', default='youcook2_omni.jsonl')
-    m.add_argument('--check', action='store_true', help='bỏ record không tìm thấy clip')
+    m.add_argument('--check', action='store_true', help='drop records whose clip is missing')
     m.add_argument('--naming', choices=('range', 'key'), default='range',
-                   help='range: clip của cut.ipynb; key: clip của lệnh cut ở đây')
+                   help='range: clips from cut.ipynb; key: clips from the cut command here')
     m.add_argument('--pilot', type=int, default=0,
-                   help='chỉ lấy text kho train và N clip val ngẫu nhiên, để chạy thử')
+                   help='only train pool text plus N random val clips, for a trial run')
     t = sub.add_parser('teacher')
     t.add_argument('--omni', required=True, help='file npz do omniretriever.cli extract sinh ra')
-    t.add_argument('--scale', type=float, default=50.0, help='nhiệt độ khi chọn câu đồng thuận')
+    t.add_argument('--scale', type=float, default=50.0, help='temperature of the consensus pick')
     a = p.parse_args()
     {'cut': cut, 'manifest': manifest, 'teacher': teacher}[a.cmd](a)

@@ -1,10 +1,10 @@
-"""Dataset cho bai toan dinh vi / sinh mo ta theo caption (B1).
+"""YouCook2 dataset for event segmentation + captioning.
 
-Khac anet.py o ba diem:
-  - nhan cua moi doan la CHI SO CAPTION trong video (0..N-1), khong phai id lop toan cuc
-  - moi mau mang kem ma tran caption da nhung (NMAX, 1536) va mat na hop le (NMAX,)
-  - num_classes = NMAX, so caption toi da cua mot video
-Nho vay label_points co san sinh ra gt_cls_labels (P, NMAX) ma khong phai sua gi.
+Differs from anet.py in three ways:
+  - each segment's label is the CAPTION INDEX within the video (0..N-1), not a global class id
+  - every sample carries its embedded captions (NMAX, 1536) and a validity mask (NMAX,)
+  - num_classes = NMAX, the maximum number of captions in one video
+so the existing label_points produces gt_cls_labels (P, NMAX) unchanged.
 """
 import os
 import json
@@ -17,7 +17,7 @@ from torch.nn import functional as F
 from .datasets import register_dataset, make_generator
 from .data_utils import truncate_feats, label_points
 
-NMAX = 16   # so caption toi da cua mot video trong YouCook2
+NMAX = 16   # maximum number of captions in one YouCook2 video
 
 
 @register_dataset("youcook2_cap")
@@ -49,7 +49,7 @@ class YouCook2CaptionDataset(Dataset):
         self.num_classes = num_classes
         self.crop_ratio = crop_ratio
 
-        # nhung caption: key dang "<video_id>#<chi so doan>"
+        # caption embeddings, keyed "<video_id>#<segment index>"
         z = np.load(caption_emb_file, allow_pickle=True)
         self.cap_emb = {k: v for k, v in zip(z['keys'], z['emb'])}
         self.cap_text = {k: s for k, s in zip(z['keys'], z['sentences'])}
@@ -57,7 +57,7 @@ class YouCook2CaptionDataset(Dataset):
 
         self.data_list = self._load_json_db(json_file)
         self._build_pool()
-        self.omni = bool(omni_emb_file) and is_training   # chi tap train can thay
+        self.omni = bool(omni_emb_file) and is_training   # only the train split needs the teacher
         if self.omni:
             self._load_omni(omni_emb_file)
         self.db_attributes = {
@@ -82,10 +82,10 @@ class YouCook2CaptionDataset(Dataset):
         })
 
     def _build_pool(self):
-        """Kho caption duy nhất của split này. Caption trùng chữ dùng chung một chỉ số.
+        """Unique caption pool of this split; identical captions share one index.
 
-        Chỉ kho của tập train được dùng: làm mẫu âm khi huấn luyện và làm kho để
-        lấy câu mô tả khi suy luận.
+        Only the train pool is used: as negatives during training and as the pool
+        captions are picked from at inference.
         """
         self.pool_text, self.pool_index, emb = [], {}, []
         self.cap_pool_idx = {}
@@ -99,12 +99,12 @@ class YouCook2CaptionDataset(Dataset):
         self.pool_emb = np.stack(emb).astype(np.float32)
 
     def _load_omni(self, path):
-        """Vector OmniRetriever-7B của từng clip sự kiện, khoá "<video>#<i>__av" và "__text".
+        """OmniRetriever-7B vectors of every event clip, keys "<video>#<i>__av" and "__text".
 
-        Sinh ra hai kho thẳng hàng với kho caption:
-          omni_text_pool (N, 3584) : vector caption, cùng thứ tự với pool_text
-          omni_av_pool   (K, 3584) : vector audio+video của từng clip GT, dùng làm thầy
-        Clip nào trích lỗi thì đánh dấu không hợp lệ và bị loại khỏi loss.
+        Builds two pools aligned with the caption pool:
+          omni_text_pool (N, 3584) : caption vectors, same order as pool_text
+          omni_av_pool   (K, 3584) : audio+video vector of every GT clip, the teacher
+        Clips that failed extraction are marked invalid and left out of the loss.
         """
         z = np.load(path)
         have = set(z.files)
@@ -147,7 +147,7 @@ class YouCook2CaptionDataset(Dataset):
                 'fps': self.default_fps if self.default_fps is not None else value['fps'],
                 'duration': value['duration'],
                 'segments': segs,
-                'labels': np.arange(len(anns), dtype=np.int64),   # chi so caption
+                'labels': np.arange(len(anns), dtype=np.int64),   # caption index
                 'n_cap': len(anns),
             })
         return tuple(out)
@@ -164,7 +164,7 @@ class YouCook2CaptionDataset(Dataset):
         n = min(fv.shape[0], fa.shape[0])
         fv, fa = fv[:n], fa[:n]
 
-        # tinh lai ti gia thoi gian (giong anet.py case 2)
+        # recompute the time scale (same as case 2 in anet.py)
         feat_stride = float((n - 1) * self.feat_stride + self.num_frames) / self.max_seq_len
         num_frames = feat_stride
         feat_offset = 0.5 * num_frames / feat_stride
@@ -209,7 +209,7 @@ class YouCook2CaptionDataset(Dataset):
             points, data_dict['segments'], data_dict['labels'], self.num_classes, self.class_aware)
         data_dict['points'] = points
 
-        # ma tran caption cua video, dem ve NMAX
+        # caption matrix of the video, padded to NMAX
         emb = np.zeros((NMAX, self.emb_dim), dtype=np.float32)
         cmask = np.zeros((NMAX,), dtype=bool)
         texts = [''] * NMAX
@@ -227,6 +227,6 @@ class YouCook2CaptionDataset(Dataset):
                 aidx[i] = self.cap_av_idx.get('%s#%d' % (vid, i), -1)
             data_dict['cap_av_idx'] = torch.from_numpy(aidx)
         data_dict['cap_text'] = texts
-        # bien goc tinh bang giay, chi dung de cham diem
+        # original boundaries in seconds, used only for scoring
         data_dict['segments_sec'] = item['segments'].tolist()
         return data_dict

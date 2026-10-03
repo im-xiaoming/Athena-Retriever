@@ -1,27 +1,42 @@
-"""Huấn luyện mô hình tách sự kiện và sinh mô tả.
+"""Train the event segmentation + captioning model on YouCook2.
 
   python train_event.py configs/youcook2_event.yaml --output run1
+  python train_event.py configs/youcook2_event.yaml --output run2 --set init_rand_seed=2
   python train_event.py configs/youcook2_event.yaml --eval ckpt/run1/best_cap.pth.tar
 
---pretrain nạp checkpoint UniAV gốc, nhưng đo hai lần đều kém hơn train từ đầu.
+Every training run writes experiments/runs/<host>-<output>.json with the git commit,
+the resolved config, the overrides, per-epoch metrics and a full evaluation of the
+best captioning checkpoint. tools/summarize_runs.py turns those files into a table.
+
+--pretrain loads the original UniAV checkpoint; in two trials it was worse than
+training from scratch.
 """
-import argparse, os, time, yaml
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
 import numpy as np
 import torch
 import torch.nn.functional as F
+import yaml
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 from libs.datasets import make_dataset
 from libs.datasets.data_utils import trivial_batch_collator, worker_init_reset_seed
 from libs.modeling import make_multimodal_meta_arch
-from libs.modeling.blocks import MaskedConv1D, LayerNorm, Scale, AffineDropPath
-from libs.utils import make_scheduler, fix_random_seed, ModelEma
+from libs.modeling.blocks import MaskedConv1D
+from libs.utils import make_scheduler, fix_random_seed
+
+RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'experiments', 'runs')
 
 
 def build_optimizer(model, opt):
     decay, no_decay, clip = set(), set(), set()
     white = (torch.nn.Linear, torch.nn.Conv1d, MaskedConv1D)
-    black = (LayerNorm, torch.nn.GroupNorm)
     for mn, m in model.named_modules():
         for pn, p in m.named_parameters(recurse=False):
             fpn = '%s.%s' % (mn, pn) if mn else pn
@@ -47,11 +62,12 @@ def iou(a, b):
 
 
 def mbr_pick(s, pool_n, scale, k=20):
-    """Chọn câu theo đồng thuận thay vì lấy câu điểm cao nhất.
+    """Pick a caption by consensus instead of taking the top-scoring one.
 
-    s (N,) là điểm của từng câu trong kho. Lấy k câu điểm cao nhất, đổi điểm thành
-    xác suất, rồi chọn câu giống nhất với cả nhóm (minimum Bayes risk). Câu được
-    nhiều ứng viên mạnh cùng ủng hộ thắng câu chỉ tình cờ đứng đầu.
+    s (N,) scores every caption in the pool. Take the top k, turn their scores into
+    probabilities, and return the candidate most similar to the whole group
+    (minimum Bayes risk). A caption backed by many strong candidates beats one that
+    is on top by chance. Returns (top-1 index, MBR index).
     """
     top = s.topk(k)
     p = F.softmax(scale * top.values, dim=0)
@@ -62,17 +78,16 @@ def mbr_pick(s, pool_n, scale, k=20):
 
 @torch.no_grad()
 def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), full=False):
-    """Chấm hai việc: tách đoạn có đúng không, và mô tả có đúng không.
+    """Score segmentation and captioning on the validation set.
 
-    Phần mô tả chỉ chấm trên các GT có đoạn dự đoán khớp IoU >= 0.3.
-    cos_gt   : cosine giữa vector đoạn dự đoán và caption THẬT của đoạn đó
-    cos_rand : cùng phép đo nhưng với một caption ngẫu nhiên, đây là mức sàn
-    ret_sim  : câu chọn ra giống câu thật tới đâu, trong không gian ONE-PEACE
-    CIDEr    : thước đo chuẩn của bài toán sinh mô tả, so chữ với câu thật,
-               độc lập hoàn toàn với ONE-PEACE
-    full     : chấm thêm các biến thể (câu đứng đầu, vector tại một mốc, từng không
-               gian riêng khi có thầy OmniRetriever) để so sánh
-    Khi có thầy, điểm của một câu là tổng cosine trong hai không gian.
+    Captioning is scored only on GT segments matched by a prediction with IoU >= 0.3.
+    cos_gt   : cosine between the predicted segment vector and its GT caption
+    cos_rand : the same against a random caption, i.e. the floor
+    ret_sim  : how close the chosen caption is to the GT caption, in ONE-PEACE space
+    CIDEr    : standard captioning metric, word overlap, independent of ONE-PEACE
+    full     : also score variants (top-1, single-point vector, each embedding space
+               separately when the OmniRetriever teacher is on, oracle GT spans)
+    With the teacher, a caption's score is the sum of cosines in both spaces.
     """
     from pycocoevalcap.cider.cider import Cider
     model.eval()
@@ -104,7 +119,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
             cap_proj = F.normalize(model.embed_head.clip_proj(cap_raw), dim=-1)
             cap_n = F.normalize(cap_raw, dim=-1)
             if full:
-                # mo ta tren chinh doan GT: chi do phan mo ta, khong phu thuoc tach doan
+                # caption the GT spans themselves: measures captioning alone
                 for gi in range(len(gts)):
                     s = pool_f @ r['embeds_gt'][gi].to(device).float()
                     if omni:
@@ -154,11 +169,14 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     out['ret_sim'] = mean(ret['mbr'])
     out['CIDEr'] = cider('mbr')
     if full:
-        from pycocoevalcap.meteor.meteor import Meteor
         for v in ('top1', 'pt_top1') + (('mbr_onepeace', 'mbr_omni') if omni else ()):
             out['ret_sim[%s]' % v] = mean(ret[v])
             out['CIDEr[%s]' % v] = cider(v)
-        out['METEOR'] = Meteor().compute_score(gts_txt, hyp['mbr'])[0] * 100
+        try:   # METEOR needs java, skip it where java is missing
+            from pycocoevalcap.meteor.meteor import Meteor
+            out['METEOR'] = Meteor().compute_score(gts_txt, hyp['mbr'])[0] * 100
+        except Exception as e:
+            print('METEOR skipped: %s' % e, flush=True)
         out['ret_sim[oracle]'] = mean(ret['oracle'])
         out['CIDEr[oracle]'] = Cider().compute_score(gts_or, hyp_or)[0] * 100
         out['n_captioned'] = len(gts_txt)
@@ -166,12 +184,12 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
 
 
 def load_pretrain(model, path):
-    """Nạp checkpoint UniAV gốc, ánh xạ head cũ sang head mới.
+    """Load the original UniAV checkpoint, mapping its heads onto the new ones.
 
     backbone                   -> backbone
-    reg_head (offset TASK1)    -> bound_head    TASK1 là ActivityNet, 2 kênh
-    cls_head                   -> embed_head    cùng clip_proj, vis_proj
-    cls_head (tower)           -> event_head    chỉ thân, lớp out học từ đầu
+    reg_head (offset TASK1)    -> bound_head    TASK1 is ActivityNet, 2 channels
+    cls_head                   -> embed_head    same clip_proj and vis_proj
+    cls_head (tower)           -> event_head    tower only, the output layer starts fresh
     """
     sd = torch.load(path, map_location='cpu')
     sd = sd.get('state_dict_ema') or sd['state_dict']
@@ -198,7 +216,7 @@ def load_pretrain(model, path):
           % (n_new, n_all, ', '.join(fresh) or 'none'), flush=True)
 
 
-# Bảng log một dòng mỗi epoch. Mỗi cột: (tên in ra, khoá, độ rộng, định dạng)
+# One log row per epoch. Each column: (header, metric key, width, format)
 GROUPS = [
     ('train loss', [('event', 'ev_loss', 6, '.3f'), ('reg', 'reg_loss', 6, '.3f'), ('iou', 'iou_loss', 6, '.3f'),
                     ('embed', 'emb_loss', 6, '.3f'), ('span', 'span_loss', 6, '.3f'),
@@ -212,20 +230,20 @@ GROUPS = [
 LEAD = '{:>6} {:>5} {:>8}'
 
 
-def use_omni_columns():
-    """Thêm hai cột loss của thầy OmniRetriever vào bảng."""
-    global HEAD, RULE
-    GROUPS[0][1][5:5] = [('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f')]
-    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-    RULE = '-' * (len(HEAD) + 4)
-
-
 def _cells(fn):
     return ' | '.join(' '.join(fn(c) for c in cols) for _, cols in GROUPS)
 
 
 HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
 RULE = '-' * (len(HEAD) + 4)
+
+
+def use_omni_columns():
+    """Add the two OmniRetriever teacher losses to the table."""
+    global HEAD, RULE
+    GROUPS[0][1][5:5] = [('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f')]
+    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+    RULE = '-' * (len(HEAD) + 4)
 
 
 def print_header():
@@ -258,12 +276,13 @@ def build_loaders(cfg, rng):
     return ds, dv, dl, dlv
 
 
-def eval_only(a, cfg, model, dlv, dev, pool_raw, pool_text):
-    """Chấm một checkpoint với nhiều cấu hình NMS, in đủ các biến thể."""
+def eval_only(a, model, dlv, dev, pool_raw, pool_text):
+    """Score one checkpoint under several NMS / ranking settings, with all variants."""
     ck = torch.load(a.eval, map_location='cpu')
     model.load_state_dict(ck['state_dict'])
     print('Checkpoint   : %s (epoch %d)' % (a.eval, ck['epoch'] + 1), flush=True)
-    for power in a.iou_power.split(','):
+    powers = a.iou_power.split(',') if a.iou_power else [str(model.iou_power)]
+    for power in powers:
         model.iou_power = float(power)
         for spec in a.nms.split(','):
             kind, *rest = spec.split(':')
@@ -275,7 +294,7 @@ def eval_only(a, cfg, model, dlv, dev, pool_raw, pool_text):
 
 
 def apply_overrides(cfg, items):
-    """--set a.b.c=giá_trị: ghi đè config, giá trị đọc theo cú pháp YAML (số, true, list...)."""
+    """--set a.b.c=value overrides the config; values are parsed as YAML (numbers, bools, lists)."""
     for it in items:
         key, val = it.split('=', 1)
         node, parts = cfg, key.split('.')
@@ -283,6 +302,39 @@ def apply_overrides(cfg, items):
             node = node.setdefault(k, {})
         node[parts[-1]] = yaml.safe_load(val)
         print('Override     : %s = %r' % (key, node[parts[-1]]), flush=True)
+
+
+def git_state():
+    """Commit hash and whether tracked files have uncommitted changes."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    run = lambda *c: subprocess.run(c, cwd=here, capture_output=True, text=True).stdout.strip()
+    try:
+        return {'commit': run('git', 'rev-parse', '--short', 'HEAD'),
+                'branch': run('git', 'rev-parse', '--abbrev-ref', 'HEAD'),
+                'dirty': bool(run('git', 'status', '--porcelain', '--untracked-files=no'))}
+    except OSError:
+        return {'commit': 'unknown', 'branch': 'unknown', 'dirty': None}
+
+
+class RunRecord:
+    """Everything needed to compare and reproduce a run, saved after every epoch."""
+
+    def __init__(self, a, cfg, out_dir):
+        self.path = os.path.join(RUNS_DIR, '%s-%s.json' % (socket.gethostname(), a.output))
+        os.makedirs(RUNS_DIR, exist_ok=True)
+        self.data = {
+            'run': a.output, 'host': socket.gethostname(),
+            'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
+            'started': time.strftime('%Y-%m-%d %H:%M:%S'), 'finished': None,
+            'git': git_state(), 'argv': sys.argv, 'overrides': a.set, 'note': a.note,
+            'epochs': a.epochs, 'pretrain': a.pretrain or None, 'out_dir': out_dir,
+            'config': cfg, 'history': [], 'best': {}, 'final_eval': None,
+        }
+        self.save()
+
+    def save(self):
+        with open(self.path, 'w') as f:
+            json.dump(self.data, f, indent=1, default=str)
 
 
 def main(a):
@@ -305,7 +357,7 @@ def main(a):
     model = model.to(dev)
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
-    # kho caption lay tu TAP TRAIN, khong dung caption cua tap val
+    # the caption pool comes from the TRAIN split only; val captions are never used
     pool_raw = torch.from_numpy(ds.pool_emb).to(dev)
     model.set_caption_pool(pool_raw)
     if ds.omni:
@@ -314,9 +366,12 @@ def main(a):
                             torch.from_numpy(ds.omni_av_pool).to(dev))
     print('Caption pool : %d unique train captions' % len(ds.pool_text), flush=True)
     if a.eval:
-        return eval_only(a, cfg, model, dlv, dev, pool_raw, ds.pool_text)
+        return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text)
     os.makedirs(out_dir, exist_ok=True)
-    print('Output       : %s' % out_dir, flush=True)
+    rec = RunRecord(a, cfg, out_dir)
+    print('Output       : %s' % out_dir)
+    print('Run record   : %s (commit %s%s)' % (rec.path, rec.data['git']['commit'],
+                                               ', DIRTY' if rec.data['git']['dirty'] else ''), flush=True)
 
     opt = build_optimizer(model, cfg['opt'])
     sch = make_scheduler(opt, cfg['opt'], len(dl), a.epochs)
@@ -342,24 +397,36 @@ def main(a):
                            os.path.join(out_dir, name + '.pth.tar'))
         vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})
         print_row('%d/%d' % (ep + 1, n_ep), time.time() - t0, sch.get_last_lr()[0], vals, mark)
+        rec.data['history'].append(dict(vals, epoch=ep + 1, seconds=round(time.time() - t0, 1)))
+        rec.data['best'] = {k: {'value': v, 'epoch': e + 1, 'ckpt': n} for k, (v, e, n) in best.items()}
+        rec.save()
     print(RULE)
     for key, (val, ep, name) in best.items():
         print('Best %-6s = %6.2f at epoch %d -> %s' % (
             key, val, ep + 1, os.path.join(out_dir, name + '.pth.tar')), flush=True)
+
+    # full evaluation of the best captioning checkpoint, kept in the run record
+    model.load_state_dict(torch.load(os.path.join(out_dir, 'best_cap.pth.tar'), map_location='cpu')['state_dict'])
+    final = evaluate(model, dlv, dev, pool_raw, ds.pool_text, full=True)
+    rec.data['final_eval'] = dict(final, ckpt='best_cap')
+    rec.data['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    rec.save()
+    print('Final eval   : ' + '  '.join('%s %.3f' % (k, v) for k, v in final.items()), flush=True)
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('config'); p.add_argument('--output', default='ev1')
     p.add_argument('--epochs', type=int, default=10,
-                   help='40 epoch overfit tu epoch 7, 10 la du')
-    p.add_argument('--pretrain', default='', help='checkpoint UniAV gốc để khởi tạo')
-    p.add_argument('--eval', default='', help='chỉ chấm checkpoint này, không train')
-    p.add_argument('--nms', default='soft:0.7:0.5,soft:0.5:0.5,hard:0.5,hard:0.3',
-                   help='các cấu hình NMS để chấm khi dùng --eval')
-    p.add_argument('--iou-power', default='0.5',
-                   help='trọng số điểm IoU khi xếp hạng đoạn, 0 là chỉ dùng điểm sự kiện')
-    p.add_argument('--fast', action='store_true', help='--eval: bỏ các biến thể chậm')
+                   help='40 epochs overfit from epoch 7; 10 is enough')
+    p.add_argument('--pretrain', default='', help='original UniAV checkpoint to initialise from')
+    p.add_argument('--eval', default='', help='only score this checkpoint, no training')
+    p.add_argument('--nms', default='soft:0.7:0.5',
+                   help='NMS settings to score with --eval, comma separated, e.g. soft:0.7:0.5,hard:0.5')
+    p.add_argument('--iou-power', default='',
+                   help='--eval: IoU-score weights to try, comma separated; empty keeps the config value')
+    p.add_argument('--fast', action='store_true', help='--eval: skip the slow variants')
     p.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
-                   help='ghi đè config, ví dụ --set init_rand_seed=2 model.train_cfg.loss_weight_omni_av=0.5')
+                   help='override the config, e.g. --set init_rand_seed=2 model.train_cfg.loss_weight_omni_av=0.5')
+    p.add_argument('--note', default='', help='free text stored in the run record')
     main(p.parse_args())

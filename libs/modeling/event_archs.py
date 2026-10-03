@@ -1,25 +1,27 @@
-"""Kiến trúc tách sự kiện và sinh mô tả, không có lớp phân loại nào.
+"""Event segmentation + captioning architecture, with no classification layer.
 
-Ba đầu ra:
-  - đầu sự kiện  (B, T, 1)   : mốc này có nằm trong một sự kiện không
-  - đầu biên     (B, T, 2)   : khoảng cách tới hai biên của sự kiện đó
-  - đầu nhúng    (B, T, D)   : vector mô tả nội dung, cùng không gian với caption
+Three outputs:
+  - event head     (B, T, 1) : is this time step inside an event
+  - boundary head  (B, T, 2) : distances to the two boundaries of that event,
+                               plus an IoU-quality score used for ranking
+  - embedding head (B, T, D) : content vector in the same space as the captions
 
-Lúc suy luận: tách đoạn bằng điểm sự kiện và biên, rồi với mỗi đoạn lấy trung
-bình vector nhúng trên cả khoảng thời gian của đoạn, đem so cosine với kho caption
-để ra câu mô tả.
+Inference: segments come from the event and boundary heads. Each segment's vector is
+the mean embedding over its whole span (plus video context), compared by cosine with
+the caption pool to pick a caption.
 
-Hàm mất mát của đầu nhúng so với TOÀN BỘ kho caption tập train chứ không chỉ các
-caption trong lô, vì lúc suy luận model phải chọn đúng trong kho đó. Nhãn là phân
-phối mềm: một phần dồn vào caption thật, phần còn lại trải theo độ giống nhau giữa
-các caption (trong không gian ONE-PEACE), nên các câu diễn đạt khác của cùng một
-thao tác không bị phạt như câu sai hẳn.
+The embedding loss runs over the WHOLE train caption pool, not just the captions in
+the batch, because inference must pick from that pool. Targets are soft: part of
+the mass goes to the true caption and the rest is spread by caption-caption
+similarity (in ONE-PEACE space), so paraphrases of the same step are not punished
+like wrong captions.
 
-Tuỳ chọn thầy OmniRetriever-7B (omni_dim > 0), theo ý fusion-as-teacher của bài
-OmniRetriever: vector đoạn được chiếu sang không gian 3584 chiều của nó rồi
-  - kéo về vector audio+video mà model 7B sinh cho đúng clip GT (thầy, đã đóng băng)
-  - so với kho caption trong không gian đó, cùng nhãn mềm như trên
-Lúc suy luận cộng điểm của hai không gian.
+Optional OmniRetriever-7B teacher (omni_dim > 0), following the fusion-as-teacher
+idea of the OmniRetriever paper: the segment vector is projected into its
+3584-d space, then
+  - pulled toward the frozen audio+video vector the 7B model gives the GT clip
+  - contrasted with the caption pool in that space, with the same soft targets
+At inference the scores of both spaces are added.
 """
 import numpy as np
 import torch
@@ -41,7 +43,7 @@ def _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln):
 
 
 class EventHead(nn.Module):
-    """Một kênh duy nhất: mốc này có sự kiện hay không. Không biết lớp."""
+    """A single channel: is there an event at this time step. Class agnostic."""
 
     def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, prior_prob=0.01):
         super().__init__()
@@ -62,7 +64,7 @@ class EventHead(nn.Module):
 
 
 class EmbedHead(nn.Module):
-    """Mỗi mốc một vector đã chuẩn hoá L2, cùng không gian với caption đã chiếu."""
+    """One L2-normalised vector per time step, in the space of the projected captions."""
 
     def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536):
         super().__init__()
@@ -73,8 +75,8 @@ class EmbedHead(nn.Module):
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(self, fpn_feats, fpn_masks):
-        """Trả về vector đã chuẩn hoá của mọi mốc, kèm đặc trưng thô của tầng 0
-        (độ phân giải mịn nhất) để lấy trung bình theo đoạn."""
+        """Return the normalised vectors of every time step, plus the raw features of
+        level 0 (finest resolution) for span averaging."""
         res, raw0 = tuple(), None
         for x, m in zip(fpn_feats, fpn_masks):
             for i in range(len(self.head)):
@@ -91,10 +93,10 @@ class EmbedHead(nn.Module):
 
 
 def span_mean(raw, length, segs):
-    """Trung bình đặc trưng raw (D, T) trên các khoảng segs (N, 2) đơn vị lưới.
+    """Mean of raw features (D, T) over spans segs (N, 2), in grid units.
 
-    Dùng tổng tích luỹ nên không phải lặp qua từng đoạn. Đoạn nào ngắn hơn một
-    mốc vẫn lấy ít nhất một mốc.
+    Uses a cumulative sum, so there is no loop over segments. A span shorter than
+    one step still covers at least one step.
     """
     cs = F.pad(raw.cumsum(-1), (1, 0))                         # (D, T+1)
     lo = segs[:, 0].floor().clamp(0, length - 1).long()
@@ -104,11 +106,11 @@ def span_mean(raw, length, segs):
 
 
 class SegmentContext(nn.Module):
-    """Vector của một đoạn, có thêm bối cảnh của cả video.
+    """Segment vector with context from the whole video.
 
-    Đầu vào là trung bình đặc trưng trên đoạn, trung bình trên cả video (đang nấu
-    món gì) và vị trí tương đối của đoạn (bước đầu hay bước cuối công thức). Lớp
-    cuối khởi tạo bằng 0 nên lúc đầu nó chính là trung bình theo đoạn.
+    Inputs are the span mean, the whole-video mean (which dish is being cooked) and
+    the relative position of the span (early or late recipe step). The last layer
+    starts at zero, so initially this is exactly the span mean.
     """
 
     def __init__(self, dim):
@@ -130,7 +132,7 @@ class BoundaryHead(nn.Module):
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
         self.scale = nn.ModuleList([Scale() for _ in range(fpn_levels)])
         self.out = MaskedConv1D(feat_dim, 2, ks, stride=1, padding=ks // 2)
-        # du doan IoU giua doan sinh ra tu moc nay va doan that, dung de xep hang
+        # predicts the IoU between the segment from this step and the GT, used for ranking
         self.iou_out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
 
     def forward(self, fpn_feats, fpn_masks):
@@ -148,7 +150,7 @@ class BoundaryHead(nn.Module):
 
 @register_multimodal_meta_arch("EventCaptionTransformer")
 class EventCaptionTransformer(nn.Module):
-    """Tách sự kiện rồi sinh mô tả. Không có lớp phân loại nào."""
+    """Segment events, then caption them. No classification layer."""
 
     def __init__(self, backbone_type, backbone_arch, scale_factor, input_dim_V,
                  input_dim_A, n_head, embd_kernel_size, embd_dim, embd_with_ln,
@@ -171,7 +173,7 @@ class EventCaptionTransformer(nn.Module):
         self.nms_cfg = {'soft': test_cfg.get('soft_nms', True),
                         'iou': test_cfg.get('nms_iou', 0.7),
                         'sigma': test_cfg.get('nms_sigma', 0.5)}
-        # nhung: nhan mem tren toan kho, va trung binh theo doan
+        # embedding: soft targets over the whole pool, and span-averaged vectors
         self.w_span = train_cfg.get('loss_weight_span', 1.0)
         self.soft_alpha = train_cfg.get('emb_soft_alpha', 0.5)
         self.soft_tau = train_cfg.get('emb_soft_tau', 0.02)
@@ -205,13 +207,13 @@ class EventCaptionTransformer(nn.Module):
             self.omni_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def set_caption_pool(self, pool_raw):
-        """Kho caption tập train (N, 1536), dùng làm tập mẫu âm khi huấn luyện."""
+        """Train caption pool (N, 1536), used as the negative set during training."""
         self.pool_raw = pool_raw
         self.pool_n = F.normalize(pool_raw, dim=-1)
 
     def set_omni_pool(self, text_pool, text_ok, av_pool):
-        """Kho của thầy: vector caption (N, d) thẳng hàng với kho caption, và
-        vector audio+video của từng clip GT (K, d)."""
+        """Teacher pools: caption vectors (N, d) aligned with the caption pool, and the
+        audio+video vector of every GT clip (K, d)."""
         self.omni_text = F.normalize(text_pool.float(), dim=-1)
         self.omni_text_ok = text_ok
         self.omni_av = F.normalize(av_pool.float(), dim=-1)
@@ -255,10 +257,10 @@ class EventCaptionTransformer(nn.Module):
         return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
 
     def pool_loss(self, q, gt_idx, pool_f, log_scale=None, col_ok=None):
-        """Cross-entropy trên toàn kho với nhãn mềm.
+        """Cross-entropy over the whole pool with soft targets.
 
-        q (M, D) đã chuẩn hoá, gt_idx (M,) chỉ số caption thật trong kho.
-        col_ok (N,) đánh dấu caption nào trong kho dùng được.
+        q (M, D) normalised queries, gt_idx (M,) index of the true caption in the pool.
+        col_ok (N,) marks which pool captions are usable.
         """
         log_scale = self.embed_head.logit_scale if log_scale is None else log_scale
         logit = log_scale.exp().clamp(max=100) * (q @ pool_f.t())
@@ -283,16 +285,16 @@ class EventCaptionTransformer(nn.Module):
         self.loss_normalizer = (self.loss_normalizer_momentum * self.loss_normalizer
                                 + (1 - self.loss_normalizer_momentum) * max(n_pos, 1))
 
-        # 1. co su kien hay khong, nhi phan, khong co lop
+        # 1. event or not: binary, no classes
         ev_loss = sigmoid_focal_loss(ev[valid], is_event[valid].float(),
                                      reduction='sum') / self.loss_normalizer
-        # 2. bien doan
+        # 2. segment boundaries
         if n_pos == 0:
             rg_loss = 0 * bd.sum()
         else:
             rg_loss = ctr_diou_loss_1d(bd[pos], gt_off[pos], reduction='sum',
                                        class_aware=False) / self.loss_normalizer
-        # 2b. chat luong bien: hoc doan IoU that cua chinh du doan, dung de xep hang
+        # 2b. boundary quality: predict the true IoU of this prediction, used for ranking
         if n_pos == 0:
             iou_loss = 0 * qu.sum()
         else:
@@ -301,8 +303,8 @@ class EventCaptionTransformer(nn.Module):
             union = p.sum(-1) + g.sum(-1) - inter
             tgt = (inter / union.clamp(min=1e-6)).clamp(0, 1)
             iou_loss = F.binary_cross_entropy_with_logits(qu[pos], tgt)
-        # 3. nhung tung moc: tuong phan voi toan kho caption
-        assert self.pool_raw is not None, 'goi set_caption_pool truoc khi train'
+        # 3. per-step embedding: contrast against the whole caption pool
+        assert self.pool_raw is not None, 'call set_caption_pool before training'
         cap_pool = torch.stack([x['cap_pool_idx'] for x in video_list]).to(dev)  # (B,NMAX)
         pool_f = self.embed_head.embed_captions(self.pool_raw)                  # (N, D)
         if n_pos == 0:
@@ -314,8 +316,8 @@ class EventCaptionTransformer(nn.Module):
                 bi, pi = bi[sel], pi[sel]
             gt = cap_pool[bi, gt_cls[bi, pi].argmax(-1)]
             em_loss = self.pool_loss(em[bi, pi], gt, pool_f)
-        # 4. nhung theo doan: trung binh tren khoang GT, them mot ban bi xe dich
-        #    de quen voi bien du doan khong khop hoan toan luc suy luan
+        # 4. span embedding: mean over the GT span, plus a jittered copy so the model
+        #    copes with predicted boundaries that are slightly off at inference
         qs, gs, avs = [], [], []
         for b, x in enumerate(video_list):
             seg = x['segments'].to(dev).float()
@@ -339,13 +341,13 @@ class EventCaptionTransformer(nn.Module):
         out['span_loss'] = span_loss
         total = (ev_loss + self.w_reg * rg_loss + self.w_iou * iou_loss
                  + self.w_emb * em_loss + self.w_span * span_loss)
-        # 5. thay OmniRetriever: caption trong khong gian cua no, va clip GT lam dich
+        # 5. OmniRetriever teacher: captions in its space, and the GT clip as target
         if self.omni_dim > 0:
             zero = 0 * raw0.sum()
             ot, oa = zero, zero
             if len(gs):
                 so = self.omni_embed(qs)
-                rk = self.omni_text_ok[gs]          # bo doan ma caption thieu vector thay
+                rk = self.omni_text_ok[gs]          # skip spans whose caption has no teacher vector
                 if rk.any():
                     ot = self.pool_loss(so[rk], gs[rk], self.omni_text, self.omni_logit_scale,
                                         self.omni_text_ok)
@@ -360,7 +362,7 @@ class EventCaptionTransformer(nn.Module):
 
     @torch.no_grad()
     def inference(self, video_list, valid, ev, bd, qu, em, raw0, len0):
-        """Tách đoạn bằng điểm sự kiện nhân điểm chất lượng biên, trả kèm vector nhúng."""
+        """Segment with event score times boundary-quality score, and return the embeddings."""
         from ..utils import batched_nms
         a = self.iou_power
         prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
@@ -382,7 +384,7 @@ class EventCaptionTransformer(nn.Module):
             emb = em[b][keep].cpu()
             ok = (segs[:, 1] - segs[:, 0]) > self.test_duration_thresh
             segs, scores, emb = segs[ok], scores[ok], emb[ok]
-            # NMS khong theo lop: dung mot nhan gia duy nhat
+            # class-agnostic NMS: a single dummy label
             if segs.shape[0] > 0:
                 idx = torch.arange(segs.shape[0])
                 s2, sc2, idx2 = batched_nms(segs, scores, idx, self.nms_cfg['iou'], 0.001,
@@ -392,14 +394,14 @@ class EventCaptionTransformer(nn.Module):
                                             voting_thresh=0.0)
                 emb = emb[idx2.long()]
                 segs, scores = s2, sc2
-            # vector cua doan = trung binh tren ca khoang, tinh truoc khi doi ra giay
+            # segment vector = mean over the whole span, computed before converting to seconds
             if segs.shape[0] > 0:
                 span = self.seg_ctx(raw0[b], int(len0[b]), segs.to(raw0.device))
             else:
                 span = emb.to(raw0.device)
             omni = self.omni_embed(span).cpu() if self.omni_dim > 0 else None
             span = span.cpu()
-            # vector cua chinh cac doan GT, de cham phan mo ta tach rieng khoi phan tach doan
+            # vectors of the GT spans themselves, to score captioning apart from segmentation
             gseg = v['segments'].to(raw0.device).float()
             gemb = self.seg_ctx(raw0[b], int(len0[b]), gseg)
             gomni = self.omni_embed(gemb).cpu() if self.omni_dim > 0 else None

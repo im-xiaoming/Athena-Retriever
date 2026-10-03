@@ -1,10 +1,10 @@
-"""Sinh data/youcookii/caption_emb.npz: vector ONE-PEACE 1536 chiều cho mọi caption YouCook2.
+"""Build data/youcookii/caption_emb.npz: 1536-d ONE-PEACE vectors for every YouCook2 caption.
 
   python tools/embed_captions.py
 
-Chạy trong uniav-env, chỉ cần CPU. Khoảng 50 phút cho 11594 câu. Tiến độ được lưu sau
-mỗi 640 câu nên bị dừng thì chạy lại là tiếp tục. Chỉ lấy video đã có đủ đặc trưng
-video và audio, khoá "<video>#<chỉ số đoạn>" giống dataset youcook2_cap.
+Runs in uniav-env on CPU, about 50 minutes for 11594 captions. Progress is saved every
+640 captions, so a rerun resumes. Only videos with both video and audio features are
+used, keyed "<video>#<segment index>" like the youcook2_cap dataset.
 """
 import json
 import os
@@ -53,7 +53,7 @@ def main():
                 print('%d/%d  ~%.1f min left' % (d, n, (n - d) * (time.time() - t0) / max(d - done, 1) / 60),
                       flush=True)
         np.save(PART, emb)
-    # float16 cho nhe, vector da chuan hoa nen sai so khong dang ke
+    # float16 keeps the file small; vectors are normalised so the error is negligible
     np.savez_compressed(OUT, keys=np.array(keys), emb=emb.astype(np.float16),
                         sentences=np.array(caps, dtype=object))
     if os.path.exists(PART):

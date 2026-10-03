@@ -44,7 +44,7 @@ dataset:
   file_ext: .npy
   force_upsampling: true
   multi_modal: true
-  # thay OmniRetriever-7B, sinh bang tools/omni_youcook2.py. Bo comment de bat
+  # OmniRetriever-7B teacher vectors, built with tools/omni_youcook2.py. Uncomment to enable
   # omni_emb_file: ./data/youcookii/omni_emb.npz
 model:
   backbone_type: convTransformer

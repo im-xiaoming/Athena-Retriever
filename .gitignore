@@ -17,3 +17,4 @@ OmniRetreiver
 data/youcook2_cut/
 data/youcookii/omni_emb*.npz
 .env
+data/youcookii/.cache/
