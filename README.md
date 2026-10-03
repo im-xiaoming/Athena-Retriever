@@ -9,7 +9,7 @@ This paper introduces the first unified framework to localize all three kinds of
 <!-- ![](.\overview_final_new.jpg) -->
 
 ## Requirements
-The implemetation is based on PyTorch. Environment: Linux, GCC >= 4.9, CUDA >= 11.0, Python = 3.9, Pytorch = 1.11.0.  Follow [INSTALL.md](INSTALL.md) to install required dependencies.
+The implemetation is based on PyTorch. Environment: Linux, GCC >= 4.9, CUDA >= 11.0, Python = 3.9, Pytorch = 1.11.0.  Follow [INSTALL.md](docs/INSTALL.md) to install required dependencies.
 
 ## Data preparation
 <!-- #### Download features and annotations -->
