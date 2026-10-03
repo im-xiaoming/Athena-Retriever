@@ -88,6 +88,29 @@ def mbr_pick(s, pool_n, scale, k=20):
     return int(top.indices[0]), int(top.indices[agree.argmax()])
 
 
+def meteor(gts, hyp, timeout=300):
+    """METEOR via pycocoevalcap (java), in a daemon thread with a time limit.
+
+    On Colab the java helper can die mid-way and leave the call blocked forever, so
+    a failure or timeout returns None instead of hanging the whole evaluation.
+    """
+    import threading
+    res = {}
+
+    def run():
+        try:
+            from pycocoevalcap.meteor.meteor import Meteor
+            res['v'] = Meteor().compute_score(gts, hyp)[0] * 100
+        except Exception as e:
+            res['err'] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start(); t.join(timeout)
+    if 'v' not in res:
+        print('METEOR skipped: %s' % res.get('err', 'timed out after %ds' % timeout), flush=True)
+    return res.get('v')
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), full=False):
     """Score segmentation and captioning on the validation set.
@@ -184,11 +207,9 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
         for v in ('top1', 'pt_top1') + (('mbr_onepeace', 'mbr_omni') if omni else ()):
             out['ret_sim[%s]' % v] = mean(ret[v])
             out['CIDEr[%s]' % v] = cider(v)
-        try:   # METEOR needs java, skip it where java is missing
-            from pycocoevalcap.meteor.meteor import Meteor
-            out['METEOR'] = Meteor().compute_score(gts_txt, hyp['mbr'])[0] * 100
-        except Exception as e:
-            print('METEOR skipped: %s' % e, flush=True)
+        m = meteor(gts_txt, hyp['mbr'])
+        if m is not None:
+            out['METEOR'] = m
         out['ret_sim[oracle]'] = mean(ret['oracle'])
         out['CIDEr[oracle]'] = Cider().compute_score(gts_or, hyp_or)[0] * 100
         out['n_captioned'] = len(gts_txt)
