@@ -305,13 +305,18 @@ def apply_overrides(cfg, items):
 
 
 def git_state():
-    """Commit hash and whether tracked files have uncommitted changes."""
+    """Commit hash and whether tracked source files have uncommitted changes.
+
+    Build artefacts (*.egg-info) are ignored: installing nms_1d_cpu rewrites them.
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     run = lambda *c: subprocess.run(c, cwd=here, capture_output=True, text=True).stdout.strip()
     try:
+        changed = [l for l in run('git', 'status', '--porcelain', '--untracked-files=no').splitlines()
+                   if '.egg-info/' not in l]
         return {'commit': run('git', 'rev-parse', '--short', 'HEAD'),
                 'branch': run('git', 'rev-parse', '--abbrev-ref', 'HEAD'),
-                'dirty': bool(run('git', 'status', '--porcelain', '--untracked-files=no'))}
+                'dirty': bool(changed)}
     except OSError:
         return {'commit': 'unknown', 'branch': 'unknown', 'dirty': None}
 
