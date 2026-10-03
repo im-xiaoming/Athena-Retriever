@@ -54,6 +54,19 @@ def register_packages(repo):
             m = types.ModuleType(name); m.__path__ = [path]; sys.modules[name] = m
 
 
+# BEATs iter3 configuration, copied from the cfg stored in BEATs_iter3_plus_AS2M.pt; the
+# encoder weights in audio_6b.pth match it exactly. finetuned_model=False: no AudioSet head.
+BEATS_ITER3_CFG = {
+    'encoder_layers': 12, 'encoder_embed_dim': 768, 'encoder_ffn_embed_dim': 3072,
+    'encoder_attention_heads': 12, 'activation_fn': 'gelu', 'dropout': 0.0, 'attention_dropout': 0.0,
+    'activation_dropout': 0.0, 'encoder_layerdrop': 0.0, 'dropout_input': 0.0, 'layer_norm_first': False,
+    'conv_bias': False, 'conv_pos': 128, 'conv_pos_groups': 16, 'relative_position_embedding': True,
+    'num_buckets': 320, 'max_distance': 800, 'gru_rel_pos': True, 'deep_norm': True, 'input_patch_size': 16,
+    'layer_wise_gradient_decay_ratio': 0.6, 'embed_dim': 512, 'finetuned_model': False,
+    'predictor_dropout': 0.0, 'predictor_class': 527,
+}
+
+
 class EasyDict(dict):
     __getattr__ = dict.get
 
@@ -87,9 +100,9 @@ def build_audio_model(repo, ckpt, device):
     register_packages(repo)
     from models.backbones.beats.BEATs import BEATs, BEATsConfig
     ck = torch.load(ckpt, map_location='cpu', weights_only=False)
-    model = BEATs(BEATsConfig(ck['cfg']))
-    print('audio encoder:', model.load_state_dict(ck['model'], strict=False), flush=True)
-    model.predictor = None   # drop the AudioSet classifier head so extract_features returns embeddings
+    sd = ck['model'] if 'model' in ck else ck   # audio_6b.pth is a bare state dict without 'cfg'
+    model = BEATs(BEATsConfig(BEATS_ITER3_CFG))
+    print('audio encoder:', model.load_state_dict(sd, strict=True), flush=True)
     return model.to(device).eval()
 
 
