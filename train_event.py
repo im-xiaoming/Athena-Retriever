@@ -55,6 +55,18 @@ def build_optimizer(model, opt):
     ], lr=opt['learning_rate'])
 
 
+def load_ckpt(path):
+    """torch.load for our own checkpoints on any torch version.
+
+    torch >= 2.6 defaults to weights_only=True, which rejects the metrics dict stored
+    next to the weights; torch 1.11 has no weights_only argument at all.
+    """
+    try:
+        return torch.load(path, map_location='cpu', weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location='cpu')
+
+
 def iou(a, b):
     i = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
     u = (a[1] - a[0]) + (b[1] - b[0]) - i
@@ -191,7 +203,7 @@ def load_pretrain(model, path):
     cls_head                   -> embed_head    same clip_proj and vis_proj
     cls_head (tower)           -> event_head    tower only, the output layer starts fresh
     """
-    sd = torch.load(path, map_location='cpu')
+    sd = load_ckpt(path)
     sd = sd.get('state_dict_ema') or sd['state_dict']
     sd = {k.replace('module.', '', 1): v for k, v in sd.items()}
     rules = [('backbone.', 'backbone.'),
@@ -278,7 +290,7 @@ def build_loaders(cfg, rng):
 
 def eval_only(a, model, dlv, dev, pool_raw, pool_text):
     """Score one checkpoint under several NMS / ranking settings, with all variants."""
-    ck = torch.load(a.eval, map_location='cpu')
+    ck = load_ckpt(a.eval)
     model.load_state_dict(ck['state_dict'])
     print('Checkpoint   : %s (epoch %d)' % (a.eval, ck['epoch'] + 1), flush=True)
     powers = a.iou_power.split(',') if a.iou_power else [str(model.iou_power)]
@@ -337,6 +349,14 @@ class RunRecord:
         }
         self.save()
 
+    @classmethod
+    def load(cls, run):
+        rec = cls.__new__(cls)
+        rec.path = os.path.join(RUNS_DIR, '%s-%s.json' % (socket.gethostname(), run))
+        with open(rec.path) as f:
+            rec.data = json.load(f)
+        return rec
+
     def save(self):
         with open(self.path, 'w') as f:
             json.dump(self.data, f, indent=1, default=str)
@@ -372,6 +392,9 @@ def main(a):
     print('Caption pool : %d unique train captions' % len(ds.pool_text), flush=True)
     if a.eval:
         return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text)
+    if a.finalize:   # redo the final evaluation of a finished run, e.g. after a crash in it
+        rec = RunRecord.load(a.output)
+        return finalize(rec, model, dlv, dev, pool_raw, ds.pool_text)
     os.makedirs(out_dir, exist_ok=True)
     rec = RunRecord(a, cfg, out_dir)
     print('Output       : %s' % out_dir)
@@ -410,11 +433,16 @@ def main(a):
         print('Best %-6s = %6.2f at epoch %d -> %s' % (
             key, val, ep + 1, os.path.join(out_dir, name + '.pth.tar')), flush=True)
 
-    # full evaluation of the best captioning checkpoint, kept in the run record
-    model.load_state_dict(torch.load(os.path.join(out_dir, 'best_cap.pth.tar'), map_location='cpu')['state_dict'])
-    final = evaluate(model, dlv, dev, pool_raw, ds.pool_text, full=True)
+    finalize(rec, model, dlv, dev, pool_raw, ds.pool_text)
+
+
+def finalize(rec, model, dlv, dev, pool_raw, pool_text):
+    """Full evaluation of the run's best captioning checkpoint, stored in the run record."""
+    ck = os.path.join(rec.data['out_dir'], 'best_cap.pth.tar')
+    model.load_state_dict(load_ckpt(ck)['state_dict'])
+    final = evaluate(model, dlv, dev, pool_raw, pool_text, full=True)
     rec.data['final_eval'] = dict(final, ckpt='best_cap')
-    rec.data['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    rec.data['finished'] = rec.data.get('finished') or time.strftime('%Y-%m-%d %H:%M:%S')
     rec.save()
     print('Final eval   : ' + '  '.join('%s %.3f' % (k, v) for k, v in final.items()), flush=True)
 
@@ -434,4 +462,6 @@ if __name__ == '__main__':
     p.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
                    help='override the config, e.g. --set init_rand_seed=2 model.train_cfg.loss_weight_omni_av=0.5')
     p.add_argument('--note', default='', help='free text stored in the run record')
+    p.add_argument('--finalize', action='store_true',
+                   help='only redo the final evaluation of the finished run --output (same --set as training)')
     main(p.parse_args())
