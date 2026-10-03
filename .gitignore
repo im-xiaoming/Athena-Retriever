@@ -13,3 +13,4 @@ ONEPEACE_extract_embd_code
 youcook2_extract_caption
 __pycache__/
 *.pyc
+HANDOFF.md

@@ -81,7 +81,8 @@ class YouCook2CaptionDataset(Dataset):
         return self.db_attributes
 
     def _load_json_db(self, json_file):
-        db = json.load(open(json_file))['database']
+        with open(json_file) as f:
+            db = json.load(f)['database']
         out = []
         for vid, value in db.items():
             if value['subset'].lower() not in self.split:
