@@ -25,6 +25,8 @@ Lessons from each change and what to combine next. The results table is in
 | 10 epochs instead of 40 | 40 epochs overfit from epoch 7 (R@0.5 50.8 → 42.9 by epoch 12) | yes |
 | Video context + position in the segment vector | CIDEr +2.5, within noise | yes (cheap) |
 | OmniRetriever teacher, 65% coverage (`omni65`) | ret_sim +0.010, METEOR +1.0, top-1 +0.018; outside noise | yes |
+| Teacher at 100% coverage (`omni100`, `omni100_seed2`) | same as 65%: ret_sim 0.754–0.755, top-1 0.736–0.739 | yes |
+| Teacher weights 0.5/0.5 (`omni100_w05`) or av target only (`omni100_avonly`) | within noise of the default 0.2/0.2 | default |
 | Span-mean vector instead of single anchor point | no difference | kept, needed by the teacher |
 | Original UniAV checkpoint (`--pretrain`) | worse twice: R@0.5 −3.7, CIDEr −17 | no |
 | `max_seq_len: 512` | same as 256 | no |
@@ -43,6 +45,17 @@ Lessons from each change and what to combine next. The results table is in
   next feature candidate.
 - The model is data limited: it overfits by epoch 7. 290 annotated videos still have
   no features.
+
+## Round 2 conclusion (2026-10-04)
+
+Across 5 teacher runs vs 2 no-teacher runs, the teacher is a consistent captioning
+gain: ret_sim 0.753–0.758 vs 0.748–0.751, top-1 0.734–0.740 vs 0.722–0.729, METEOR
+15.1–15.4 vs 14.4–14.6. The weighting does not matter. Segmentation is unchanged
+(R@0.5 47–50 everywhere), so the teacher only helps the representation of a span,
+and only a little: ret_sim is still far from the 0.896 ceiling.
+Scoring with the teacher space alone (ret_sim[mbr_omni] 0.746) is worse than the
+ONE-PEACE space, so the gain comes from better segment vectors, not from retrieval
+in the teacher's space.
 
 ## Planned combinations
 

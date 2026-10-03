@@ -7,6 +7,10 @@ Run-to-run noise (seed only): R@0.5 about 2, CIDEr about 5, ret_sim about 0.003.
 
 | run | host | commit | teacher | overrides | R@0.5 | R@0.7 | mIoU | ret_sim | top1 | CIDEr | METEOR | oracle | best seg R@0.5 | note |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| omni65 | DESKTOP-8PSQBN9 | 64ab078 | yes | `-` | 48.70 | 25.30 | 46.12 | 0.758* | 0.740* | 86.5 | 15.44* | 0.749* | 51.17* | OmniRetriever teacher, 65% of train clips have av vectors (backfilled) |
+| omni65 | DESKTOP-8PSQBN9 | 64ab078 | yes | `-` | 48.70 | 25.30 | 46.12 | 0.758* | 0.740* | 86.5 | 15.44 | 0.749 | 51.17 | OmniRetriever teacher, 65% of train clips have av vectors (backfilled) |
+| omni100 | DESKTOP-8PSQBN9 | 3383928 | yes | `dataset.omni_emb_file=./data/youcookii/omni_emb_full.npz` | 49.13 | 26.36 | 47.25 | 0.755 | 0.739 | 86.4 | 15.09 | 0.748 | 50.91 | teacher 100% coverage, default weights 0.2/0.2 |
+| omni100_seed2 | DESKTOP-8PSQBN9 | 849ea3a+dirty | yes | `dataset.omni_emb_file=./data/youcookii/omni_emb_full.npz init_rand_seed=2024` | 47.44 | 24.48 | 45.48 | 0.754 | 0.736 | 85.2 | 15.44* | 0.749* | 50.18 | teacher 100%, default weights, second seed: noise check |
+| omni100_avonly | 728ad1edf5d0 | 9b8cd06+dirty | yes | `dataset.omni_emb_file=./data/youcookii/omni_emb_full.npz num_workers=4 model.train_cfg.loss_weight_omni_txt=0.0` | 49.39 | 25.64 | 46.78 | 0.754 | 0.735 | 84.4 | - | 0.747 | 51.17* | teacher 100%, av target only (text weight 0) |
+| omni100_w05 | 728ad1edf5d0 | 9b8cd06+dirty | yes | `dataset.omni_emb_file=./data/youcookii/omni_emb_full.npz num_workers=4 model.train_cfg.loss_weight_omni_txt=0.5 model.train_cfg.loss_weight_omni_av=0.5` | 50.35* | 26.23 | 47.55 | 0.753 | 0.734 | 85.8 | - | 0.748 | 50.64 | teacher 100%, teacher weights 0.5/0.5 |
 | base_seed2 | DESKTOP-8PSQBN9 | 64ab078 | no | `init_rand_seed=2024` | 47.08 | 23.89 | 44.99 | 0.751 | 0.729 | 83.4 | 14.59 | 0.747 | 49.82 | baseline, second seed: noise estimate (backfilled) |
-| sched10 | DESKTOP-8PSQBN9 | 64ab078 | no | `-` | 49.32* | 26.62* | 47.66* | 0.748 | 0.722 | 88.0* | 14.44 | 0.742 | 49.46 | baseline: pool loss + MBR + seg context + IoU ranking, no teacher (backfilled) |
+| sched10 | DESKTOP-8PSQBN9 | 64ab078 | no | `-` | 49.32 | 26.62* | 47.66* | 0.748 | 0.722 | 88.0* | 14.44 | 0.742 | 49.46 | baseline: pool loss + MBR + seg context + IoU ranking, no teacher (backfilled) |
