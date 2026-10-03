@@ -31,11 +31,16 @@ STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 def stub_flash_attn():
-    """The InternVideo2 code imports flash_attn unconditionally; we run with it disabled."""
-    for name in ('flash_attn', 'flash_attn.flash_attn_interface', 'flash_attn.modules',
-                 'flash_attn.modules.mlp', 'flash_attn.ops', 'flash_attn.ops.rms_norm'):
-        sys.modules.setdefault(name, types.ModuleType(name))
-    sys.modules['flash_attn.flash_attn_interface'].flash_attn_varlen_qkvpacked_func = None
+    """InternVideo2 imports flash_attn at module level; we run with flash attention disabled,
+    so its FlashAttention wrapper is replaced by a placeholder that is never called."""
+    m = types.ModuleType('models.backbones.internvideo2.flash_attention_class')
+
+    class FlashAttention(torch.nn.Module):
+        def forward(self, *args, **kwargs):
+            raise RuntimeError('flash attention is disabled')
+
+    m.FlashAttention = FlashAttention
+    sys.modules[m.__name__] = m
 
 
 def register_packages(repo):
@@ -54,8 +59,8 @@ class EasyDict(dict):
 
 
 def build_video_model(repo, ckpt, device):
-    stub_flash_attn()
     register_packages(repo)
+    stub_flash_attn()
     from models.backbones.internvideo2.internvideo2 import pretrain_internvideo2_1b_patch14_224
     cfg = EasyDict(vision_encoder=EasyDict(
         clip_embed_dim=768, use_flash_attn=False, use_fused_rmsnorm=False, use_fused_mlp=False,
