@@ -48,7 +48,7 @@ def main():
         fv, fa, n = spec.prepare(*spec.from_store(vid, feats))
         V, A = fv.to(dev)[None], fa.to(dev)[None]
         mask = torch.ones(1, 1, V.shape[-1], dtype=torch.bool, device=dev)
-        fV, fA, msk = m.backbone(V, A, mask, 'TASK1', 'TAL')
+        fV, fA, msk = m.backbone(V, A, mask)
         _, raw0 = m.embed_head([torch.cat((v, a), 1) for v, a in zip(fV, fA)], msk)
         raw0, L = raw0[0], int(msk[0].sum())
         step = float((n - 1) * spec.stride + spec.window) / spec.max_seq_len   # frames per grid step

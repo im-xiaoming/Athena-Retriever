@@ -20,6 +20,20 @@ trong `docs/HANDOFF.md`; file này chỉ gồm những gì cần để làm ti�
 - **Hỏi đường dẫn dữ liệu, không tự đoán.** Mọi thứ cần cho các việc dưới đây đã nằm trên HF hoặc GitHub (mục 2).
 - **Mức nhiễu giữa các seed:** khoảng ±1.5 R@0.5, ±0.003 ret_sim, ±2 CIDEr. Chênh lệch nhỏ hơn mức này thì phải chạy thêm seed mới kết luận được.
 
+## 0b. Cập nhật 2026-10-05: nhánh `cleanup-iv2text`
+
+Nhánh này (tạo từ `exp-dense-capgen` + `api-capgen`) dọn code và thêm không gian chữ InternVideo2. **Các lượt train mới nên tạo nhánh từ đây.**
+
+- **Không gian chữ InternVideo2** (`dataset.caption_space=iv2`): vector caption từ tháp chữ của chính InternVideo2-1B (BERT-large 19 lớp + `text_proj`), cùng không gian với đặc trưng `v512`. File `data/youcookii/caption_emb_iv2.npz` có sẵn trong git, tạo bằng `tools/embed_captions.py`. Vector đã trừ vector trung bình của các caption train: vector thô có cosine trung bình 0.95, khiến soft target rải đều cho khoảng 7000 câu. ret_sim vẫn đo bằng ONE-PEACE, nên so được với mọi lượt cũ.
+- **Model chỉ còn 68.2M tham số thay vì 135.4M.** Mỗi khối transformer từng có 3 MLP cho TAL/AVEL/SED, nhưng chỉ MLP TAL được chạy; 67M tham số kia không bao giờ dùng. Checkpoint cũ vẫn nạp được (`upgrade_state_dict`). Đánh giá lại `ckpt/iv2` cho ra đúng từng số (R@0.5 54.273, ret_sim 0.754, CIDEr 87.935). Do thứ tự khởi tạo đổi, train lại cùng seed sẽ không ra đúng từng bit như trước, nhưng vẫn nằm trong nhiễu seed.
+- **Đã xoá:**
+  - pipeline đa nhiệm cũ: `train.py`, `eval.py`, dataset ActivityNet/UnAV-100/DESED, các config `multi_task`/`smoke`/`len512`/`merged51`;
+  - đường đặc trưng ONE-PEACE;
+  - `--pretrain`;
+  - các registry.
+- **Config mặc định:** giờ đã là `feat_source: iv2` và **bật thầy** (`omni_emb_file: ./data/youcookii/omni_emb_full.npz`). Lệnh cũ có `--set` hai khoá đó vẫn chạy. Muốn train không có thầy thì đặt `dataset.omni_emb_file=null`.
+- **Xuất checkpoint cho API:** `tools/export_api_ckpt.py` giờ lưu thêm vector caption của không gian train vào checkpoint, nên API tự xử lý model `caption_space=iv2`, kể cả tìm kiếm bằng tháp chữ IV2.
+
 ## 1. Dựng môi trường
 
 Môi trường train trên PC: Python 3.8, torch 1.11 cu113, numpy 1.23, pyyaml, pandas, h5py, tensorboard,
@@ -72,6 +86,7 @@ python train_event.py configs/youcook2_event.yaml --output <run> --note '<mô t�
 
 | Tuỳ chọn | Tác dụng |
 |---|---|
+| `dataset.caption_space=iv2` | train và chọn câu trong không gian chữ của InternVideo2 (nhánh `cleanup-iv2text`) |
 | `dataset.caption_space=omni` | train và chọn câu trong không gian text của thầy, không dùng ONE-PEACE text |
 | `model.train_cfg.omni_target=tva` | đích của thầy = vector AV của clip + vector caption |
 | `model.train_cfg.loss_weight_modal=0.1` | thêm vector đoạn chỉ từ nhánh V và chỉ từ nhánh A, kéo về vector gộp (L_D của paper OmniRetriever) |
@@ -121,8 +136,9 @@ Tách đoạn đã chững quanh 52–54 R@0.5. Phần chọn câu tăng nhẹ v
 
 ## 5. Việc tiếp theo, theo thứ tự đề xuất
 
+0. **`caption_space=iv2`, 2 seed** (nhánh `cleanup-iv2text`). Nên thử thêm `dataset.iv2_video_keys=[v768,v512]`. Nếu ret_sim tụt, thử `model.train_cfg.emb_soft_tau` khác: soft target trong không gian IV2 rải trên khoảng 50 câu, ONE-PEACE chỉ khoảng 2.
 1. **Seed thứ hai** cho hai hướng có triển vọng: `iv2_len512` và `teach_tva`. Sau đó thử ghép cả hai (`max_seq_len 512` + `omni_target=tva`), chạy 2 seed.
-2. **Các biến thể chưa kịp chạy:** `modal_aux` (`loss_weight_modal=0.1`) và `wide` (`model.embd_dim=768 model.head_dim=768`, 299M tham số).
+2. **Các biến thể chưa kịp chạy:** `modal_aux` (`loss_weight_modal=0.1`) và `wide` (`model.embd_dim=768 model.head_dim=768`, 141M tham số).
 3. **Đặc trưng dày 2 dòng/giây:** khi có `iv2_feats_shift` trên HF, chạy `tools/make_iv2_dense.py`, rồi train với `iv2_rows_per_sec=2` và `max_seq_len 512`. Kỳ vọng nhỏ: nhãn GT chỉ chính xác tới từng giây, và 512 bước với đặc trưng nội suy cũng không giúp tách đoạn.
 4. **Sinh câu:**
    - Tạo lại `segments.npz` bằng `python tools/capgen/dump_segments.py`. Script dùng `uniav_api` và `ckpt/api/uniav_iv2.pth`, cần `transformers<4.50`.

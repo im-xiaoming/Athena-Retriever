@@ -136,7 +136,7 @@ class EventCaptionModel(nn.Module):
         self.iou_power = test_cfg.get('iou_power', 0.3)
         self.backbone = ConvTransformerBackbone(
             n_in_V=input_dim_V, n_in_A=input_dim_A, n_embd=embd_dim, n_head=n_head,
-            n_embd_ks=embd_kernel_size, max_len={'TASK1': max_seq_len}, arch=backbone_arch,
+            n_embd_ks=embd_kernel_size, max_len=max_seq_len, arch=backbone_arch,
             scale_factor=scale_factor, with_ln=embd_with_ln, attn_pdrop=0.0, proj_pdrop=0.0,
             # droppath > 0 builds AffineDropPath, whose learned per-channel scale is still applied
             # in eval mode; with 0 the blocks become Identity and those weights would be lost
@@ -164,7 +164,7 @@ class EventCaptionModel(nn.Module):
         V = visual.new_zeros(1, visual.shape[0], max_len); V[0, :, :T] = visual
         A = audio.new_zeros(1, audio.shape[0], max_len); A[0, :, :T] = audio
         mask = (torch.arange(max_len, device=dev)[None] < T).unsqueeze(1)
-        fV, fA, msk = self.backbone(V, A, mask, 'TASK1', 'TAL')
+        fV, fA, msk = self.backbone(V, A, mask)
         feats = [torch.cat((v, a), 1) for v, a in zip(fV, fA)]
         ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)[0]
         bd, qu = self.bound_head(feats, msk)

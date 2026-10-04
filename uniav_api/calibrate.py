@@ -2,8 +2,8 @@
 
   python -m uniav_api.calibrate
 
-Uses the stored validation features (data/youcookii/iv2_feats or av_features, whichever the
-checkpoint takes), so no video encoding.
+Uses the stored validation features (data/youcookii/iv2_feats, or iv2_dense for a 2 rows/s model),
+so no video encoding.
 1. Parity: with k = number of GT events per video, R@IoU must match train_event.py --eval.
 2. Threshold: in production the number of events is unknown, so events are kept by score.
    For each min_score, precision / recall / F1 at IoU 0.5 (one-to-one greedy matching);
@@ -38,10 +38,10 @@ def match(preds, gts, thr=0.5):
 
 def main():
     pipe = UniAVPipeline(Config.from_env())
-    print('checkpoint %s (%s features)' % (pipe.cfg.checkpoint, pipe.spec.source))
+    print('checkpoint %s (InternVideo2 %s, caption space %s)' % (pipe.cfg.checkpoint, '+'.join(pipe.spec.video_keys), pipe.caption_space))
     with open(os.path.join(ROOT, 'data', 'youcookii', 'annotations', 'youcookii_annotations_trainval.json')) as f:
         db = json.load(f)['database']
-    F = os.path.join(ROOT, 'data', 'youcookii', 'iv2_feats' if pipe.spec.source == 'iv2' else 'av_features')
+    F = os.path.join(ROOT, 'data', 'youcookii', 'iv2_feats' if pipe.spec.stride == pipe.spec.fps else 'iv2_dense')
     have = set(pipe.spec.stored_ids(F))
     cands, n_gt_total = [], 0
     for vid, x in sorted(db.items()):

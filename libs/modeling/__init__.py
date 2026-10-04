@@ -1,13 +1,6 @@
-from .blocks import (MaskedConv1D, MaskedMHCA, LayerNorm,
-                     TransformerBlock, Scale, AffineDropPath)
-from .models import (make_multimodal_backbone, 
-                     make_multimodal_meta_arch,
-                     )
-from . import multimodal_backbones
-from . import multimodal_archs_multi_task
-from . import event_archs 
+from .blocks import MaskedConv1D, LayerNorm, TransformerBlock, Scale, upgrade_state_dict
+from .multimodal_backbones import ConvTransformerBackbone
+from .event_archs import EventCaptionTransformer
 
-__all__ = ['MaskedConv1D', 'MaskedMHCA', 'LayerNorm'
-           'TransformerBlock', 'Scale', 'AffineDropPath',
-           'make_multimodal_backbone',  
-           'make_multimodal_meta_arch']
+__all__ = ['MaskedConv1D', 'LayerNorm', 'TransformerBlock', 'Scale', 'upgrade_state_dict',
+           'ConvTransformerBackbone', 'EventCaptionTransformer']

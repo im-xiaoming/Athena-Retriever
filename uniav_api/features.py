@@ -1,12 +1,9 @@
 """Input features of the event model: which ones, their time grid, and how they become model input.
 
-Two kinds, set by the checkpoint's training config (dataset.feat_source):
-  iv2       InternVideo2 vision (v768 and/or v512) + BEATs audio (a768), one row per second.
-            Stored as <video_id>.npz (keys v768, v512, a768), e.g. uniav_api/samples/ or
-            data/youcookii/iv2_feats/. Rows are L2-normalised when training did (iv2_l2norm).
-  onepeace  ONE-PEACE video + audio, (T, 1536) each, one row per 0.5 s, stored as
-            <video_id>_one_peace_video_finetune.npy / _one_peace_audio.npy (data/youcookii/av_features).
-Both are resampled to max_seq_len steps exactly as libs/datasets/youcook2_cap.py does.
+InternVideo2 vision (v768 and/or v512, the checkpoint's iv2_video_keys) + BEATs audio (a768), one
+row per second. Stored as <video_id>.npz (keys v768, v512, a768), e.g. uniav_api/samples/ or
+data/youcookii/iv2_feats/. Rows are L2-normalised when training did (iv2_l2norm), and resampled
+to max_seq_len steps exactly as libs/datasets/youcook2_cap.py does.
 """
 import os
 
@@ -23,16 +20,15 @@ class FeatureSpec:
     def __init__(self, dataset_cfg):
         d = dataset_cfg
         self.source = d.get('feat_source', 'onepeace')
-        if self.source not in ('iv2', 'onepeace'):
-            raise ValueError('uniav_api supports feat_source iv2 or onepeace, not %r' % self.source)
+        if self.source != 'iv2':
+            raise ValueError('uniav_api takes InternVideo2 checkpoints only (this one: feat_source %r); '
+                             'ONE-PEACE feature models were dropped' % self.source)
         self.max_seq_len = d['max_seq_len']
         self.fps = d['default_fps']
         self.video_keys = list(d.get('iv2_video_keys', ['v768']))
         self.l2norm = d.get('iv2_l2norm', True)
-        if self.source == 'iv2':      # row i is centred on i + 0.5 s
-            self.stride = self.window = self.fps
-        else:                         # 16-frame windows every 8 frames at 16 fps
-            self.stride, self.window = d['feat_stride'], d['num_frames']
+        self.stride = self.fps // d.get('iv2_rows_per_sec', 1)   # frames between rows; each row covers 1 s
+        self.window = self.fps
 
     # ------------------------------------------------------------------ loading
     def from_npz(self, z):
@@ -42,22 +38,17 @@ class FeatureSpec:
 
     def from_store(self, video_id, folder):
         """Features of one video from a folder of stored features, in this checkpoint's format."""
-        if self.source == 'iv2':
-            return self.from_npz(np.load(os.path.join(folder, video_id + '.npz')))
-        pre = os.path.join(folder, video_id)
-        return (np.load(pre + '_one_peace_video_finetune.npy').astype(np.float32),
-                np.load(pre + '_one_peace_audio.npy').astype(np.float32))
+        return self.from_npz(np.load(os.path.join(folder, video_id + '.npz')))
 
     def stored_ids(self, folder):
-        suffix = '.npz' if self.source == 'iv2' else '_one_peace_audio.npy'
-        return sorted(f[:-len(suffix)] for f in os.listdir(folder) if f.endswith(suffix))
+        return sorted(f[:-4] for f in os.listdir(folder) if f.endswith('.npz'))
 
     # ------------------------------------------------------------------ model input and time grid
     def prepare(self, visual, audio):
         """(T, C) arrays -> two (C, max_seq_len) float tensors, plus the number of rows used."""
         n = min(len(visual), len(audio))
         visual, audio = np.asarray(visual[:n], np.float32), np.asarray(audio[:n], np.float32)
-        if self.source == 'iv2' and self.l2norm:   # idempotent, so already-normalised input is fine
+        if self.l2norm:   # idempotent, so already-normalised input is fine
             visual = np.concatenate([_l2(p) for p in self._split(visual)], axis=1)
             audio = _l2(audio)
         fv = torch.from_numpy(np.ascontiguousarray(visual.T))
@@ -82,6 +73,4 @@ class FeatureSpec:
 
     @property
     def dims(self):
-        if self.source == 'onepeace':
-            return 1536, 1536
         return sum(512 if k == 'v512' else 768 for k in self.video_keys), 768

@@ -2,7 +2,6 @@ import os
 import copy
 import random
 import numpy as np
-import random
 import torch
 from torch.nn import functional as F
 
@@ -28,7 +27,6 @@ def truncate_feats(
     trunc_thresh,
     offset, 
     crop_ratio=None,
-    multi_modal = True,
     max_num_trials=200,
     has_action=True,
     no_trunc=False
@@ -46,11 +44,8 @@ def truncate_feats(
                  'feat_num_frames' : in
 
     """
-    # get the meta info
-    if multi_modal:
-        feat_len = data_dict['feats']['visual'].shape[1]
-    else:
-        feat_len = data_dict['feats'].shape[1]
+    # get the meta info; feats = {'visual': C x T, 'audio': C x T}
+    feat_len = data_dict['feats']['visual'].shape[1]
 
     num_segs = data_dict['segments'].shape[0]
 
@@ -107,12 +102,8 @@ def truncate_feats(
             # without any constraints
             break
     
-    if multi_modal:
-        data_dict['feats']['visual'] = data_dict['feats']['visual'][:, st:ed].clone()
-        data_dict['feats']['audio'] = data_dict['feats']['audio'][:, st:ed].clone()
-    else:
-        # feats: C x T
-        data_dict['feats'] = data_dict['feats'][:, st:ed].clone()
+    data_dict['feats']['visual'] = data_dict['feats']['visual'][:, st:ed].clone()
+    data_dict['feats']['audio'] = data_dict['feats']['audio'][:, st:ed].clone()
     # segments: N x 2 in feature grids
     data_dict['segments'] = torch.stack((left[seg_idx], right[seg_idx]), dim=1)
     # shift the time stamps due to truncation

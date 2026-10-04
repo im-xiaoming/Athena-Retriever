@@ -6,12 +6,10 @@ numpy<2.1
 pandas          # only for uniav_api.compare_table()
 matplotlib      # only for uniav_api.plot()
 huggingface_hub # to download the checkpoint
-opencv-python-headless
-librosa
-resampy
 einops
 timm            # InternVideo2 encoder (describe_video)
 torchaudio      # BEATs audio encoder (describe_video), same version as torch
 pyyaml
-regex
+regex           # ONE-PEACE text tokenizer (search with a ONE-PEACE caption-space model)
+transformers<4.50  # GPT-2 caption generator, InternVideo2 text encoder (search)
 imageio-ffmpeg

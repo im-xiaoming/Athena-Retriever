@@ -15,7 +15,6 @@ import os
 
 import numpy as np
 
-from .base import FeatureEncoder
 from .media import find_ffmpeg, probe
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,7 +32,7 @@ def _l2(x):
     return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-6)
 
 
-class InternVideo2AVEncoder(FeatureEncoder):
+class InternVideo2AVEncoder:
     name = 'iv2'
     dim_audio = 768
     feat_stride, num_frames, fps = 16, 16, 16   # one row per second, centred on i + 0.5 s

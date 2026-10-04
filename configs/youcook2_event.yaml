@@ -7,13 +7,11 @@ train_split:
 val_split:
 - validation
 dataset:
-  feat_folder: ./data/youcookii/av_features
   json_file: ./data/youcookii/annotations/youcookii_annotations_trainval.json
+  # ONE-PEACE text vectors of the captions: the caption space by default, and always the space
+  # of the ret_sim metric and of the consensus pick
   caption_emb_file: ./data/youcookii/caption_emb.npz
-  feat_stride: 8
-  num_frames: 16
   default_fps: 16
-  downsample_rate: 1
   max_seq_len: 256
   max_buffer_len_factor: 1.0
   scale_factor: 2
@@ -34,25 +32,25 @@ dataset:
   - 2
   - 3
   - 5
-  class_aware: false
   trunc_thresh: 0.5
   crop_ratio:
   - 0.9
   - 1.0
   num_classes: 16
-  file_prefix: null
-  file_ext: .npy
   force_upsampling: true
-  multi_modal: true
-  # input features: onepeace (0.5 s grid), iv2 (InternVideo2, 1 s grid) or iv2+onepeace
-  # (channels concatenated). The model input width is set from this by train_event.py
-  feat_source: onepeace
+  # input features: InternVideo2 + BEATs from tools/extract_internvideo2.py, one row per second.
+  # The model input width is set from iv2_video_keys by train_event.py
+  feat_source: iv2
   iv2_folder: ./data/youcookii/iv2_feats
-  iv2_video_keys: [v768]   # v768 = pooled vision, v512 = text-aligned projection
+  iv2_video_keys: [v768]   # v768 = pooled vision, v512 = its projection into InternVideo2's text space
   iv2_l2norm: true
-  require_iv2: false   # true: keep only videos with InternVideo2 features (same set as iv2 runs)
-  # OmniRetriever-7B teacher vectors, built with tools/omni_youcook2.py. Uncomment to enable
-  # omni_emb_file: ./data/youcookii/omni_emb.npz
+  iv2_rows_per_sec: 1      # 2 with iv2_folder ./data/youcookii/iv2_dense (tools/make_iv2_dense.py)
+  # caption space: onepeace | iv2 (InternVideo2 text, tools/embed_captions.py) | omni (teacher text)
+  caption_space: onepeace
+  caption_emb_iv2_file: ./data/youcookii/caption_emb_iv2.npz
+  # OmniRetriever-7B teacher vectors (tools/omni_youcook2.py, HF teacher/omni_emb_full.npz).
+  # Every run since omni100 uses it; set to null to train without the teacher
+  omni_emb_file: ./data/youcookii/omni_emb_full.npz
 model:
   backbone_type: convTransformer
   backbone_arch:
@@ -60,8 +58,8 @@ model:
   - 3
   - 5
   scale_factor: 2
-  input_dim_V: 1536
-  input_dim_A: 1536
+  input_dim_V: 768     # set by train_event.py from the features
+  input_dim_A: 768
   n_head: 4
   embd_kernel_size: 3
   embd_dim: 512
@@ -86,7 +84,7 @@ model:
   use_abs_pe: true
   max_seq_len: 256
   nmax: 16
-  clip_dim: 1536
+  clip_dim: 1536       # set by train_event.py from the caption space
   train_cfg:
     loss_weight_reg: 1.0
     loss_weight_emb: 0.2

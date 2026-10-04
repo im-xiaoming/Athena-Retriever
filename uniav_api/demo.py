@@ -25,7 +25,7 @@ def main():
     a = ap.parse_args()
     t0 = time.time()
     pipe = uv.load(device=a.device, feature_cache=a.cache)
-    print('model %s (%s features) on %s, loaded in %.1f s' % (pipe.run, pipe.spec.source, pipe.device,
+    print('model %s (caption space %s) on %s, loaded in %.1f s' % (pipe.run, pipe.caption_space, pipe.device,
                                                                time.time() - t0), flush=True)
     if a.videos:
         jobs = [(os.path.splitext(n)[0], os.path.join(a.videos, n)) for n in sorted(os.listdir(a.videos))

@@ -300,26 +300,10 @@ class TransformerBlock(nn.Module):
         if n_out is None:
             n_out = n_embd
 
-        # define task-specific experts
-        self.ln2_TAL = LayerNorm(n_embd)
-        self.ln2_AVEL = LayerNorm(n_embd)
-        self.ln2_SED = LayerNorm(n_embd)
-
-        self.mlp_TAL = nn.Sequential(
-            nn.Conv1d(n_embd, n_hidden, 1),
-            act_layer(),
-            nn.Dropout(proj_pdrop, inplace=True),
-            nn.Conv1d(n_hidden, n_out, 1),
-            nn.Dropout(proj_pdrop, inplace=True),
-        )
-        self.mlp_AVEL = nn.Sequential(
-            nn.Conv1d(n_embd, n_hidden, 1),
-            act_layer(),
-            nn.Dropout(proj_pdrop, inplace=True),
-            nn.Conv1d(n_hidden, n_out, 1),
-            nn.Dropout(proj_pdrop, inplace=True),
-        )
-        self.mlp_SED = nn.Sequential(
+        # feed-forward network. The original UniAV kept one per task (TAL, AVEL, SED); only the TAL
+        # one was ever used here, so checkpoints from before are mapped by upgrade_state_dict
+        self.ln2 = LayerNorm(n_embd)
+        self.mlp = nn.Sequential(
             nn.Conv1d(n_embd, n_hidden, 1),
             act_layer(),
             nn.Dropout(proj_pdrop, inplace=True),
@@ -335,19 +319,13 @@ class TransformerBlock(nn.Module):
             self.drop_path_attn = nn.Identity()
             self.drop_path_mlp = nn.Identity()
 
-    def forward(self, x1, x2, mask, task_type, pos_embd=None):
+    def forward(self, x1, x2, mask, pos_embd=None):
         # pre-LN transformer: https://arxiv.org/pdf/2002.04745.pdf
-        out, out_mask = self.attn(self.ln11(x1), self.ln12(x2), mask) 
+        out, out_mask = self.attn(self.ln11(x1), self.ln12(x2), mask)
         out_mask_float = out_mask.to(out.dtype)
-        out = self.pool_skip(x1) * out_mask_float + self.drop_path_attn(out) 
-        
-        # FFN 
-        if task_type == 'TAL':
-            out = out + self.drop_path_mlp(self.mlp_TAL(self.ln2_TAL(out)) * out_mask_float)
-        elif task_type == 'AVEL':
-            out = out + self.drop_path_mlp(self.mlp_AVEL(self.ln2_AVEL(out)) * out_mask_float)
-        elif task_type == 'SED':
-            out = out + self.drop_path_mlp(self.mlp_SED(self.ln2_SED(out)) * out_mask_float)
+        out = self.pool_skip(x1) * out_mask_float + self.drop_path_attn(out)
+        # FFN
+        out = out + self.drop_path_mlp(self.mlp(self.ln2(out)) * out_mask_float)
 
         # optionally add pos_embd to the output
         if pos_embd is not None:
@@ -422,3 +400,17 @@ class AffineDropPath(nn.Module):
     def forward(self, x):
 
         return drop_path(self.scale * x, self.drop_prob, self.training)
+
+
+def upgrade_state_dict(sd):
+    """State dict of a checkpoint saved before the multi-task cleanup -> current layout.
+
+    Every transformer block used to hold three feed-forward experts (TAL, AVEL, SED). The event
+    model always ran the TAL one; the other two were never used (67M of 135M parameters).
+    """
+    out = {}
+    for k, v in sd.items():
+        if '_AVEL.' in k or '_SED.' in k:
+            continue
+        out[k.replace('.mlp_TAL.', '.mlp.').replace('.ln2_TAL.', '.ln2.')] = v
+    return out

@@ -1,64 +1,52 @@
-"""Build data/youcookii/caption_emb.npz: 1536-d ONE-PEACE vectors for every YouCook2 caption.
+"""Build data/youcookii/caption_emb_iv2.npz: InternVideo2 text vectors (512-d) of every YouCook2 caption.
 
-  python tools/embed_captions.py
+  python tools/embed_captions.py            # uniav-api-env, GPU: under a minute
 
-Runs in uniav-env on CPU, about 50 minutes for 11594 captions. Progress is saved every
-640 captions, so a rerun resumes. Only videos with both video and audio features are
-used, keyed "<video>#<segment index>" like the youcook2_cap dataset.
+Same keys ("<video>#<segment index>") and sentences as caption_emb.npz, the ONE-PEACE text vectors
+that stay the space of the ret_sim metric (made by an earlier version of this script). The new
+vectors are the caption space of dataset.caption_space=iv2: InternVideo2's text tower is aligned
+with its video tower, whose 512-d projection is the v512 input feature.
+
+Raw InternVideo2 text vectors are strongly anisotropic: any two captions have cosine ~0.95, so the
+soft targets of the embedding loss (softmax of caption-caption cosine / 0.02) would spread over
+~7000 captions. The stored vectors are therefore centred on the mean of the unique train captions
+and re-normalised (pairwise cosine 0.38, soft targets over ~50 captions); `mean` is stored so a new
+sentence (uniav_api search) is mapped the same way: normalize(encode(s) - mean).
 """
 import json
 import os
 import sys
-import time
 
 import numpy as np
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ONEPEACE = os.path.join(ROOT, 'ONEPEACE_extract_embd_code')
-sys.path.insert(0, ONEPEACE)
-from onepeace_text import from_pretrained  # noqa: E402
+sys.path.insert(0, ROOT)
+from uniav_api.encoders.internvideo2_text import InternVideo2TextEncoder  # noqa: E402
 
 DATA = os.path.join(ROOT, 'data', 'youcookii')
-PART = os.path.join(DATA, '_caption_emb_partial.npy')
-OUT = os.path.join(DATA, 'caption_emb.npz')
+CKPT = os.path.join(ROOT, 'ckpt', 'internvideo2', 'InternVideo2-stage2_1b-224p-f4.pt')
 
 
 def main():
+    src = np.load(os.path.join(DATA, 'caption_emb.npz'), allow_pickle=True)
+    keys, caps = src['keys'], [str(s) for s in src['sentences']]
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    enc = InternVideo2TextEncoder(CKPT, dev, torch.float32)
+    emb = np.concatenate([enc(caps[i:i + 256]).cpu().numpy() for i in range(0, len(caps), 256)])
     with open(os.path.join(DATA, 'annotations', 'youcookii_annotations_trainval.json')) as f:
         db = json.load(f)['database']
-    feats = os.listdir(os.path.join(DATA, 'av_features'))
-    vis = {x.replace('_one_peace_video_finetune.npy', '') for x in feats if 'video_finetune' in x}
-    aud = {x.replace('_one_peace_audio.npy', '') for x in feats if x.endswith('_one_peace_audio.npy')}
-    keys, caps = [], []
-    for vid in sorted(db):
-        if vid in vis & aud:
-            for i, a in enumerate(db[vid]['annotations']):
-                keys.append('%s#%d' % (vid, i)); caps.append(a['sentence'])
-    n = len(caps)
-
-    emb = np.load(PART) if os.path.exists(PART) else np.zeros((n, 1536), np.float32)
-    done = int((np.abs(emb).sum(1) > 0).sum())
-    print('total %d | done %d | left %d' % (n, done, n - done), flush=True)
-    if done < n:
-        model = from_pretrained(os.path.join(ONEPEACE, 'models', 'one-peace-text.pt'),
-                                device='cpu', dtype='float32')
-        bs, t0 = 64, time.time()
-        for i in range(done, n, bs):
-            with torch.no_grad():
-                emb[i:i + bs] = model.extract_text_features(model.process_text(caps[i:i + bs])).numpy()
-            if ((i - done) // bs) % 10 == 0:
-                np.save(PART, emb)
-                d = min(i + bs, n)
-                print('%d/%d  ~%.1f min left' % (d, n, (n - d) * (time.time() - t0) / max(d - done, 1) / 60),
-                      flush=True)
-        np.save(PART, emb)
-    # float16 keeps the file small; vectors are normalised so the error is negligible
-    np.savez_compressed(OUT, keys=np.array(keys), emb=emb.astype(np.float16),
-                        sentences=np.array(caps, dtype=object))
-    if os.path.exists(PART):
-        os.remove(PART)
-    print('done: %s | %.1f MB' % (emb.shape, os.path.getsize(OUT) / 1e6), flush=True)
+    first = {}
+    for i, k in enumerate(keys):   # unique train captions, as the dataset's caption pool
+        if db[str(k).split('#')[0]]['subset'] == 'training':
+            first.setdefault(caps[i], i)
+    mean = emb[list(first.values())].mean(0)
+    emb = emb - mean
+    emb /= np.linalg.norm(emb, axis=1, keepdims=True)
+    out = os.path.join(DATA, 'caption_emb_iv2.npz')
+    np.savez_compressed(out, keys=keys, emb=emb.astype(np.float16), sentences=src['sentences'],
+                        mean=mean.astype(np.float32))
+    print('done: %s -> %s, %.1f MB' % (emb.shape, out, os.path.getsize(out) / 1e6), flush=True)
 
 
 if __name__ == '__main__':

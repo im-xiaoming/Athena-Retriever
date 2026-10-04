@@ -46,6 +46,9 @@ Lessons from each change and what to combine next. The results table is in
 | Generated vs retrieved, ret_sim (ONE-PEACE text cosine to GT, `score_retsim.py`) | generated 0.727 vs retrieval 0.753 on both GT and predicted segments. ret_sim favours retrieval: the pick is made in the same ONE-PEACE space the metric uses; CIDEr/METEOR do not depend on it. Lengths match (8.2 vs 8.4 words, GT 9.0); generation is more varied (1958 vs 1273 distinct captions on 2253 segments) | report both; generation wins on n-gram metrics only |
 | Caption generator with the 5 retrieved captions in the prompt (`rag5`, `--rag 5`) | GT spans CIDEr 99.0 (prefix 97.6), predicted segments 91.2 (prefix 95.1), ret_sim 0.730 (+0.003); train loss 0.96 vs prefix, overfits the candidates; 3x slower to train | no, API keeps the prefix generator |
 
+| Unused task experts removed (2026-10-05) | every transformer block held three FFN experts (TAL, AVEL, SED) from the multi-task UniAV; only TAL ever ran. 135.4M -> 68.2M parameters, `ckpt/iv2` re-evaluated: identical to the digit | cleanup, all later runs |
+| InternVideo2 text as caption space, analysis before training (`caption_emb_iv2.npz`) | zero-shot v512 span -> caption: R@1 2.6% of 1174 val clips (chance 0.09%). Raw vectors are anisotropic (mean pairwise cos 0.95: soft targets over ~7000 captions), centred 0.38 (~50; ONE-PEACE ~2). Nearest train caption of each val caption, CIDEr: ONE-PEACE 243.6, IV2 centred 237.8, raw 233.5 | stored centred; needs training runs |
+
 Conclusion of the variants (2026-10-04 afternoon): the InternVideo2 model is on a plateau for
 these hyper-parameters; every change lands inside the seed noise. Further gains need a bigger
 change (see docs/HANDOFF.md, next steps).

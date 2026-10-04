@@ -13,7 +13,7 @@ the caption pool to pick a caption.
 The embedding loss runs over the WHOLE train caption pool, not just the captions in
 the batch, because inference must pick from that pool. Targets are soft: part of
 the mass goes to the true caption and the rest is spread by caption-caption
-similarity (in ONE-PEACE space), so paraphrases of the same step are not punished
+similarity (in the caption space), so paraphrases of the same step are not punished
 like wrong captions.
 
 Optional OmniRetriever-7B teacher (omni_dim > 0), following the fusion-as-teacher
@@ -36,8 +36,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .models import register_multimodal_meta_arch, make_multimodal_backbone
 from .blocks import MaskedConv1D, Scale, LayerNorm, Linear
+from .multimodal_backbones import ConvTransformerBackbone
 from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
 
 
@@ -156,7 +156,6 @@ class BoundaryHead(nn.Module):
         return res, qual
 
 
-@register_multimodal_meta_arch("EventCaptionTransformer")
 class EventCaptionTransformer(nn.Module):
     """Segment events, then caption them. No classification layer."""
 
@@ -196,13 +195,12 @@ class EventCaptionTransformer(nn.Module):
         self.pool_raw = None
         self.omni_dim = omni_dim
 
-        self.backbone = make_multimodal_backbone('convTransformer', **{
-            'n_in_V': input_dim_V, 'n_in_A': input_dim_A, 'n_embd': embd_dim,
-            'n_head': n_head, 'n_embd_ks': embd_kernel_size,
-            'max_len': {'TASK1': max_seq_len}, 'arch': backbone_arch,
-            'scale_factor': scale_factor, 'with_ln': embd_with_ln,
-            'attn_pdrop': 0.0, 'proj_pdrop': train_cfg['dropout'],
-            'path_pdrop': train_cfg['droppath'], 'use_abs_pe': use_abs_pe})
+        assert backbone_type == 'convTransformer', backbone_type
+        self.backbone = ConvTransformerBackbone(
+            n_in_V=input_dim_V, n_in_A=input_dim_A, n_embd=embd_dim, n_head=n_head,
+            n_embd_ks=embd_kernel_size, max_len=max_seq_len, arch=backbone_arch,
+            scale_factor=scale_factor, with_ln=embd_with_ln, attn_pdrop=0.0,
+            proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe)
         D = embd_dim * 2
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
@@ -219,7 +217,7 @@ class EventCaptionTransformer(nn.Module):
             self.omni_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def set_caption_pool(self, pool_raw):
-        """Train caption pool (N, 1536), used as the negative set during training."""
+        """Train caption pool (N, clip_dim) in the caption space, the negative set during training."""
         self.pool_raw = pool_raw
         self.pool_n = F.normalize(pool_raw, dim=-1)
 
@@ -257,7 +255,7 @@ class EventCaptionTransformer(nn.Module):
 
     def forward(self, video_list):
         V, A, masks = self.preprocessing(video_list)
-        fV, fA, msk = self.backbone(V, A, masks, 'TASK1', 'TAL')
+        fV, fA, msk = self.backbone(V, A, masks)
         self._streams0 = (fV[0], fA[0])   # level-0 streams, for the single-stream students
         feats = [torch.cat((v, a), 1) for v, a in zip(fV, fA)]
         ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)   # (B, P)

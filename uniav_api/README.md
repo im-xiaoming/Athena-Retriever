@@ -75,9 +75,11 @@ The last five were picked among the better videos (median F1 over the validation
 4. **Caption** (`captioner.py`): each event vector against the train captions, consensus pick
    (MBR over the top 20). Only the caption space is used; adding the OmniRetriever teacher
    space changed ret_sim by at most 0.003 on validation.
-5. **Search**: with the ONE-PEACE text encoder (6 GB, optional) the query goes through it and
-   the model's caption projection. Without it, the query is matched to the closest train
-   captions by word overlap (TF-IDF) and their vectors are averaged: phrase queries like
+5. **Search**: the query goes through the text encoder of the model's caption space and the
+   model's caption projection: ONE-PEACE text (6 GB, optional) for the current model, or
+   InternVideo2's own text tower (read from the InternVideo2 video checkpoint) for a model
+   trained with `caption_space: iv2`. Without the encoder, the query is matched to the closest
+   train captions by word overlap (TF-IDF) and their vectors are averaged: phrase queries like
    recipe steps.
 
 ## Generated captions (`caption_mode='generate'`)
@@ -120,12 +122,13 @@ the API writes exactly the training script's captions (6/6), CPU and fp16 checkp
 | `InternVideo/` | `git clone --depth 1 https://github.com/OpenGVLab/InternVideo` (unmodified) | describe_video |
 | `ckpt/internvideo2/InternVideo2-stage2_1b-224p-f4.pt` | HF `OpenGVLab/InternVideo2-Stage2_1B-224p-f4` (gated) | describe_video |
 | `ckpt/internvideo2/audio_6b.pth` | HF `OpenGVLab/InternVideo2-Stage2-6B-Audio` | describe_video |
-| `ONEPEACE_extract_embd_code/models/one-peace-text.pt` | ONE-PEACE text encoder, 6 GB | search, optional |
+| `ONEPEACE_extract_embd_code/models/one-peace-text.pt` | ONE-PEACE text encoder, 6 GB; HF `encoders/one-peace-text.pt` | search with a ONE-PEACE caption-space model, optional |
 | `ckpt/api/capgen_prefix.pth` | caption generator, `tools/capgen/export_generator.py prefix` | caption_mode='generate' |
 
 `describe_video` also needs `timm`, `einops`, `torchaudio` (`pip install -r uniav_api/requirements.txt`).
-The older ONE-PEACE model still works: `uv.load(checkpoint='ckpt/omni65/best_cap.pth.tar')` with
-`configs/youcook2_event.yaml` and the ONE-PEACE encoders in `ONEPEACE_extract_embd_code/models/`.
+Only InternVideo2-feature models are supported; the ONE-PEACE-feature models (`omni65`, `omni100`)
+need the code before the 2026-10-05 cleanup. Checkpoints saved before that cleanup (with unused
+AVEL / SED feed-forward layers, 135M parameters instead of 68M) load unchanged.
 
 ## Devices and memory
 

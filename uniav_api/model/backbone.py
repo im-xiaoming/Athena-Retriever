@@ -2,12 +2,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .registry import register_backbone as register_multimodal_backbone
 from .blocks import (get_sinusoid_encoding, TransformerBlock,
                     MaskedConv1D, LayerNorm)
 
 
-@register_multimodal_backbone("convTransformer")
 class ConvTransformerBackbone(nn.Module):
     """
         A backbone that combines convolutions with transformers
@@ -19,7 +17,7 @@ class ConvTransformerBackbone(nn.Module):
         n_embd,                # embedding dimension (after convolution)
         n_head,                # number of head for self-attention in transformers
         n_embd_ks,             # conv kernel size of the embedding network
-        max_len,               # max sequence length
+        max_len,               # max sequence length (int)
         arch = (2, 2, 5),      # (#convs, #stem transformers, #branch transformers)
         scale_factor = 2,      # dowsampling rate for the branch,
         with_ln = False,       # if to attach layernorm after conv
@@ -38,8 +36,7 @@ class ConvTransformerBackbone(nn.Module):
 
         # position embedding (1, C, T), rescaled by 1/sqrt(n_embd)
         if self.use_abs_pe:
-            task_max_len = max(self.max_len.values())
-            pos_embd = get_sinusoid_encoding(task_max_len, n_embd) / (n_embd**0.5)
+            pos_embd = get_sinusoid_encoding(self.max_len, n_embd) / (n_embd**0.5)
             self.register_buffer("pos_embd", pos_embd, persistent=False)
 
         # embedding network using convs
@@ -142,7 +139,7 @@ class ConvTransformerBackbone(nn.Module):
             if module.bias is not None:
                 torch.nn.init.constant_(module.bias, 0.)
 
-    def forward(self, x_V, x_A, mask, task_id, task_type):
+    def forward(self, x_V, x_A, mask):
         # x_V/x_A: batch size, feature channel, sequence length,
         # mask: batch size, 1, sequence length (bool)
         B, C_V, T = x_V.size()
@@ -157,7 +154,7 @@ class ConvTransformerBackbone(nn.Module):
 
         # training: using fixed length position embeddings
         if self.use_abs_pe and self.training:
-            assert T <= self.max_len[task_id], "Reached max length."
+            assert T <= self.max_len, "Reached max length."
             pe = self.pos_embd
             # add pe to x
             x_V = x_V + pe[:, :, :T] * mask_V.to(x_V.dtype)
@@ -165,7 +162,7 @@ class ConvTransformerBackbone(nn.Module):
 
         # inference: re-interpolate position embeddings for over-length sequences
         if self.use_abs_pe and (not self.training):
-            if T >= self.max_len[task_id]:
+            if T >= self.max_len:
                 pe = F.interpolate(
                     self.pos_embd, T, mode='linear', align_corners=False)
             else:
@@ -176,11 +173,11 @@ class ConvTransformerBackbone(nn.Module):
 
         # stem transformer
         for idx in range(len(self.self_att_V)):
-            x_V, mask_V = self.self_att_V[idx](x_V, x_V, mask_V, task_type)
-            x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A, task_type)
+            x_V, mask_V = self.self_att_V[idx](x_V, x_V, mask_V)
+            x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A)
 
-        x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A, mask_V, task_type) 
-        x_Av, mask_V = self.ori_cross_att_Av(x_A, x_V, mask_A, task_type) 
+        x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A, mask_V) 
+        x_Av, mask_V = self.ori_cross_att_Av(x_A, x_V, mask_A) 
 
         # prep for outputs
         out_feats_V = tuple()
@@ -195,11 +192,11 @@ class ConvTransformerBackbone(nn.Module):
 
         # main branch with downsampling
         for idx in range(len(self.cross_att_Va)):
-            x_V, mask_V = self.cross_att_Va[idx](out_feats_V[idx], out_feats_A[idx], mask_V, task_type)
+            x_V, mask_V = self.cross_att_Va[idx](out_feats_V[idx], out_feats_A[idx], mask_V)
             out_feats_V += (x_V, )
             out_masks_V += (mask_V, )
 
-            x_A, mask_A = self.cross_att_Av[idx](out_feats_A[idx], out_feats_V[idx], mask_A, task_type)
+            x_A, mask_A = self.cross_att_Av[idx](out_feats_A[idx], out_feats_V[idx], mask_A)
             out_feats_A += (x_A, )
             out_masks_A += (mask_A, )
 

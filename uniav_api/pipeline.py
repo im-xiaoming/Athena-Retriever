@@ -6,8 +6,9 @@
     result = pipe.process_sample('6uHoTJSLoL8')    # the same from features shipped in uniav_api/samples
     hits = pipe.search('cut the onion', top_k=5)   # events of processed videos matching a query
 
-Event vectors and query vectors live in the same 512-d caption space (the space the model
-projects ONE-PEACE caption vectors into with clip_proj), so search is a cosine.
+Event vectors and query vectors live in the same 512-d space (the space the model projects
+caption vectors into with clip_proj), so search is a cosine. The caption vectors come from the
+text encoder of the checkpoint's caption space (dataset.caption_space): ONE-PEACE or InternVideo2.
 
 The checkpoint decides which features the model takes (features.py): an API checkpoint made by
 tools/export_api_ckpt.py carries its training config; a raw training checkpoint uses
@@ -24,6 +25,7 @@ import yaml
 from .captioner import Captioner, PoolQuery
 from .config import Config, keep_encoders, pick_device
 from .features import FeatureSpec
+from .model.blocks import upgrade_state_dict
 from .model.event_model import EventCaptionModel
 
 
@@ -69,14 +71,20 @@ class UniAVPipeline:
         self.run = ck.get('run', os.path.basename(os.path.dirname(self.cfg.checkpoint)))
         self.spec = FeatureSpec(mcfg['dataset'])
         self.max_seq_len = self.spec.max_seq_len
-        sd = {k: v.float() for k, v in ck['state_dict'].items()}
+        sd = upgrade_state_dict({k: v.float() for k, v in ck['state_dict'].items()})
+        self.caption_space = mcfg['dataset'].get('caption_space', 'onepeace')
+        # train-space caption vectors, for a model not trained in ONE-PEACE space (export_api_ckpt.py)
+        self.pool_train = ck.get('caption_pool')
+        if self.caption_space != 'onepeace' and self.pool_train is None:
+            raise ValueError('checkpoint %s (caption space %s) has no caption_pool; export it with '
+                             'tools/export_api_ckpt.py' % (self.cfg.checkpoint, self.caption_space))
         omni_dim = sd['omni_proj.2.weight'].shape[0] if 'omni_proj.2.weight' in sd else 0
         model_cfg = dict(mcfg['model'], input_dim_V=self.spec.dims[0], input_dim_A=self.spec.dims[1],
                          omni_dim=omni_dim)
         self.model = EventCaptionModel(**model_cfg)
         self.model.load_state_dict(sd, strict=True)
-        self.model = self.model.to(self.device).eval()   # small (138M): fp32 everywhere
-        self.captioner = Captioner(self.cfg.caption_pool, self.model, self.device)
+        self.model = self.model.to(self.device).eval()   # small (68M): fp32 everywhere
+        self.captioner = Captioner(self.cfg.caption_pool, self.model, self.device, self.pool_train)
         self._encoder = self._text = self._pool_query = self._generator = None
         # one index per model: event vectors of different checkpoints are not comparable
         self.index_dir = os.path.join(self.cfg.index_dir, self.run)
@@ -93,19 +101,14 @@ class UniAVPipeline:
     def encoder(self):
         if self._encoder is None:
             keep = keep_encoders(self.cfg, self.device)
-            if self.spec.source == 'iv2':
-                from .encoders.internvideo2 import InternVideo2AVEncoder
-                for p in (self.cfg.iv2_video_encoder, self.cfg.iv2_audio_encoder, self.cfg.iv2_repo):
-                    if not os.path.exists(p):
-                        raise FileNotFoundError('%s not found: describe_video needs the InternVideo2 encoders, '
-                                                'see uniav_api/README.md' % p)
-                self._encoder = InternVideo2AVEncoder(self.cfg.iv2_video_encoder, self.cfg.iv2_audio_encoder,
-                                                      self.cfg.iv2_repo, self.device, self.spec.video_keys,
-                                                      self.spec.l2norm, keep_loaded=keep)
-            else:
-                from .encoders.onepeace import OnePeaceAVEncoder
-                self._encoder = OnePeaceAVEncoder(self.cfg.video_encoder, self.cfg.audio_encoder, self.device,
-                                                  self.dtype, keep_loaded=keep)
+            from .encoders.internvideo2 import InternVideo2AVEncoder
+            for p in (self.cfg.iv2_video_encoder, self.cfg.iv2_audio_encoder, self.cfg.iv2_repo):
+                if not os.path.exists(p):
+                    raise FileNotFoundError('%s not found: describe_video needs the InternVideo2 encoders, '
+                                            'see uniav_api/README.md' % p)
+            self._encoder = InternVideo2AVEncoder(self.cfg.iv2_video_encoder, self.cfg.iv2_audio_encoder,
+                                                  self.cfg.iv2_repo, self.device, self.spec.video_keys,
+                                                  self.spec.l2norm, keep_loaded=keep)
         return self._encoder
 
     @property
@@ -119,10 +122,20 @@ class UniAVPipeline:
 
     @property
     def text_encoder(self):
-        """ONE-PEACE text encoder, or None when its 6 GB checkpoint is not available."""
-        if self._text is None and os.path.exists(self.cfg.text_encoder):
-            from .encoders.onepeace_text import TextEncoder
-            self._text = TextEncoder(self.cfg.text_encoder, self.device, self.dtype)
+        """Text encoder of the caption space, or None when its checkpoint is not available.
+
+        onepeace: ONE-PEACE text (6 GB). iv2: InternVideo2's text tower, from the video encoder
+        checkpoint; its vectors are centred on the train-caption mean as in tools/embed_captions.py.
+        """
+        if self._text is None:
+            if self.caption_space == 'onepeace' and os.path.exists(self.cfg.text_encoder):
+                from .encoders.onepeace_text import TextEncoder
+                self._text = TextEncoder(self.cfg.text_encoder, self.device, self.dtype)
+            elif self.caption_space == 'iv2' and os.path.exists(self.cfg.iv2_video_encoder):
+                from .encoders.internvideo2_text import InternVideo2TextEncoder
+                enc = InternVideo2TextEncoder(self.cfg.iv2_video_encoder, self.device, self.dtype)
+                mean = torch.as_tensor(np.asarray(self.pool_train['mean']), device=self.device)
+                self._text = lambda texts: torch.nn.functional.normalize(enc(texts) - mean, dim=-1)
         return self._text
 
     # ------------------------------------------------------------------ core
@@ -167,9 +180,6 @@ class UniAVPipeline:
 
     def process_sample(self, video_id, store=True):
         """A video from Config.samples_dir (InternVideo2 features + duration) -> events."""
-        if self.spec.source != 'iv2':
-            raise ValueError('the samples hold InternVideo2 features; checkpoint %s takes %s'
-                             % (self.run, self.spec.source))
         z = np.load(os.path.join(self.cfg.samples_dir, video_id + '.npz'))
         visual, audio = self.spec.from_npz(z)
         return self.process_stored(visual, audio, float(z['duration']), video_id, store=store)
@@ -198,7 +208,7 @@ class UniAVPipeline:
         if not self.cfg.feature_cache:
             return self.encoder.encode(path)
         st = os.stat(path)
-        tag = '' if self.spec.source == 'onepeace' else '_' + self.spec.source + '_' + '_'.join(self.spec.video_keys)
+        tag = '_iv2_' + '_'.join(self.spec.video_keys)
         f = os.path.join(self.cfg.feature_cache, '%s_%d_%d%s.npz' % (video_id, st.st_size, int(st.st_mtime), tag))
         if os.path.exists(f):
             z = np.load(f)
@@ -214,17 +224,17 @@ class UniAVPipeline:
     def embed_query(self, text):
         """Query -> 512-d vector in the event space.
 
-        With the ONE-PEACE text encoder: its vector of the query through the model's clip_proj.
-        Without it (the encoder is 6 GB): the train captions closest to the query by word overlap
-        (TF-IDF), averaged in the event space; good for queries phrased like recipe steps.
+        With the caption space's text encoder: its vector of the query through the model's clip_proj.
+        Without it: the train captions closest to the query by word overlap (TF-IDF), averaged in
+        the event space; good for queries phrased like recipe steps.
         """
         enc = self.text_encoder
         if enc is not None:
             raw = enc([text]).to(self.device)
             return self.model.embed_head.embed_captions(raw.float())[0]
         if self._pool_query is None:
-            print('note: ONE-PEACE text encoder not found (%s); search matches queries through the '
-                  'train captions instead' % self.cfg.text_encoder, flush=True)
+            print('note: no %s text encoder; search matches queries through the train captions instead'
+                  % self.caption_space, flush=True)
             self._pool_query = PoolQuery(self.captioner)
         return self._pool_query(text)
 

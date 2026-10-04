@@ -25,8 +25,8 @@ import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from train_event import build_loaders, mbr_pick, load_ckpt  # noqa: E402
-from libs.modeling import make_multimodal_meta_arch          # noqa: E402
+from train_event import build_loaders, mbr_pick, load_weights  # noqa: E402
+from libs.modeling import EventCaptionTransformer             # noqa: E402
 
 OMNI = os.path.join(ROOT, 'data', 'youcookii', 'omni_emb_full.npz')
 STUDENTS = [('sched10', False), ('base_seed2', False),
@@ -55,8 +55,8 @@ def main():
         ds, dv, _, dlv = build_loaders(cfg, torch.Generator().manual_seed(0))
         if uses_teacher:
             cfg['model']['omni_dim'] = ds.omni_dim
-        model = make_multimodal_meta_arch('EventCaptionTransformer', **cfg['model']).to(dev)
-        model.load_state_dict(load_ckpt(os.path.join(ROOT, 'ckpt', run, 'best_cap.pth.tar'))['state_dict'])
+        model = EventCaptionTransformer(**cfg['model']).to(dev)
+        load_weights(model, os.path.join(ROOT, 'ckpt', run, 'best_cap.pth.tar'))
         pool_raw = torch.from_numpy(ds.pool_emb).to(dev)
         model.set_caption_pool(pool_raw)
         if uses_teacher:

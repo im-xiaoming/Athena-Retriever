@@ -1,9 +1,11 @@
 """Caption pool and caption choice for event vectors.
 
 The pool holds the unique train captions and their ONE-PEACE text vectors (the model never
-saw validation captions). Captions are projected once into the model's caption space with
-its clip_proj; an event vector is matched against them by cosine and the caption is picked
-by consensus (minimum Bayes risk over the top 20), as in train_event.py.
+saw validation captions). Captions are projected once into the event space with the model's
+clip_proj: their ONE-PEACE vectors, or, for a model trained in another caption space, the vectors
+of that space stored in the API checkpoint (caption_pool). An event vector is matched against
+them by cosine and the caption is picked by consensus (minimum Bayes risk over the top 20) in
+ONE-PEACE space, exactly as train_event.py scores it.
 """
 import json
 import os
@@ -31,12 +33,16 @@ def build_caption_pool(caption_emb, annotations, out):
 
 
 class Captioner:
-    def __init__(self, pool_path, model, device):
+    def __init__(self, pool_path, model, device, pool_train=None):
         z = np.load(pool_path)
         self.texts = [str(t) for t in z['texts']]
         raw = torch.from_numpy(z['emb'].astype(np.float32)).to(device)
+        train = raw
+        if pool_train is not None:   # caption vectors of the model's own caption space, same order
+            assert len(pool_train['emb']) == len(self.texts), 'caption_pool does not match %s' % pool_path
+            train = torch.as_tensor(np.asarray(pool_train['emb'], np.float32), device=device)
         with torch.no_grad():
-            self.pool_f = model.embed_head.embed_captions(raw.to(next(model.parameters()).dtype)).float()
+            self.pool_f = model.embed_head.embed_captions(train.to(next(model.parameters()).dtype)).float()
             self.pool_n = F.normalize(raw, dim=-1)
             self.scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
 
@@ -60,7 +66,7 @@ class Captioner:
 
 
 class PoolQuery:
-    """Text query -> event-space vector without the ONE-PEACE text encoder.
+    """Text query -> event-space vector without a text encoder.
 
     Ranks the train captions by TF-IDF cosine with the query and averages the projected vectors
     of the best ones, weighted by that similarity. Works for queries phrased like recipe steps

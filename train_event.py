@@ -7,9 +7,6 @@
 Every training run writes experiments/runs/<host>-<output>.json with the git commit,
 the resolved config, the overrides, per-epoch metrics and a full evaluation of the
 best captioning checkpoint. tools/summarize_runs.py turns those files into a table.
-
---pretrain loads the original UniAV checkpoint; in two trials it was worse than
-training from scratch.
 """
 import argparse
 import json
@@ -25,10 +22,8 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from libs.datasets import make_dataset
-from libs.datasets.data_utils import trivial_batch_collator, worker_init_reset_seed
-from libs.modeling import make_multimodal_meta_arch
-from libs.modeling.blocks import MaskedConv1D
+from libs.datasets import YouCook2CaptionDataset, trivial_batch_collator, worker_init_reset_seed
+from libs.modeling import EventCaptionTransformer, MaskedConv1D, upgrade_state_dict
 from libs.utils import make_scheduler, fix_random_seed
 
 RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'experiments', 'runs')
@@ -65,6 +60,13 @@ def load_ckpt(path):
         return torch.load(path, map_location='cpu', weights_only=False)
     except TypeError:
         return torch.load(path, map_location='cpu')
+
+
+def load_weights(model, path):
+    """Load a training checkpoint into the model (older layouts are upgraded); returns the checkpoint."""
+    ck = load_ckpt(path)
+    model.load_state_dict(upgrade_state_dict(ck['state_dict']))
+    return ck
 
 
 def iou(a, b):
@@ -221,39 +223,6 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     return out
 
 
-def load_pretrain(model, path):
-    """Load the original UniAV checkpoint, mapping its heads onto the new ones.
-
-    backbone                   -> backbone
-    reg_head (offset TASK1)    -> bound_head    TASK1 is ActivityNet, 2 channels
-    cls_head                   -> embed_head    same clip_proj and vis_proj
-    cls_head (tower)           -> event_head    tower only, the output layer starts fresh
-    """
-    sd = load_ckpt(path)
-    sd = sd.get('state_dict_ema') or sd['state_dict']
-    sd = {k.replace('module.', '', 1): v for k, v in sd.items()}
-    rules = [('backbone.', 'backbone.'),
-             ('reg_head.offset_head.TASK1.', 'bound_head.out.'),
-             ('reg_head.', 'bound_head.'),
-             ('cls_head.', 'embed_head.'),
-             ('cls_head.head.', 'event_head.head.'),
-             ('cls_head.norm.', 'event_head.norm.')]
-    own, new = model.state_dict(), {}
-    for k, v in sd.items():
-        for src, dst in rules:
-            if k.startswith(src):
-                t = dst + k[len(src):]
-                if t in own and own[t].shape == v.shape:
-                    new[t] = v
-    model.load_state_dict(new, strict=False)
-    fresh = [k for k in own if k not in new]
-    n_new = sum(own[k].numel() for k in new) / 1e6
-    n_all = sum(v.numel() for v in own.values()) / 1e6
-    print('Pretrain     : %s' % path)
-    print('               loaded %.1fM / %.1fM params, from scratch: %s'
-          % (n_new, n_all, ', '.join(fresh) or 'none'), flush=True)
-
-
 # One log row per epoch. Each column: (header, metric key, width, format)
 GROUPS = [
     ('train loss', [('event', 'ev_loss', 6, '.3f'), ('reg', 'reg_loss', 6, '.3f'), ('iou', 'iou_loss', 6, '.3f'),
@@ -303,8 +272,8 @@ def print_row(ep, t, lr, vals, mark):
 
 
 def build_loaders(cfg, rng):
-    ds = make_dataset('youcook2_cap', True, cfg['train_split'], **cfg['dataset'])
-    dv = make_dataset('youcook2_cap', False, cfg['val_split'], **cfg['dataset'])
+    ds = YouCook2CaptionDataset(True, cfg['train_split'], **cfg['dataset'])
+    dv = YouCook2CaptionDataset(False, cfg['val_split'], **cfg['dataset'])
     dl = DataLoader(ds, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
                     sampler=RandomSampler(ds), collate_fn=trivial_batch_collator,
                     worker_init_fn=worker_init_reset_seed, drop_last=True, generator=rng,
@@ -316,8 +285,7 @@ def build_loaders(cfg, rng):
 
 def eval_only(a, model, dlv, dev, pool_raw, pool_text):
     """Score one checkpoint under several NMS / ranking settings, with all variants."""
-    ck = load_ckpt(a.eval)
-    model.load_state_dict(ck['state_dict'])
+    ck = load_weights(model, a.eval)
     print('Checkpoint   : %s (epoch %d)' % (a.eval, ck['epoch'] + 1), flush=True)
     powers = a.iou_power.split(',') if a.iou_power else [str(model.iou_power)]
     for power in powers:
@@ -370,7 +338,7 @@ class RunRecord:
             'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
             'started': time.strftime('%Y-%m-%d %H:%M:%S'), 'finished': None,
             'git': git_state(), 'argv': sys.argv, 'overrides': a.set, 'note': a.note,
-            'epochs': a.epochs, 'pretrain': a.pretrain or None, 'out_dir': out_dir,
+            'epochs': a.epochs, 'out_dir': out_dir,
             'config': cfg, 'history': [], 'best': {}, 'final_eval': None,
         }
         self.save()
@@ -400,17 +368,14 @@ def main(a):
     print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
     # the input width follows the feature source; stored in the run record's config
     cfg['model']['input_dim_V'], cfg['model']['input_dim_A'] = ds.feat_dims
-    print('Features     : %s, visual %d + audio %d channels' % (
-        cfg['dataset'].get('feat_source', 'onepeace'), *ds.feat_dims), flush=True)
+    print('Features     : InternVideo2 %s + BEATs a768, %d row(s)/s, visual %d + audio %d channels' % (
+        '+'.join(ds.iv2_video_keys), ds.iv2_rows_per_sec, *ds.feat_dims), flush=True)
 
     if ds.omni:
         cfg['model']['omni_dim'] = ds.omni_dim
         use_omni_columns()
     cfg['model']['clip_dim'] = ds.pool_train.shape[1]   # caption space (dataset.caption_space)
-    model = make_multimodal_meta_arch('EventCaptionTransformer', **cfg['model'])
-    if a.pretrain:
-        load_pretrain(model, a.pretrain)
-    model = model.to(dev)
+    model = EventCaptionTransformer(**cfg['model']).to(dev)
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
     # the caption pool comes from the TRAIN split only; val captions are never used
@@ -474,8 +439,7 @@ def main(a):
 
 def finalize(rec, model, dlv, dev, pool_raw, pool_text):
     """Full evaluation of the run's best captioning checkpoint, stored in the run record."""
-    ck = os.path.join(rec.data['out_dir'], 'best_cap.pth.tar')
-    model.load_state_dict(load_ckpt(ck)['state_dict'])
+    load_weights(model, os.path.join(rec.data['out_dir'], 'best_cap.pth.tar'))
     final = evaluate(model, dlv, dev, pool_raw, pool_text, full=True)
     rec.data['final_eval'] = dict(final, ckpt='best_cap')
     rec.data['finished'] = rec.data.get('finished') or time.strftime('%Y-%m-%d %H:%M:%S')
@@ -488,7 +452,6 @@ if __name__ == '__main__':
     p.add_argument('config'); p.add_argument('--output', default='ev1')
     p.add_argument('--epochs', type=int, default=10,
                    help='40 epochs overfit from epoch 7; 10 is enough')
-    p.add_argument('--pretrain', default='', help='original UniAV checkpoint to initialise from')
     p.add_argument('--eval', default='', help='only score this checkpoint, no training')
     p.add_argument('--nms', default='soft:0.7:0.5',
                    help='NMS settings to score with --eval, comma separated, e.g. soft:0.7:0.5,hard:0.5')

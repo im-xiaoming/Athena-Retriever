@@ -52,7 +52,7 @@ run teach_tva 'iv2, teacher target = clip audio+video fused with its caption (T+
   --set "$TEACHER" "$IV2" model.train_cfg.omni_target=tva
 run modal_aux 'iv2, fusion-as-teacher inside the model: video-only and audio-only segment vectors (weight 0.1)' \
   --set "$TEACHER" "$IV2" model.train_cfg.loss_weight_modal=0.1
-run wide 'iv2, embedding and head width 768 instead of 512 (299M parameters)' \
+run wide 'iv2, embedding and head width 768 instead of 512 (141M parameters)' \
   --set "$TEACHER" "$IV2" model.embd_dim=768 model.head_dim=768
 
 $PY tools/summarize_runs.py >> "$Q" 2>&1

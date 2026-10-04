@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .datasets import register_generator
 
 class BufferList(nn.Module):
     """
@@ -23,7 +22,6 @@ class BufferList(nn.Module):
     def __iter__(self):
         return iter(self._buffers.values())
 
-@register_generator('point')
 class PointGenerator(nn.Module):
     """
         A generator for temporal "points"

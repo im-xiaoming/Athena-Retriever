@@ -18,10 +18,10 @@ class Config:
     model_config: str = os.path.join(ROOT, 'configs', 'youcook2_event.yaml')
     samples_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'samples')
     caption_pool: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'caption_pool.npz')
-    video_encoder: str = os.path.join(ONEPEACE, 'onepeace_video_k400.pth')
-    audio_encoder: str = os.path.join(ONEPEACE, 'one-peace-audio.pt')
-    text_encoder: str = os.path.join(ONEPEACE, 'one-peace-text.pt')   # optional, only for search
-    # InternVideo2 encoders, used by describe_video with an iv2 checkpoint
+    # text encoder for search, only for a model trained in the ONE-PEACE caption space (6 GB, optional;
+    # HF encoders/one-peace-text.pt). A model in the InternVideo2 caption space uses iv2_video_encoder
+    text_encoder: str = os.path.join(ONEPEACE, 'one-peace-text.pt')
+    # InternVideo2 encoders: video + audio for describe_video; the video checkpoint also holds the text tower
     iv2_video_encoder: str = os.path.join(ROOT, 'ckpt', 'internvideo2', 'InternVideo2-stage2_1b-224p-f4.pt')
     iv2_audio_encoder: str = os.path.join(ROOT, 'ckpt', 'internvideo2', 'audio_6b.pth')
     iv2_repo: str = os.path.join(ROOT, 'InternVideo')   # git clone --depth 1 https://github.com/OpenGVLab/InternVideo

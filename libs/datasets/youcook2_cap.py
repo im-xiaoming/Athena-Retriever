@@ -1,16 +1,21 @@
 """YouCook2 dataset for event segmentation + captioning.
 
-Differs from anet.py in three ways:
   - each segment's label is the CAPTION INDEX within the video (0..N-1), not a global class id
-  - every sample carries its embedded captions (NMAX, 1536) and a validity mask (NMAX,)
+  - every sample carries its captions' ONE-PEACE text vectors (NMAX, 1536) and a validity mask (NMAX,)
   - num_classes = NMAX, the maximum number of captions in one video
-so the existing label_points produces gt_cls_labels (P, NMAX) unchanged.
+so label_points produces gt_cls_labels (P, NMAX) unchanged.
 
-Input features (feat_source), concatenated along channels per modality when several:
-  onepeace : ONE-PEACE video (K400 finetune) + audio, 1536 each, one row per 0.5 s
-  iv2      : InternVideo2 video (iv2_video_keys, v768 and/or v512) + BEATs audio a768,
-             one row per second, from tools/extract_internvideo2.py
-Every source is resampled to max_seq_len steps; the time scale comes from the first source.
+Input features: InternVideo2 video (iv2_video_keys, v768 and/or v512) + BEATs audio a768, one row
+per second (iv2_rows_per_sec=2 with tools/make_iv2_dense.py), from tools/extract_internvideo2.py,
+resampled to max_seq_len steps.
+
+Caption space (caption_space), where the model is trained and picks captions:
+  onepeace : ONE-PEACE text vectors (caption_emb_file, 1536-d)
+  iv2      : InternVideo2 text vectors (caption_emb_iv2_file, 512-d, tools/embed_captions.py),
+             aligned with the v512 video projection
+  omni     : OmniRetriever-7B text vectors from the teacher file (omni_emb_file)
+ONE-PEACE text vectors stay the space of the ret_sim metric and of the consensus pick whatever
+is chosen here, so every run is scored the same way.
 """
 import os
 import json
@@ -20,56 +25,44 @@ import torch
 from torch.utils.data import Dataset
 from torch.nn import functional as F
 
-from .datasets import register_dataset, make_generator
 from .data_utils import truncate_feats, label_points
+from .loc_generators import PointGenerator
 
 NMAX = 16   # maximum number of captions in one YouCook2 video
+# config keys of the removed ONE-PEACE feature path; accepted and ignored so old run configs still load
+LEGACY_KEYS = {'feat_folder', 'feat_stride', 'num_frames', 'downsample_rate', 'class_aware', 'file_prefix',
+               'file_ext', 'multi_modal', 'require_iv2'}
 
 
-@register_dataset("youcook2_cap")
 class YouCook2CaptionDataset(Dataset):
     def __init__(
-        self, is_training, split, feat_folder, json_file, caption_emb_file,
-        feat_stride, num_frames, default_fps, downsample_rate, max_seq_len,
-        max_buffer_len_factor, scale_factor, regression_range, backbone_arch,
-        class_aware, trunc_thresh, crop_ratio, num_classes, file_prefix,
-        file_ext, force_upsampling, multi_modal, omni_emb_file=None,
-        feat_source='onepeace', iv2_folder='./data/youcookii/iv2_feats',
-        iv2_video_keys=('v768',), iv2_l2norm=True, require_iv2=False, caption_space='onepeace', iv2_rows_per_sec=1,
+        self, is_training, split, json_file, caption_emb_file, default_fps, max_seq_len,
+        max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
+        crop_ratio, num_classes, force_upsampling=True, omni_emb_file=None, feat_source='iv2',
+        iv2_folder='./data/youcookii/iv2_feats', iv2_video_keys=('v768',), iv2_l2norm=True,
+        iv2_rows_per_sec=1, caption_space='onepeace',
+        caption_emb_iv2_file='./data/youcookii/caption_emb_iv2.npz', **legacy,
     ):
-        self.sources = feat_source.split('+')
-        assert set(self.sources) <= {'onepeace', 'iv2'}, 'unknown feat_source %s' % feat_source
-        assert len(self.sources) == 1 or force_upsampling, 'several sources need force_upsampling'
+        unknown = set(legacy) - LEGACY_KEYS
+        assert not unknown, 'unknown dataset options %s' % sorted(unknown)
+        assert feat_source == 'iv2', 'only InternVideo2 features are supported (feat_source %s)' % feat_source
+        assert os.path.isdir(iv2_folder), iv2_folder
+        assert os.path.exists(json_file) and os.path.exists(caption_emb_file)
+        assert num_classes == NMAX, 'num_classes must be %d' % NMAX
         self.iv2_folder = iv2_folder
         self.iv2_video_keys = list(iv2_video_keys)
         self.iv2_l2norm = iv2_l2norm
         self.iv2_rows_per_sec = iv2_rows_per_sec   # 2: tools/make_iv2_dense.py (iv2_folder: .../iv2_dense)
-        # require_iv2 keeps only videos with InternVideo2 features, so ONE-PEACE runs can be
-        # scored on exactly the same videos as InternVideo2 runs
-        self.require_iv2 = require_iv2 or 'iv2' in self.sources
-        if self.require_iv2:
-            assert os.path.isdir(iv2_folder), iv2_folder
-        assert os.path.exists(feat_folder) and os.path.exists(json_file)
-        assert os.path.exists(caption_emb_file)
-        assert num_classes == NMAX, 'num_classes phai bang %d' % NMAX
-        self.multi_modal = multi_modal
-        self.feat_folder = feat_folder
-        self.file_prefix = file_prefix or ''
-        self.file_ext = file_ext
-        self.json_file = json_file
         self.force_upsampling = force_upsampling
         self.split = split
         self.is_training = is_training
-        self.feat_stride = feat_stride
-        self.num_frames = num_frames
         self.default_fps = default_fps
-        self.downsample_rate = downsample_rate
         self.max_seq_len = max_seq_len
         self.trunc_thresh = trunc_thresh
         self.num_classes = num_classes
         self.crop_ratio = crop_ratio
 
-        # caption embeddings, keyed "<video_id>#<segment index>"
+        # ONE-PEACE caption vectors, keyed "<video_id>#<segment index>"
         z = np.load(caption_emb_file, allow_pickle=True)
         self.cap_emb = {k: v for k, v in zip(z['keys'], z['emb'])}
         self.cap_text = {k: s for k, s in zip(z['keys'], z['sentences'])}
@@ -80,35 +73,25 @@ class YouCook2CaptionDataset(Dataset):
         self.omni = bool(omni_emb_file) and is_training   # only the train split needs the teacher
         if self.omni:
             self._load_omni(omni_emb_file)
-        # caption space the model is trained in and picks captions from. ONE-PEACE (pool_emb) stays
-        # the space of the metrics (ret_sim, consensus pick) whatever is chosen here.
-        assert caption_space in ('onepeace', 'omni'), caption_space
+        assert caption_space in ('onepeace', 'iv2', 'omni'), caption_space
         self.caption_space = caption_space
         if caption_space == 'omni' and is_training:
             assert self.omni and self.omni_text_ok.all(), 'caption_space omni needs teacher text for every caption'
             self.pool_train = self.omni_text_pool.astype(np.float32)
+        elif caption_space == 'iv2':
+            z = np.load(caption_emb_iv2_file, allow_pickle=True)
+            iv2 = {k: v for k, v in zip(z['keys'], z['emb'])}
+            self.pool_train = np.stack([iv2[k] for k in self.pool_keys]).astype(np.float32)
         else:
             self.pool_train = self.pool_emb
-        self.db_attributes = {
-            'dataset_name': 'YouCook2 caption grounding',
-            'tiou_thresholds': np.array([0.3, 0.5, 0.7]),
-            'empty_label_ids': [],
-        }
 
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)]
-        self.reg_range = regression_range
-        self.class_aware = class_aware
-        self.max_div_factor = max(self.fpn_strides)
         for s in self.fpn_strides:
-            assert max_seq_len % s == 0, 'max_seq_len phai chia het cho fpn stride'
-        self.point_generator = make_generator('point', **{
-            'max_seq_len_ori': self.max_seq_len,
-            'max_buffer_len_factor': max_buffer_len_factor,
-            'fpn_levels': len(self.fpn_strides),
-            'scale_factor': scale_factor,
-            'regression_range': self.reg_range,
-            'max_div_factor': self.max_div_factor,
-        })
+            assert max_seq_len % s == 0, 'max_seq_len must be divisible by every fpn stride'
+        self.point_generator = PointGenerator(
+            max_seq_len_ori=self.max_seq_len, max_buffer_len_factor=max_buffer_len_factor,
+            fpn_levels=len(self.fpn_strides), scale_factor=scale_factor,
+            regression_range=regression_range, max_div_factor=max(self.fpn_strides))
 
     def _build_pool(self):
         """Unique caption pool of this split; identical captions share one index.
@@ -116,14 +99,14 @@ class YouCook2CaptionDataset(Dataset):
         Only the train pool is used: as negatives during training and as the pool
         captions are picked from at inference.
         """
-        self.pool_text, self.pool_index, emb = [], {}, []
+        self.pool_text, self.pool_index, self.pool_keys, emb = [], {}, [], []
         self.cap_pool_idx = {}
         for it in self.data_list:
             for i in range(it['n_cap']):
                 k = '%s#%d' % (it['id'], i); t = str(self.cap_text[k])
                 if t not in self.pool_index:
                     self.pool_index[t] = len(self.pool_text)
-                    self.pool_text.append(t); emb.append(self.cap_emb[k])
+                    self.pool_text.append(t); self.pool_keys.append(k); emb.append(self.cap_emb[k])
                 self.cap_pool_idx[k] = self.pool_index[t]
         self.pool_emb = np.stack(emb).astype(np.float32)
 
@@ -156,9 +139,6 @@ class YouCook2CaptionDataset(Dataset):
         print('Omni teacher : %d/%d caption vectors, %d clip vectors from %s' % (
             self.omni_text_ok.sum(), len(self.pool_text), len(av), path), flush=True)
 
-    def get_attributes(self):
-        return self.db_attributes
-
     def _load_json_db(self, json_file):
         with open(json_file) as f:
             db = json.load(f)['database']
@@ -171,7 +151,7 @@ class YouCook2CaptionDataset(Dataset):
                 continue
             if any('%s#%d' % (vid, i) not in self.cap_emb for i in range(len(anns))):
                 continue
-            if self.require_iv2 and not os.path.exists(os.path.join(self.iv2_folder, vid + '.npz')):
+            if not os.path.exists(os.path.join(self.iv2_folder, vid + '.npz')):
                 continue   # not extracted (yet)
             segs = np.array([a['segment'] for a in anns], dtype=np.float32)
             out.append({
@@ -190,53 +170,37 @@ class YouCook2CaptionDataset(Dataset):
     @property
     def feat_dims(self):
         """(visual, audio) channel counts of the model input."""
-        dv = da = 0
-        for src in self.sources:
-            if src == 'onepeace':
-                dv += 1536; da += 1536
-            else:
-                dv += sum(512 if k == 'v512' else 768 for k in self.iv2_video_keys); da += 768
-        return dv, da
+        return sum(512 if k == 'v512' else 768 for k in self.iv2_video_keys), 768
 
-    def _load_source(self, src, vid):
-        """Visual and audio rows (n, C) of one source, plus its step and window in frames."""
-        if src == 'onepeace':
-            pre = os.path.join(self.feat_folder, self.file_prefix + vid)
-            fv = np.load(pre + '_one_peace_video_finetune' + self.file_ext).astype(np.float32)
-            fa = np.load(pre + '_one_peace_audio' + self.file_ext).astype(np.float32)
-            stride, window = self.feat_stride, self.num_frames
-        else:
-            # row i is centred on i / rows_per_sec + 0.5 s: stride 1 / rows_per_sec s, window 1 s
-            z = np.load(os.path.join(self.iv2_folder, vid + '.npz'))
-            parts = [z[k].astype(np.float32) for k in self.iv2_video_keys]
-            fa = z['a768'].astype(np.float32)
-            if self.iv2_l2norm:   # raw norms differ widely: v768 ~54, a768 ~6, v512 is already 1
-                parts = [p / np.maximum(np.linalg.norm(p, axis=1, keepdims=True), 1e-6) for p in parts]
-                fa = fa / np.maximum(np.linalg.norm(fa, axis=1, keepdims=True), 1e-6)
-            fv = np.concatenate(parts, axis=1)
-            stride, window = self.default_fps // self.iv2_rows_per_sec, self.default_fps
+    def _load_features(self, vid):
+        """Visual and audio rows (n, C), plus their step and window in frames.
+
+        Row i is centred on i / rows_per_sec + 0.5 s: stride 1 / rows_per_sec s, window 1 s.
+        """
+        z = np.load(os.path.join(self.iv2_folder, vid + '.npz'))
+        parts = [z[k].astype(np.float32) for k in self.iv2_video_keys]
+        fa = z['a768'].astype(np.float32)
+        if self.iv2_l2norm:   # raw norms differ widely: v768 ~54, a768 ~6, v512 is already 1
+            parts = [p / np.maximum(np.linalg.norm(p, axis=1, keepdims=True), 1e-6) for p in parts]
+            fa = fa / np.maximum(np.linalg.norm(fa, axis=1, keepdims=True), 1e-6)
+        fv = np.concatenate(parts, axis=1)
         n = min(fv.shape[0], fa.shape[0])
-        return fv[:n], fa[:n], stride, window
+        return fv[:n], fa[:n], self.default_fps // self.iv2_rows_per_sec, self.default_fps
 
     def __getitem__(self, idx):
         item = self.data_list[idx]
         vid = item['id']
-        fvs, fas = [], []
-        for j, src in enumerate(self.sources):
-            fv, fa, stride, window = self._load_source(src, vid)
-            n = fv.shape[0]
-            if j == 0:
-                # recompute the time scale (same as case 2 in anet.py)
-                feat_stride = float((n - 1) * stride + window) / self.max_seq_len
-                num_frames = feat_stride
-                feat_offset = 0.5 * num_frames / feat_stride
-            fv = torch.from_numpy(np.ascontiguousarray(fv.transpose()))
-            fa = torch.from_numpy(np.ascontiguousarray(fa.transpose()))
-            if fv.shape[-1] != self.max_seq_len and self.force_upsampling:
-                fv = F.interpolate(fv[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
-                fa = F.interpolate(fa[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
-            fvs.append(fv); fas.append(fa)
-        feats = {'visual': torch.cat(fvs), 'audio': torch.cat(fas)}
+        fv, fa, stride, window = self._load_features(vid)
+        # time scale of the grid after resampling to max_seq_len steps
+        feat_stride = float((fv.shape[0] - 1) * stride + window) / self.max_seq_len
+        num_frames = feat_stride
+        feat_offset = 0.5 * num_frames / feat_stride
+        fv = torch.from_numpy(np.ascontiguousarray(fv.transpose()))
+        fa = torch.from_numpy(np.ascontiguousarray(fa.transpose()))
+        if fv.shape[-1] != self.max_seq_len and self.force_upsampling:
+            fv = F.interpolate(fv[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
+            fa = F.interpolate(fa[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
+        feats = {'visual': fv, 'audio': fa}
 
         segments = torch.from_numpy(item['segments'] * item['fps'] / feat_stride - feat_offset)
         labels = torch.from_numpy(item['labels'])
@@ -263,12 +227,11 @@ class YouCook2CaptionDataset(Dataset):
         }
         if self.is_training:
             data_dict = truncate_feats(
-                data_dict, self.max_seq_len, self.trunc_thresh, feat_offset,
-                self.crop_ratio, self.multi_modal)
+                data_dict, self.max_seq_len, self.trunc_thresh, feat_offset, self.crop_ratio)
 
         points = self.point_generator(self.fpn_strides, data_dict['feats']['visual'], self.is_training)
         data_dict['gt_cls_labels'], data_dict['gt_offsets'] = label_points(
-            points, data_dict['segments'], data_dict['labels'], self.num_classes, self.class_aware)
+            points, data_dict['segments'], data_dict['labels'], self.num_classes, False)
         data_dict['points'] = points
 
         # caption matrix of the video, padded to NMAX
