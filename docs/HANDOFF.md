@@ -18,7 +18,7 @@ Bản bàn giao sáng nay: `docs/HANDOFF_2026-10-04_am.md`. Bản trước nữa
 
 ## 1. Trạng thái lúc viết
 
-VARIANTS_STATUS
+Không còn gì chạy. Hàng đợi biến thể (`tools/run_queue_variants.sh`) đã xong lúc 15:28. Kết quả ở mục 3.
 
 Không có phiên Colab nào mở. Không có tiến trình nền nào khác.
 
@@ -59,13 +59,42 @@ Không có phiên Colab nào mở. Không có tiến trình nền nào khác.
 
 ## 3. Thử nghiệm biến thể (chiều nay, nhánh `exp-iv2-variants`)
 
-VARIANTS_RESULTS
+Mọi lượt dùng thầy 100% và đủ dữ liệu (1106 train / 394 val), trừ `iv2_noteach`. Chấm checkpoint `best_cap`.
+
+| Lượt | Thay đổi so với `iv2` | R@0.5 | R@0.7 | ret_sim | top-1 | CIDEr | METEOR |
+|---|---|---|---|---|---|---|---|
+| `iv2` / `iv2_seed2` | (mốc) | 54.27 / 52.82 | 31.24 / 29.56 | 0.754 / 0.758 | 0.734 / 0.741 | 87.9 / 89.9 | 15.56 / 15.49 |
+| `iv2_noteach` | bỏ thầy | 51.44 | 30.12 | 0.758 | 0.734 | 89.3 | 15.35 |
+| `iv2_reg` | dropout 0.1, drop-path 0.2 | 52.23 | 29.59 | 0.757 | 0.743 | 89.4 | 15.75 |
+| `iv2_emb04` | trọng số L_emb, L_span 0.4 | 53.35 | 31.34 | 0.755 | 0.734 | 89.1 | 15.57 |
+| `iv2_ep8` / `iv2_ep8_seed2` | 8 epoch thay vì 10 | 53.68 / 52.19 | 30.39 / 29.89 | 0.758 / 0.758 | 0.742 / 0.742 | 89.4 / 87.6 | 15.80 / 15.53 |
+| `iv2_ep8_reg` | 8 epoch + dropout | 54.44 | 31.51 | 0.754 | 0.736 | 87.6 | 15.40 |
+
+Quét tham số suy luận trên checkpoint `iv2` (không train lại, log `logs/iv2_infer_sweep.log`):
+- `iou_power` 0.5 thay vì 0.3: R@0.5 54.27 → 54.97.
+- soft-NMS sigma 0.9: R@0.7 +0.7.
+
+Chưa áp dụng vào API, vì `min_score` 0.36 đang được hiệu chỉnh theo `iou_power` 0.3.
+
+**Kết luận:**
+- Mọi biến thể đều nằm trong mức nhiễu giữa các seed (±1.5 R@0.5, ±0.003 ret_sim). Với các siêu tham số này, model đã chững lại.
+- `iv2` vẫn là model của API. Train 8 epoch cho kết quả tương đương và nhanh hơn 20%.
+- Thầy vẫn giữ: rẻ, và có vẻ giúp tách đoạn một chút, dù chưa ra khỏi mức nhiễu.
+
+Biểu đồ: `experiments/plots/variants_{curves,final,losses}.png`.
 
 ---
 
 ## 4. Việc tiếp theo
 
-NEXT_STEPS
+Theo thứ tự nên làm:
+
+1. **Kiểm tra encoder InternVideo2 của API** (`describe_video`) khi máy rảnh: so với `data/youcookii/iv2_feats/6uHoTJSLoL8.npz` (cosine từng dòng phải xấp xỉ 1). Đây là việc duy nhất của API chưa được kiểm tra.
+2. **Có thể áp dụng `iou_power 0.5`** cho API: sửa `test_cfg.iou_power` trong config của checkpoint export, chạy lại `python -m uniav_api.calibrate`, đặt lại `min_score`. Làm trên nhánh mới, không đụng `test`.
+3. **Muốn tiến thêm cần thay đổi lớn hơn siêu tham số:**
+   - **Phần chọn câu:** "trần" hiện tại là chọn câu trong kho với đoạn GT (ret_sim oracle khoảng 0.753). Cao hơn nữa cần sinh câu thay vì chọn: dùng InternVideo3-8B hoặc model ngôn ngữ để viết caption cho từng đoạn. Hoặc thêm vector text của InternVideo2 (đã căn chỉnh với v512) làm không gian chọn câu thứ hai.
+   - **Phần tách đoạn:** thử `max_seq_len 512`, vì đặc trưng 1 dòng/giây nên video dài bị nén nhiều. Hoặc trích InternVideo2 dày hơn (2 dòng/giây).
+   - **Thầy:** thử MLP nhỏ trên vector có sẵn, hoặc LoRA cho OmniRetriever (đã bàn từ sáng).
 
 ---
 

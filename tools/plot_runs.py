@@ -6,6 +6,7 @@ Reads per-epoch metrics from experiments/runs/*.json, or from logs/<run>.log for
 whose record has no history (backfilled runs and the original-code baseline).
 Writes experiments/plots/:
   {curves,final,losses}.png            original model -> improved -> teacher -> InternVideo2
+  variants_{curves,final,losses}.png   variants of the InternVideo2 model
   features_{curves,final,losses}.png   input features under the same teacher setup, full data:
                                        ONE-PEACE vs InternVideo2 (and both concatenated)
 
@@ -43,10 +44,21 @@ FEATURE_GROUPS = [
     ('InternVideo2 v768 + v512', '#e87ba4', ['iv2_v512']),
     ('InternVideo2 + ONE-PEACE', '#4a3aa7', ['iv2op']),
 ]
+# variants of the InternVideo2 model (all with the teacher unless noted)
+VARIANT_GROUPS = [
+    ('iv2 (default)', '#eda100', ['iv2', 'iv2_seed2']),
+    ('no teacher', '#2a78d6', ['iv2_noteach']),
+    ('dropout 0.1, drop-path 0.2', '#eb6834', ['iv2_reg']),
+    ('emb / span loss 0.4', '#e87ba4', ['iv2_emb04']),
+    ('8 epochs', '#008300', ['iv2_ep8', 'iv2_ep8_seed2']),
+    ('8 epochs + dropout', '#4a3aa7', ['iv2_ep8_reg']),
+]
 SHORT = {'Original model': 'Original', 'Improved, no teacher': 'No teacher',
          'Improved + OmniRetriever teacher': 'Teacher', 'InternVideo2 + teacher': 'InternVideo2',
          'ONE-PEACE': 'ONE-PEACE', 'InternVideo2 v768': 'IV2', 'InternVideo2 v768 + v512': 'IV2 +v512',
-         'InternVideo2 + ONE-PEACE': 'IV2 +OP'}
+         'InternVideo2 + ONE-PEACE': 'IV2 +OP', 'iv2 (default)': 'iv2', 'no teacher': 'no teacher',
+         'dropout 0.1, drop-path 0.2': 'dropout', 'emb / span loss 0.4': 'emb 0.4', '8 epochs': '8 ep',
+         '8 epochs + dropout': '8 ep +drop'}
 HEAD_TO_KEY = {'event': 'ev_loss', 'reg': 'reg_loss', 'iou': 'iou_loss', 'embed': 'emb_loss',
                'span': 'span_loss', 'o_txt': 'omni_txt_loss', 'o_av': 'omni_av_loss', 'total': 'final_loss'}
 
@@ -189,13 +201,14 @@ def main():
     finals = [('R@0.5', 'R@0.5'), ('R@0.7', 'R@0.7'), ('mIoU', 'mIoU'),
               ('ret_sim', 'ret_sim'), ('cos_gt', 'cos_gt'), ('CIDEr', 'CIDEr')]
     for prefix, groups, what in (('', GROUPS, ''),
-                                 ('features_', FEATURE_GROUPS, ' - input features, same teacher, full data')):
+                                 ('features_', FEATURE_GROUPS, ' - input features, same teacher, full data'),
+                                 ('variants_', VARIANT_GROUPS, ' - variants of the InternVideo2 model')):
         plot_curves(hist, curves, prefix + 'curves.png', 'Validation metrics per epoch' + what, groups)
         plot_curves(hist, [('ev_loss', 'event loss (train)'), ('reg_loss', 'boundary loss (train)'),
                            ('final_loss', 'total loss (train, not comparable across groups)')],
                     prefix + 'losses.png', 'Training losses per epoch' + what, groups)
         plot_final(hist, finals, prefix + 'final.png',
-                   'Last epoch (12): every run as a dot, line = group mean' + what, groups)
+                   'Last epoch: every run as a dot, line = group mean' + what, groups)
     print('wrote', ', '.join(sorted(os.listdir(OUT))))
 
 
