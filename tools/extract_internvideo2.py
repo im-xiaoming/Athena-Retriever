@@ -140,10 +140,11 @@ def decode(path, ffmpeg='ffmpeg'):
 
 
 @torch.no_grad()
-def video_features(enc, proj, frames, device, batch=32):
+def video_features(enc, proj, frames, device, batch=32, shift=0):
     n_sec = max(1, int(np.ceil(len(frames) / 2)))
     last = len(frames) - 1
-    idx = np.clip(np.arange(n_sec)[:, None] * 2 + np.array([-1, 0, 1, 2])[None], 0, last)   # (n_sec, 4)
+    # shift (in frames at 2 fps) moves every window; shift=1 gives windows centred on i + 1.0 s
+    idx = np.clip(np.arange(n_sec)[:, None] * 2 + shift + np.array([-1, 0, 1, 2])[None], 0, last)   # (n_sec, 4)
     v768, v512 = [], []
     for s in range(0, n_sec, batch):
         clip = (frames[idx[s:s + batch]].astype(np.float32) / 255.0 - MEAN) / STD           # (B,4,H,W,3)
@@ -156,10 +157,11 @@ def video_features(enc, proj, frames, device, batch=32):
 
 
 @torch.no_grad()
-def audio_features(model, wav, n_sec, device, sr=16000, batch=32):
+def audio_features(model, wav, n_sec, device, sr=16000, batch=32, shift=0.0):
     wav = np.pad(wav, (0, max(0, n_sec * sr - len(wav))))    # audio track shorter than the video
-    pad = np.pad(wav, (sr, 2 * sr))                          # window i = [i-1, i+2) s
-    win = np.stack([pad[i * sr:(i + 3) * sr] for i in range(n_sec)])
+    pad = np.pad(wav, (sr, 3 * sr))                          # window i = [i-1, i+2) s, moved by shift
+    off = int(round(shift * sr))
+    win = np.stack([pad[i * sr + off:(i + 3) * sr + off] for i in range(n_sec)])
     out = []
     for s in range(0, n_sec, batch):
         x = torch.from_numpy(win[s:s + batch]).to(device)
@@ -175,6 +177,9 @@ def main():
     p.add_argument('--audio-ckpt', required=True)
     p.add_argument('--limit', type=int, default=0, help='only the first N videos (for timing)')
     p.add_argument('--workers', type=int, default=6, help='decode threads ahead of the GPU')
+    p.add_argument('--shift', type=float, default=0.0, choices=(0.0, 0.5),
+                   help='move every window by this many seconds; 0.5 gives the rows halfway between '
+                        'the default ones, to interleave into 2 rows per second')
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
     dev = torch.device('cuda')
@@ -196,8 +201,9 @@ def main():
             if len(frames) == 0:
                 print('SKIP %s: no frames' % f, flush=True); continue
             try:   # one bad video must not stop the others
-                v768, v512 = video_features(enc, proj, frames, dev)
-                a768 = audio_features(beats, wav, len(v768), dev) if len(wav) else np.zeros((len(v768), 768), np.float32)
+                v768, v512 = video_features(enc, proj, frames, dev, shift=int(a.shift * 2))
+                a768 = (audio_features(beats, wav, len(v768), dev, shift=a.shift) if len(wav)
+                        else np.zeros((len(v768), 768), np.float32))
             except Exception as e:
                 print('FAIL %s: %r' % (f, e), flush=True); continue
             np.savez(os.path.join(a.out, f[:-4] + '.npz'), v768=v768.astype(np.float16),

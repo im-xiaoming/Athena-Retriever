@@ -17,7 +17,9 @@ import numpy as np
 
 FEATS = '/content/iv2_feats'
 VIDEOS = '/content/yc2_videos'
-DRIVE = '/content/drive/MyDrive/uniav_omni/iv2_feats'
+# IV2_NAME=iv2_feats_shift keeps a second extraction apart on Drive and HF
+NAME = os.environ.get('IV2_NAME', 'iv2_feats')
+DRIVE = '/content/drive/MyDrive/uniav_omni/' + NAME
 TAR_DIR = '/content/iv2_tar'
 OUT = '/content/out'
 REPO = 'nguyenminh04/uniav-youcook2-data'
@@ -85,7 +87,7 @@ def pack():
         shards.append(cur)
     manifest = {}
     for i, names in enumerate(shards):
-        name = 'iv2_feats_%02d.tar' % i
+        name = '%s_%02d.tar' % (NAME, i)
         with tarfile.open(os.path.join(TAR_DIR, name), 'w') as t:
             for f in names:
                 t.add(os.path.join(FEATS, f), arcname=f)
@@ -95,10 +97,10 @@ def pack():
                    'format': 'one .npz per video: v768, v512, a768 float16, one row per second'}, fh)
     print('%d files in %d shards' % (len(files), len(shards)), flush=True)
     api = HfApi(token=open(TOKEN_FILE).read().strip())
-    api.upload_folder(repo_id=REPO, repo_type='dataset', folder_path=TAR_DIR, path_in_repo='iv2_feats',
-                      commit_message='InternVideo2 features: %d videos' % len(files))
-    remote = {f for f in api.list_repo_files(REPO, repo_type='dataset') if f.startswith('iv2_feats/')}
-    want = {'iv2_feats/' + n for n in list(manifest) + ['manifest.json']}
+    api.upload_folder(repo_id=REPO, repo_type='dataset', folder_path=TAR_DIR, path_in_repo=NAME,
+                      commit_message='InternVideo2 features (%s): %d videos' % (NAME, len(files)))
+    remote = {f for f in api.list_repo_files(REPO, repo_type='dataset') if f.startswith(NAME + '/')}
+    want = {NAME + '/' + n for n in list(manifest) + ['manifest.json']}
     print('uploaded %d/%d files' % (len(want & remote), len(want)))
     print('PACK_OK' if want <= remote else 'PACK_FAIL')
 

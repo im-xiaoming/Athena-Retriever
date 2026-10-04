@@ -14,9 +14,10 @@ SESSION=${1:-omni}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LOG=$ROOT/logs/iv2_finish.log
 STATE=$ROOT/logs/iv2_finish.state
-DEST=$ROOT/data/youcookii/iv2_feats
+NAME=${IV2_NAME:-iv2_feats}   # IV2_NAME=iv2_feats_shift for the half-second shifted extraction
+DEST=$ROOT/data/youcookii/$NAME
 C=~/.local/bin/colab
-HF=https://huggingface.co/datasets/nguyenminh04/uniav-youcook2-data/resolve/main/iv2_feats
+HF=https://huggingface.co/datasets/nguyenminh04/uniav-youcook2-data/resolve/main/$NAME
 exec 8>"$ROOT/logs/iv2_finish.lock"; flock -n 8 || { echo "already running"; exit 0; }
 
 say() { echo "$(date '+%m-%d %H:%M:%S')  $*" >> "$LOG"; }
@@ -31,7 +32,7 @@ rexec() {
 # start one finalize step in the background on the VM and wait for its _OK / _FAIL line
 step() {
   local name=$1 limit=$2 out t=0
-  rexec "nohup setsid python3 /content/iv2_finalize.py $name > /content/out/iv2_fin_$name.log 2>&1 < /dev/null &" > /dev/null
+  rexec "nohup setsid env IV2_NAME=$NAME python3 /content/iv2_finalize.py $name > /content/out/iv2_fin_$name.log 2>&1 < /dev/null &" > /dev/null
   while [ $t -lt "$limit" ]; do
     sleep 60; t=$((t + 60))
     out=$(rexec "cat /content/out/iv2_fin_$name.log")
@@ -56,7 +57,7 @@ while true; do
   # ---- 1. wait for the extractor to finish -------------------------------------------------
   while true; do
     out=$(rexec 'if grep -q EXTRACT_DONE /content/out/iv2_full.log; then echo STATE_DONE;
-                 elif pgrep -f "[e]xtract_internvideo2" > /dev/null; then echo STATE_RUNNING;
+                 elif pgrep -f "[i]v2_full.sh|[e]xtract_internvideo2" > /dev/null; then echo STATE_RUNNING;
                  else echo STATE_CRASHED; fi; grep -E "^[0-9:]+ [0-9]+/" /content/out/iv2_full.log | tail -1')
     st=$(echo "$out" | grep -o 'STATE_[A-Z]*' | head -1)
     case $st in
