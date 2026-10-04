@@ -35,7 +35,7 @@ class YouCook2CaptionDataset(Dataset):
         class_aware, trunc_thresh, crop_ratio, num_classes, file_prefix,
         file_ext, force_upsampling, multi_modal, omni_emb_file=None,
         feat_source='onepeace', iv2_folder='./data/youcookii/iv2_feats',
-        iv2_video_keys=('v768',), iv2_l2norm=True,
+        iv2_video_keys=('v768',), iv2_l2norm=True, require_iv2=False,
     ):
         self.sources = feat_source.split('+')
         assert set(self.sources) <= {'onepeace', 'iv2'}, 'unknown feat_source %s' % feat_source
@@ -43,7 +43,10 @@ class YouCook2CaptionDataset(Dataset):
         self.iv2_folder = iv2_folder
         self.iv2_video_keys = list(iv2_video_keys)
         self.iv2_l2norm = iv2_l2norm
-        if 'iv2' in self.sources:
+        # require_iv2 keeps only videos with InternVideo2 features, so ONE-PEACE runs can be
+        # scored on exactly the same videos as InternVideo2 runs
+        self.require_iv2 = require_iv2 or 'iv2' in self.sources
+        if self.require_iv2:
             assert os.path.isdir(iv2_folder), iv2_folder
         assert os.path.exists(feat_folder) and os.path.exists(json_file)
         assert os.path.exists(caption_emb_file)
@@ -157,8 +160,8 @@ class YouCook2CaptionDataset(Dataset):
                 continue
             if any('%s#%d' % (vid, i) not in self.cap_emb for i in range(len(anns))):
                 continue
-            if 'iv2' in self.sources and not os.path.exists(os.path.join(self.iv2_folder, vid + '.npz')):
-                continue   # ffmpeg could not decode the uncut video
+            if self.require_iv2 and not os.path.exists(os.path.join(self.iv2_folder, vid + '.npz')):
+                continue   # not extracted (yet)
             segs = np.array([a['segment'] for a in anns], dtype=np.float32)
             out.append({
                 'id': vid,

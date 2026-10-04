@@ -50,6 +50,7 @@ dataset:
   iv2_folder: ./data/youcookii/iv2_feats
   iv2_video_keys: [v768]   # v768 = pooled vision, v512 = text-aligned projection
   iv2_l2norm: true
+  require_iv2: false   # true: keep only videos with InternVideo2 features (same set as iv2 runs)
   # OmniRetriever-7B teacher vectors, built with tools/omni_youcook2.py. Uncomment to enable
   # omni_emb_file: ./data/youcookii/omni_emb.npz
 model:

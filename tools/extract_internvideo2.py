@@ -157,6 +157,7 @@ def video_features(enc, proj, frames, device, batch=32):
 
 @torch.no_grad()
 def audio_features(model, wav, n_sec, device, sr=16000, batch=32):
+    wav = np.pad(wav, (0, max(0, n_sec * sr - len(wav))))    # audio track shorter than the video
     pad = np.pad(wav, (sr, 2 * sr))                          # window i = [i-1, i+2) s
     win = np.stack([pad[i * sr:(i + 3) * sr] for i in range(n_sec)])
     out = []
@@ -194,8 +195,11 @@ def main():
                 futures[n - 1 + ahead] = ex.submit(decode, os.path.join(a.videos, todo[n - 1 + ahead]))
             if len(frames) == 0:
                 print('SKIP %s: no frames' % f, flush=True); continue
-            v768, v512 = video_features(enc, proj, frames, dev)
-            a768 = audio_features(beats, wav, len(v768), dev) if len(wav) else np.zeros((len(v768), 768), np.float32)
+            try:   # one bad video must not stop the others
+                v768, v512 = video_features(enc, proj, frames, dev)
+                a768 = audio_features(beats, wav, len(v768), dev) if len(wav) else np.zeros((len(v768), 768), np.float32)
+            except Exception as e:
+                print('FAIL %s: %r' % (f, e), flush=True); continue
             np.savez(os.path.join(a.out, f[:-4] + '.npz'), v768=v768.astype(np.float16),
                      v512=v512.astype(np.float16), a768=a768.astype(np.float16))
             secs += len(v768)
