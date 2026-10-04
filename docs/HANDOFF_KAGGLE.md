@@ -44,7 +44,9 @@ HF dataset `nguyenminh04/uniav-youcook2-data` là **private**: cần token, ngư
 | Đặc trưng InternVideo2 + BEATs, 1500 video, 1 dòng/giây | HF `iv2_feats/iv2_feats_00..07.tar` + `manifest.json` (khoảng 2 GB) | giải nén vào `data/youcookii/iv2_feats/` |
 | Vector thầy OmniRetriever-7B (cho mọi lượt có thầy) | HF `teacher/omni_emb_full.npz` (132 MB) | `data/youcookii/omni_emb_full.npz` |
 | Checkpoint của API (model `iv2`) | HF `api/uniav_iv2.pth` | `ckpt/api/uniav_iv2.pth` |
-| Đặc trưng lệch nửa giây (để ghép thành 2 dòng/giây) | HF `iv2_feats_shift/` sau khi lượt trích trên Colab xong (khoảng 20:30 hôm nay) | `data/youcookii/iv2_feats_shift/` |
+| Đặc trưng lệch nửa giây (để ghép thành 2 dòng/giây) | HF `iv2_feats_shift/iv2_feats_shift_00..07.tar` + `manifest.json` (1500 file, đã kiểm tra) | giải nén vào `data/youcookii/iv2_feats_shift/` |
+| Encoder ONE-PEACE text (để tính ret_sim) | HF `encoders/one-peace-text.pt` (6.4 GB) | đặt biến `UNIAV_TEXT_ENCODER` trỏ tới file |
+| Bộ sinh câu GPT-2 (prefix) cho API | HF `api/capgen_prefix.pth` (251 MB) | `ckpt/api/capgen_prefix.pth`; code ở nhánh `api-capgen` |
 | Đặc trưng ONE-PEACE (chỉ để so sánh, đã bỏ) | HF `av_features/` (11 GB) | không cần nữa |
 
 ```python
@@ -121,6 +123,6 @@ Biến thể RAG (`--rag 5`: thêm 5 câu ứng viên) và ret_sim (đo bằng e
 ## 6. Những gì còn chạy trên PC lúc bàn giao
 
 - `tools/capgen/train_capgen.py --name rag5`: xong thì tự chấm ret_sim cho cả `prefix` lẫn `rag5`.
-- Lượt trích lệch nửa giây trên Colab (phiên `iv2shift`): script `tools/iv2_finish.sh` trên PC tự kiểm tra từng file, lưu lên Drive và HF (`iv2_feats_shift/`), rồi tắt phiên.
+- Lượt trích lệch nửa giây trên Colab: **đã xong** (20:28). 1500 file đã lên Drive và HF `iv2_feats_shift/`, phiên Colab đã tắt.
 
 Phiên PC sẽ commit các kết quả này lên `exp-dense-capgen`. Pull nhánh đó để lấy.
