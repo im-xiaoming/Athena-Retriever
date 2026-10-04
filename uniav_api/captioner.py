@@ -57,3 +57,47 @@ class Captioner:
             out.append({'caption': self.texts[best], 'similarity': round(float(s[best]), 4),
                         'consensus': round(float(agree[order[0]]), 4), 'alternatives': alts})
         return out
+
+
+class PoolQuery:
+    """Text query -> event-space vector without the ONE-PEACE text encoder.
+
+    Ranks the train captions by TF-IDF cosine with the query and averages the projected vectors
+    of the best ones, weighted by that similarity. Works for queries phrased like recipe steps
+    ("cut the onion"); words never used in a train caption are ignored.
+    """
+
+    def __init__(self, captioner, top=5):
+        import re
+        self.re, self.top, self.cap = re, top, captioner
+        docs = [self._words(t) for t in captioner.texts]
+        vocab = sorted({w for d in docs for w in d})
+        self.vid = {w: i for i, w in enumerate(vocab)}
+        df = np.zeros(len(vocab), np.float32)
+        for d in docs:
+            for w in set(d):
+                df[self.vid[w]] += 1
+        self.idf = np.log((1 + len(docs)) / (1 + df)) + 1
+        rows = np.zeros((len(docs), len(vocab)), np.float32)
+        for i, d in enumerate(docs):
+            for w in d:
+                rows[i, self.vid[w]] += 1
+        rows *= self.idf
+        self.docs = rows / np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-9)
+
+    def _words(self, text):
+        return self.re.findall(r"[a-z]+", text.lower())
+
+    def __call__(self, text):
+        v = np.zeros(len(self.vid), np.float32)
+        for w in self._words(text):
+            if w in self.vid:
+                v[self.vid[w]] += 1
+        v *= self.idf
+        if not v.any():
+            raise ValueError('none of the words in %r appear in the train captions' % text)
+        sim = self.docs @ (v / np.linalg.norm(v))
+        best = np.argsort(-sim)[:self.top]
+        w = torch.from_numpy(sim[best]).to(self.cap.pool_f.device)
+        q = (w[:, None] * self.cap.pool_f[torch.from_numpy(best).to(self.cap.pool_f.device)]).sum(0)
+        return F.normalize(q, dim=-1)

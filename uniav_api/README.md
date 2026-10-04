@@ -1,79 +1,110 @@
 # uniav_api
 
-Python functions that turn a cooking video into timed events, each with a caption and a
-512-d vector for text search. It is a self-contained inference copy of the event model in
-`libs/modeling/event_archs.py`, plus the ONE-PEACE encoders, rewritten so it needs no fairseq,
-no compiled extension and no separately installed ffmpeg. It runs on Windows, Linux and macOS.
+Python functions that turn a cooking video into timed steps, each with a caption chosen from
+the 8218 YouCook2 training sentences and a 512-d vector for text search. It is a self-contained
+inference copy of the event model in `libs/modeling/event_archs.py` (architecture:
+`docs/UniAV_new.drawio.svg`, walkthrough: `docs/UniAV_new_walkthrough.md`).
+
+Colab demo: `uniav_api/demo_colab.ipynb` (samples need no GPU and no encoder).
 
 ```python
 import uniav_api as uv
 
-result = uv.describe_video('cooking.mp4')
-for e in result['events']:
-    print(e['start'], e['end'], e['caption'])      # seconds, seconds, best caption
+uv.samples()                                   # YouCook2 val videos shipped with their features
+r = uv.describe_sample('6uHoTJSLoL8')          # ~1 s, no encoder needed
+uv.show(r)                                     # each event next to the real step it matches
+uv.plot(r)                                     # the same as a timeline figure (matplotlib)
+uv.compare_table(r)                            # the same as a pandas DataFrame
 
-uv.search('boil the noodles', top_k=5)              # events of every video described so far
-uv.embed_text('add salt')                           # 512-d query vector, same space as e['embedding']
+r = uv.describe_video('cooking.mp4')           # any video: runs InternVideo2 + BEATs first
+for e in r['events']:
+    print(e['start'], e['end'], e['caption'])
 
-# precomputed ONE-PEACE features (data/youcookii/av_features), no encoders needed
-uv.describe_features(visual, audio, duration, video_id='abc')
+uv.search('boil the noodles', top_k=5)         # events of every video described so far
+uv.describe_features(v768, a768, duration)     # your own stored features (one row per second)
 ```
 
-Each event holds `start`, `end`, `score`, `caption`, `similarity` (cosine to the caption),
-`consensus`, `alternatives` (3 other candidate captions) and `embedding` (numpy, 512).
-Results are kept in `uniav_api/index/<video_id>.json` so `search()` covers earlier videos.
+Each event holds `start`, `end` (seconds), `score`, `caption`, `similarity`, `consensus`,
+`alternatives` (3 other candidate captions) and `embedding` (numpy, 512). Results are kept in
+`uniav_api/index/<model>/<video_id>.json` so `search()` covers earlier videos.
+
+## Model
+
+`ckpt/api/uniav_iv2.pth` (263 MB, fp16), exported from run `iv2` by `tools/export_api_ckpt.py`. It
+carries its training config, so the API knows the features it takes. YouCook2 validation, 394 videos:
+
+| | R@0.5 | R@0.7 | ret_sim | CIDEr | METEOR |
+|---|---|---|---|---|---|
+| this model (InternVideo2 + BEATs) | 54.3 | 31.2 | 0.754 | 87.9 | 15.6 |
+| same setup, second seed | 52.8 | 29.6 | 0.758 | 89.9 | 15.5 |
+| previous API model `omni65` (ONE-PEACE) | 48.7 | 25.3 | 0.758 | 86.5 | 15.4 |
+
+R@0.5 counts the real steps covered by a predicted event with IoU >= 0.5 when the model keeps as
+many events as there are real steps. In the API, events are kept by score instead (`min_score`
+0.36, at most 0.3 IoU between kept events): F1 at IoU 0.5 is 0.534, 8.4 events per video (real 7.7).
+
+## Samples
+
+`uniav_api/samples/<id>.npz`: InternVideo2 v768 / v512, BEATs a768 (one row per second, fp16) and
+the duration. All are validation videos, never seen in training.
+
+| id | dish | length | F1 at IoU 0.5 |
+|---|---|---|---|
+| `-Ju39A-G0Dk`, `6uHoTJSLoL8`, `W2gnFLOi_AQ` | chili, mapo tofu, salmon | 8:16, 3:02, 6:08 | typical (the raw mp4s are in `data/demo_videos`) |
+| `XEifm-iXMvs` | falafel with tzatziki | 4:51 | 0.94 |
+| `9GX8f5EwwE4` | oven-baked dish, 13 steps | 4:02 | 0.85 |
+| `e8S1vFC8zYk` | mac and cheese | 2:33 | 0.89 |
+| `SOMsxGGSTUk` | Thai noodles | 5:20 | 0.89 |
+| `cMzyB4m3VHY` | pizza | 3:41 | 0.83 |
+
+The last five were picked among the better videos (median F1 over the validation videos of
+2.5 to 5.5 minutes is 0.57); the first three were chosen before the model existed.
 
 ## How it works
 
-1. **Encode** (`encoders/`): the same features the model was trained on.
-   - video: 16 fps, 256x256 centre crop, 16-frame windows every 0.5 s through the
-     Kinetics-400 ONE-PEACE backbone -> (T, 1536)
-   - audio: 16 kHz, 1 s windows every 0.5 s through ONE-PEACE's audio branch -> (T, 1536)
+1. **Encode** (`encoders/internvideo2.py`, reusing `tools/extract_internvideo2.py`): 2 fps,
+   224x224, one 4-frame window per second through InternVideo2-1B (v768); 16 kHz audio, a 3 s
+   window per second through BEATs (a768). Rows are L2-normalised.
 2. **Segment** (`model/event_model.py`): features resized to 256 steps, the event / boundary /
    IoU heads, then Gaussian soft-NMS (`postprocess.py`, a numpy port of the C++ op).
-3. **Select**: events with score >= `min_score` (0.40), at most 0.3 IoU with a better event.
-4. **Caption** (`captioner.py`): each event vector against the 8218 train captions, consensus pick.
-5. **Search**: a query goes through ONE-PEACE text and the model's caption projection, then cosine.
+3. **Select**: events with score >= `min_score`, at most `max_overlap` IoU with a better event.
+4. **Caption** (`captioner.py`): each event vector against the train captions, consensus pick
+   (MBR over the top 20). Only the caption space is used; adding the OmniRetriever teacher
+   space changed ret_sim by at most 0.003 on validation.
+5. **Search**: with the ONE-PEACE text encoder (6 GB, optional) the query goes through it and
+   the model's caption projection. Without it, the query is matched to the closest train
+   captions by word overlap (TF-IDF) and their vectors are averaged: phrase queries like
+   recipe steps.
 
 ## Checks done (2026-10-04)
 
 | Check | Result |
 |---|---|
-| API audio features vs training features (same video) | cosine 1.00000 |
-| API video features vs training features | cosine mean 0.99996, min 0.9989 (fp16) |
+| Model parity, val set, k = #GT (`python -m uniav_api.calibrate`) | R@0.5 54.27 (training eval 54.27), fp16 checkpoint |
+| Event selection at min_score 0.36, val set | F1@IoU0.5 0.534, 8.4 events per video |
 | numpy soft-NMS vs the C++ extension, 200 random cases | identical |
-| Model parity, val set, k = #GT | R@0.5 48.70 (training eval 48.70) |
-| Event selection at min_score 0.40, val set | F1@IoU0.5 0.476, 8.5 events/video (GT 7.7) |
 
-`python -m uniav_api.calibrate` repeats the last two; `python -m uniav_api.demo` prints
-events next to the annotations for 10 validation videos and runs a few searches.
-
-## Devices and memory
-
-`Config.device='auto'` picks CUDA, then Apple MPS, then CPU. Encoders run in fp16 on GPUs
-and fp32 on CPU; the event model always runs fp32. Override any setting with
-`uv.load(device='cpu', checkpoint=...)` or an environment variable `UNIAV_<FIELD>`.
-
-| | Video encoder | Audio encoder | Text encoder (search) |
-|---|---|---|---|
-| parameters | 1.66B | 1.53B | 1.59B |
-| fp16 memory | ~3.3 GB | ~3.1 GB | ~3.2 GB |
-
-With less than 10 GB of GPU memory, or on MPS / CPU, the video and audio encoders are
-loaded one at a time and released after use. Speed is dominated by the video encoder:
-on an RTX 3060 an 8-minute video takes about 15 minutes to encode; the model itself takes
-under a second. CPU works but is much slower.
+`python -m uniav_api.demo` prints every sample next to its annotations and runs a few searches.
 
 ## Files needed
 
-| Path | What |
-|---|---|
-| `ckpt/omni65/best_cap.pth.tar` | event model (best captioning run, see experiments/RESULTS.md) |
-| `configs/youcook2_event.yaml` | model and feature-grid settings |
-| `uniav_api/assets/caption_pool.npz` | train captions + ONE-PEACE vectors (built from caption_emb.npz) |
-| `ONEPEACE_extract_embd_code/models/onepeace_video_k400.pth` | video encoder |
-| `ONEPEACE_extract_embd_code/models/one-peace-audio.pt` | audio encoder |
-| `ONEPEACE_extract_embd_code/models/one-peace-text.pt` | text encoder (only for search / embed_text) |
+| Path | What | For |
+|---|---|---|
+| `ckpt/api/uniav_iv2.pth` | event model; HF dataset `nguyenminh04/uniav-youcook2-data`, file `api/uniav_iv2.pth` (private) | everything |
+| `uniav_api/assets/caption_pool.npz` | train captions + ONE-PEACE text vectors (in git) | everything |
+| `data/youcookii/annotations/youcookii_annotations_trainval.json` | GT steps (in git) | show / plot |
+| `InternVideo/` | `git clone --depth 1 https://github.com/OpenGVLab/InternVideo` (unmodified) | describe_video |
+| `ckpt/internvideo2/InternVideo2-stage2_1b-224p-f4.pt` | HF `OpenGVLab/InternVideo2-Stage2_1B-224p-f4` (gated) | describe_video |
+| `ckpt/internvideo2/audio_6b.pth` | HF `OpenGVLab/InternVideo2-Stage2-6B-Audio` | describe_video |
+| `ONEPEACE_extract_embd_code/models/one-peace-text.pt` | ONE-PEACE text encoder, 6 GB | search, optional |
 
-The encoder folder can be swapped: `encoders/base.py` defines the interface, so an
-InternVideo2 encoder can replace ONE-PEACE once a model is trained on those features.
+`describe_video` also needs `timm`, `einops`, `torchaudio` (`pip install -r uniav_api/requirements.txt`).
+The older ONE-PEACE model still works: `uv.load(checkpoint='ckpt/omni65/best_cap.pth.tar')` with
+`configs/youcook2_event.yaml` and the ONE-PEACE encoders in `ONEPEACE_extract_embd_code/models/`.
+
+## Devices and memory
+
+`Config.device='auto'` picks CUDA, then Apple MPS, then CPU; override with `uv.load(device='cpu')`
+or an environment variable `UNIAV_<FIELD>`. The event model (131M parameters) runs fp32 anywhere
+in under a second per video. The InternVideo2 encoders run fp16 on a GPU (about 3 GB of weights);
+extraction ran at about 30 seconds of video per second on an A100.

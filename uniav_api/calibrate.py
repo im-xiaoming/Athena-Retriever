@@ -2,7 +2,8 @@
 
   python -m uniav_api.calibrate
 
-Uses the stored validation features (data/youcookii/av_features), so no video encoding.
+Uses the stored validation features (data/youcookii/iv2_feats or av_features, whichever the
+checkpoint takes), so no video encoding.
 1. Parity: with k = number of GT events per video, R@IoU must match train_event.py --eval.
 2. Threshold: in production the number of events is unknown, so events are kept by score.
    For each min_score, precision / recall / F1 at IoU 0.5 (one-to-one greedy matching);
@@ -37,24 +38,18 @@ def match(preds, gts, thr=0.5):
 
 def main():
     pipe = UniAVPipeline(Config.from_env())
+    print('checkpoint %s (%s features)' % (pipe.cfg.checkpoint, pipe.spec.source))
     with open(os.path.join(ROOT, 'data', 'youcookii', 'annotations', 'youcookii_annotations_trainval.json')) as f:
         db = json.load(f)['database']
-    F = os.path.join(ROOT, 'data', 'youcookii', 'av_features')
+    F = os.path.join(ROOT, 'data', 'youcookii', 'iv2_feats' if pipe.spec.source == 'iv2' else 'av_features')
+    have = set(pipe.spec.stored_ids(F))
     cands, n_gt_total = [], 0
     for vid, x in sorted(db.items()):
-        pv = os.path.join(F, vid + '_one_peace_video_finetune.npy')
-        if x['subset'] != 'validation' or not os.path.exists(pv):
+        if x['subset'] != 'validation' or vid not in have:
             continue
-        v, a = np.load(pv), np.load(os.path.join(F, vid + '_one_peace_audio.npy'))
-        n = min(len(v), len(a))
-        import torch
-        import torch.nn.functional as Fn
-        fv = torch.from_numpy(v[:n].T.astype(np.float32)); fa = torch.from_numpy(a[:n].T.astype(np.float32))
-        fv = Fn.interpolate(fv[None], size=pipe.max_seq_len, mode='linear', align_corners=False)[0]
-        fa = Fn.interpolate(fa[None], size=pipe.max_seq_len, mode='linear', align_corners=False)[0]
+        fv, fa, n = pipe.spec.prepare(*pipe.spec.from_store(vid, F))
         segs, scores, _ = pipe.model(fv.to(pipe.device), fa.to(pipe.device))
-        stride = float((n - 1) * pipe.grid['feat_stride'] + pipe.grid['num_frames']) / pipe.max_seq_len
-        secs = np.clip((segs * stride + 0.5 * stride) / pipe.grid['default_fps'], 0, float(x['duration']))
+        secs = pipe.spec.to_seconds(segs, n, x['duration'])
         gts = [a['segment'] for a in x['annotations'][:16]]
         cands.append((secs, scores, gts)); n_gt_total += len(gts)
     print('validation videos: %d, GT events: %d' % (len(cands), n_gt_total))

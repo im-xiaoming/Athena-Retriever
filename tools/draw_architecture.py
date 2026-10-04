@@ -247,7 +247,7 @@ down(gt, sctx, 'training', train=True, dst=(gt.x + gt.w / 2, sctx.y))
 arrow([(cx + 365, hm.y + hm.h), (cx + 365, sctx.y)], 'level 0', lpos=0.0)
 tag(sctx, 'L_span + L_omni_av + L_omni_txt')
 ret = Box(cx - 415, 1075, 830, 70, 'Caption retrieval: for each of the 8218 train captions\n'
-          'score = cos(q, caption vector) + cos(omni_proj(q), teacher text vector)', 'new', size=15, bold=True)
+          'score = cos(q, caption vector)   [+ teacher score, optional]', 'new', size=15, bold=True)
 down(sctx, ret, 'q')
 mbr = Box(cx - 415, 1195, 830, 50, 'Pick by consensus (MBR) among the top 20 captions', 'new', size=15)
 down(ret, mbr)
@@ -273,7 +273,7 @@ down(caps, opt); down(opt, cpj)
 arrow([(cpj.x + 150, cpj.y + cpj.h), (cpj.x + 150, ret.y + 20), (ret.x + ret.w, ret.y + 20)],
       'caption vectors', lpos=1.0)
 arrow([ttx.right, (xr + wr + 14, ttx.right[1]), (xr + wr + 14, ret.y + 54), (ret.x + ret.w, ret.y + 54)],
-      'teacher text vectors', lpos=1.0)
+      'teacher text vectors\n(optional)', lpos=1.0, color='#8c8c94')
 
 # loss summary and legend
 note(x0 + 20, 1385, ['Loss (trọng số)'], size=15, color=TEXT, weight='bold', w=200)
@@ -324,7 +324,8 @@ c1 = Box(cx - 395, 740, 360, 60, 'cos(q, caption vector)\ncaption vector = clip_
 c2 = Box(cx + 35, 740, 360, 60, 'omni_proj: 512 -> 1024 -> 3584, L2\ncos with the teacher text vector', 'new', size=13)
 down(q, c1); down(q, c2)
 tag(c2, 'L_omni_*')
-ss = Box(cx - 230, 860, 460, 40, 'score of each of the 8218 captions = sum of both', 'new', size=13)
+ss = Box(cx - 260, 860, 520, 40, 'score of each caption = cos in caption space  (+ teacher cos, optional)',
+         'new', size=13)
 down(c1, ss); down(c2, ss)
 # worked example of the consensus pick
 ex_y = 950
@@ -354,7 +355,11 @@ note(x0 + 20, 1410, [
     '',
     'Lúc train: q của đoạn GT phải chấm câu đúng cao hơn 8217 câu còn lại (L_span);',
     'thêm một bản đoạn lệch biên tới 20% để q chịu được biên đoán hơi sai lúc suy luận.',
-    'Lớp Linear cuối bắt đầu bằng 0, nên ban đầu q chính là trung bình đoạn.'], size=14, color=TEXT, w=800)
+    'Lớp Linear cuối bắt đầu bằng 0, nên ban đầu q chính là trung bình đoạn.',
+    '',
+    'omni_proj chủ yếu để thầy dạy q lúc train. Cộng thêm điểm thầy lúc chọn câu không giúp',
+    'đo được (ret_sim chênh <= 0.003), nên uniav_api chỉ dùng điểm trong không gian caption.'],
+    size=14, color=TEXT, w=800)
 
 # ------------------------------------------------------------------ heads
 x0 = 580

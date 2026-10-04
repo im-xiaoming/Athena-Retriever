@@ -3,10 +3,12 @@
     import uniav_api as uv
 
     result = uv.describe_video('cooking.mp4')          # events with captions and embeddings
+    result = uv.describe_sample('6uHoTJSLoL8')         # or a shipped sample: features already extracted
     for e in result['events']:
         print(e['start'], e['end'], e['caption'])
 
     uv.show(result)                                    # predicted events next to the YouCook2 GT
+    uv.plot(result)                                    # the same as a timeline figure
     hits = uv.search('cut the onion', top_k=5)         # over every video described so far
     vec = uv.embed_text('add salt to the pot')         # 512-d query vector, same space as events
 
@@ -15,10 +17,10 @@ Use uv.load(...) to pick a device or checkpoint explicitly, or UniAVPipeline for
 """
 from .config import Config
 from .pipeline import UniAVPipeline
-from .report import compare_table, format_events, load_gt, show
+from .report import compare_table, format_events, load_gt, plot, show
 
-__all__ = ['Config', 'UniAVPipeline', 'load', 'describe_video', 'describe_features', 'search', 'embed_text',
-           'show', 'compare_table', 'format_events', 'load_gt']
+__all__ = ['Config', 'UniAVPipeline', 'load', 'describe_video', 'describe_features', 'describe_sample', 'samples',
+           'search', 'embed_text', 'show', 'plot', 'compare_table', 'format_events', 'load_gt']
 
 _pipeline = None
 
@@ -42,9 +44,21 @@ def describe_video(path, video_id=None, store=True):
 
 
 def describe_features(visual, audio, duration, video_id=None, store=True):
-    """Precomputed ONE-PEACE features (T, 1536) each, as in data/youcookii/av_features -> same
-    result as describe_video, without running the encoders. store=True keeps it for search()."""
+    """Precomputed features (T, C) in the format of the loaded checkpoint -> same result as
+    describe_video, without running the encoders. For the InternVideo2 model: visual = v768
+    (one row per second, as in data/youcookii/iv2_feats/<id>.npz), audio = a768. store=True keeps
+    the result for search()."""
     return _get().process_stored(visual, audio, duration, video_id or 'video', store=store)
+
+
+def samples():
+    """Ids of the sample videos shipped with features in uniav_api/samples (YouCook2 validation)."""
+    return _get().samples()
+
+
+def describe_sample(video_id, store=True):
+    """A shipped sample (see samples()) -> same result as describe_video, in about a second."""
+    return _get().process_sample(video_id, store=store)
 
 
 def search(query, top_k=10, video_ids=None):

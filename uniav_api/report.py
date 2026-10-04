@@ -111,3 +111,42 @@ def compare_table(result, gt='auto'):
         'model time': '%s - %s' % (_t(r['pred'][0]), _t(r['pred'][1])) if r['pred'] else '',
         'model caption': r['pred'][2] if r['pred'] else '-',
         'IoU': round(r['iou'], 2), 'verdict': r['verdict']} for r in rows])
+
+
+def plot(result, gt='auto', ax=None, max_chars=38):
+    """Timeline figure: real steps on top, the model's events below, captions on the bars.
+
+    Bar colour follows the verdict of each pair (good / partial / missed / extra), as in show().
+    Returns the matplotlib Axes.
+    """
+    import matplotlib.pyplot as plt
+    rows, gt, preds = pair_events(result, gt)
+    dur = float(result.get('duration') or max([s[1] for s in gt + preds] or [1]))
+    colour = {'good': '#2e9e5b', 'partial': '#e0a030', 'missed': '#c0504d', 'extra': '#8c8c8c'}
+    if ax is None:
+        _, ax = plt.subplots(figsize=(16, 1.2 + 0.42 * (len(gt) + len(preds))))
+    lane = 0
+    yt, yl = [], []
+    for side, label in (('gt', 'real step'), ('pred', 'model')):
+        for r in rows:
+            seg = r[side]
+            if seg is None:
+                continue
+            s, e, cap = seg
+            ax.barh(lane, e - s, left=s, height=0.7, color=colour[r['verdict']], alpha=0.9)
+            text = cap if len(cap) <= max_chars else cap[:max_chars - 1] + '…'
+            ax.text(e + dur * 0.005, lane, text, va='center', fontsize=8.5)
+            yt.append(lane); yl.append('%s  %s-%s' % (label, _t(s), _t(e)))
+            lane += 1
+        lane += 0.6
+    ax.set_yticks(yt); ax.set_yticklabels(yl, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlim(0, dur * 1.32)
+    ax.set_xlabel('time (s)')
+    n_good = sum(r['verdict'] == 'good' for r in rows)
+    ax.set_title('%s: %d events found, %d real steps, %d matched with IoU >= 0.5'
+                 % (result.get('video_id', '?'), len(preds), len(gt), n_good), fontsize=11)
+    from matplotlib.patches import Patch
+    ax.legend(handles=[Patch(color=c, label=k) for k, c in colour.items()], loc='lower right', fontsize=8)
+    ax.grid(axis='x', alpha=0.3)
+    return ax

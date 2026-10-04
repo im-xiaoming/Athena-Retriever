@@ -25,3 +25,5 @@ uniav_api/index/
 !uniav_api/encoders/bpe/dict.txt
 !uniav_api/requirements.txt
 ckpt/internvideo2/
+!uniav_api/demo_colab.ipynb
+ckpt/api/

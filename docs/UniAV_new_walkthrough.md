@@ -86,10 +86,12 @@ Lấy đoạn [83.2 s, 104 s], tương ứng các bước 118 đến 148 trên l
 
 - Kho có **8218 câu** lấy từ tập train, ví dụ "add the rice to the pan and stir", "cut the carrots into
   cubes"...
-- Mỗi câu được chấm điểm giống với q theo hai cách rồi cộng lại:
-  - trong không gian caption của model (vector ONE-PEACE text qua `clip_proj`);
-  - trong không gian của thầy OmniRetriever. Vector text của thầy cho 8218 câu đã tính sẵn, nên lúc chạy
-    không cần model 7B.
+- Mỗi câu được chấm điểm bằng cosine giữa q và vector của câu, trong không gian caption của model (vector
+  ONE-PEACE text qua `clip_proj`).
+  - Có thể cộng thêm điểm trong không gian của thầy: q đi qua `omni_proj`, rồi so với vector text của thầy
+    (đã tính sẵn cho 8218 câu). Đo trên tập val, cách này không giúp được gì đo được: ret_sim chênh không
+    quá 0.003, nằm trong mức nhiễu. Vì vậy `uniav_api` chỉ dùng điểm trong không gian caption.
+  - Tác dụng chính của thầy là lúc train: dạy q qua `omni_proj` (xem phần cuối).
 - Lấy **20 câu điểm cao nhất**. Thay vì lấy câu đứng đầu, model chọn câu được **nhiều ứng viên khác đồng
   thuận** nhất (MBR).
   - Ví dụ: "add oil to the pan" có thể đứng đầu một cách ngẫu nhiên.
@@ -131,8 +133,7 @@ chấm lỗi (các nhãn xanh trên sơ đồ):
      clip khác. Đây là chỗ thầy "dạy cách nhìn".
    - **L_omni_txt:** q cũng phải chọn đúng câu theo cách thầy hiểu câu chữ.
 
-Sau khi train xong, thầy không cần nữa. Phần còn lại của nó chỉ là bảng vector text của 8218 câu, dùng ở
-bước 6.
+Sau khi train xong, thầy không cần nữa: điều nó dạy đã nằm trong trọng số của học trò.
 
 Code của model và các loss: `libs/modeling/event_archs.py`. Trọng số các loss: L_event, L_reg, L_iou là 1.0;
 L_emb, L_span, L_omni_txt, L_omni_av là 0.2.
