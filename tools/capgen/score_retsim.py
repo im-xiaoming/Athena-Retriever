@@ -22,7 +22,7 @@ DATA = os.path.join(ROOT, 'data', 'youcookii', 'capgen')
 
 def main():
     dev, dtype = pick_device('auto')
-    enc = TextEncoder(Config().text_encoder, dev, dtype)
+    enc = TextEncoder(Config.from_env().text_encoder, dev, dtype)   # honours UNIAV_TEXT_ENCODER
     cache = {}
 
     def emb(texts):
