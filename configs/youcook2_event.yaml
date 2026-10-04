@@ -44,6 +44,12 @@ dataset:
   file_ext: .npy
   force_upsampling: true
   multi_modal: true
+  # input features: onepeace (0.5 s grid), iv2 (InternVideo2, 1 s grid) or iv2+onepeace
+  # (channels concatenated). The model input width is set from this by train_event.py
+  feat_source: onepeace
+  iv2_folder: ./data/youcookii/iv2_feats
+  iv2_video_keys: [v768]   # v768 = pooled vision, v512 = text-aligned projection
+  iv2_l2norm: true
   # OmniRetriever-7B teacher vectors, built with tools/omni_youcook2.py. Uncomment to enable
   # omni_emb_file: ./data/youcookii/omni_emb.npz
 model:

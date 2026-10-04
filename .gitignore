@@ -15,6 +15,7 @@ __pycache__/
 OmniRetreiver
 data/youcook2_cut/
 data/youcookii/omni_emb*.npz
+data/youcookii/iv2_feats/
 .env
 data/youcookii/.cache/
 InternVideo/

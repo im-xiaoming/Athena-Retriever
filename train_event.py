@@ -394,6 +394,10 @@ def main(a):
 
     ds, dv, dl, dlv = build_loaders(cfg, rng)
     print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
+    # the input width follows the feature source; stored in the run record's config
+    cfg['model']['input_dim_V'], cfg['model']['input_dim_A'] = ds.feat_dims
+    print('Features     : %s, visual %d + audio %d channels' % (
+        cfg['dataset'].get('feat_source', 'onepeace'), *ds.feat_dims), flush=True)
 
     if ds.omni:
         cfg['model']['omni_dim'] = ds.omni_dim

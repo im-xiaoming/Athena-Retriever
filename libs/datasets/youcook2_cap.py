@@ -5,6 +5,12 @@ Differs from anet.py in three ways:
   - every sample carries its embedded captions (NMAX, 1536) and a validity mask (NMAX,)
   - num_classes = NMAX, the maximum number of captions in one video
 so the existing label_points produces gt_cls_labels (P, NMAX) unchanged.
+
+Input features (feat_source), concatenated along channels per modality when several:
+  onepeace : ONE-PEACE video (K400 finetune) + audio, 1536 each, one row per 0.5 s
+  iv2      : InternVideo2 video (iv2_video_keys, v768 and/or v512) + BEATs audio a768,
+             one row per second, from tools/extract_internvideo2.py
+Every source is resampled to max_seq_len steps; the time scale comes from the first source.
 """
 import os
 import json
@@ -28,7 +34,17 @@ class YouCook2CaptionDataset(Dataset):
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch,
         class_aware, trunc_thresh, crop_ratio, num_classes, file_prefix,
         file_ext, force_upsampling, multi_modal, omni_emb_file=None,
+        feat_source='onepeace', iv2_folder='./data/youcookii/iv2_feats',
+        iv2_video_keys=('v768',), iv2_l2norm=True,
     ):
+        self.sources = feat_source.split('+')
+        assert set(self.sources) <= {'onepeace', 'iv2'}, 'unknown feat_source %s' % feat_source
+        assert len(self.sources) == 1 or force_upsampling, 'several sources need force_upsampling'
+        self.iv2_folder = iv2_folder
+        self.iv2_video_keys = list(iv2_video_keys)
+        self.iv2_l2norm = iv2_l2norm
+        if 'iv2' in self.sources:
+            assert os.path.isdir(iv2_folder), iv2_folder
         assert os.path.exists(feat_folder) and os.path.exists(json_file)
         assert os.path.exists(caption_emb_file)
         assert num_classes == NMAX, 'num_classes phai bang %d' % NMAX
@@ -141,6 +157,8 @@ class YouCook2CaptionDataset(Dataset):
                 continue
             if any('%s#%d' % (vid, i) not in self.cap_emb for i in range(len(anns))):
                 continue
+            if 'iv2' in self.sources and not os.path.exists(os.path.join(self.iv2_folder, vid + '.npz')):
+                continue   # ffmpeg could not decode the uncut video
             segs = np.array([a['segment'] for a in anns], dtype=np.float32)
             out.append({
                 'id': vid,
@@ -155,26 +173,56 @@ class YouCook2CaptionDataset(Dataset):
     def __len__(self):
         return len(self.data_list)
 
+    @property
+    def feat_dims(self):
+        """(visual, audio) channel counts of the model input."""
+        dv = da = 0
+        for src in self.sources:
+            if src == 'onepeace':
+                dv += 1536; da += 1536
+            else:
+                dv += sum(512 if k == 'v512' else 768 for k in self.iv2_video_keys); da += 768
+        return dv, da
+
+    def _load_source(self, src, vid):
+        """Visual and audio rows (n, C) of one source, plus its step and window in frames."""
+        if src == 'onepeace':
+            pre = os.path.join(self.feat_folder, self.file_prefix + vid)
+            fv = np.load(pre + '_one_peace_video_finetune' + self.file_ext).astype(np.float32)
+            fa = np.load(pre + '_one_peace_audio' + self.file_ext).astype(np.float32)
+            stride, window = self.feat_stride, self.num_frames
+        else:
+            # row i is centred on i + 0.5 s, so the grid matches stride = window = 1 s
+            z = np.load(os.path.join(self.iv2_folder, vid + '.npz'))
+            parts = [z[k].astype(np.float32) for k in self.iv2_video_keys]
+            fa = z['a768'].astype(np.float32)
+            if self.iv2_l2norm:   # raw norms differ widely: v768 ~54, a768 ~6, v512 is already 1
+                parts = [p / np.maximum(np.linalg.norm(p, axis=1, keepdims=True), 1e-6) for p in parts]
+                fa = fa / np.maximum(np.linalg.norm(fa, axis=1, keepdims=True), 1e-6)
+            fv = np.concatenate(parts, axis=1)
+            stride = window = self.default_fps
+        n = min(fv.shape[0], fa.shape[0])
+        return fv[:n], fa[:n], stride, window
+
     def __getitem__(self, idx):
         item = self.data_list[idx]
         vid = item['id']
-        pre = os.path.join(self.feat_folder, self.file_prefix + vid)
-        fv = np.load(pre + '_one_peace_video_finetune' + self.file_ext).astype(np.float32)
-        fa = np.load(pre + '_one_peace_audio' + self.file_ext).astype(np.float32)
-        n = min(fv.shape[0], fa.shape[0])
-        fv, fa = fv[:n], fa[:n]
-
-        # recompute the time scale (same as case 2 in anet.py)
-        feat_stride = float((n - 1) * self.feat_stride + self.num_frames) / self.max_seq_len
-        num_frames = feat_stride
-        feat_offset = 0.5 * num_frames / feat_stride
-
-        fv = torch.from_numpy(np.ascontiguousarray(fv.transpose()))
-        fa = torch.from_numpy(np.ascontiguousarray(fa.transpose()))
-        if fv.shape[-1] != self.max_seq_len and self.force_upsampling:
-            fv = F.interpolate(fv[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
-            fa = F.interpolate(fa[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
-        feats = {'visual': fv, 'audio': fa}
+        fvs, fas = [], []
+        for j, src in enumerate(self.sources):
+            fv, fa, stride, window = self._load_source(src, vid)
+            n = fv.shape[0]
+            if j == 0:
+                # recompute the time scale (same as case 2 in anet.py)
+                feat_stride = float((n - 1) * stride + window) / self.max_seq_len
+                num_frames = feat_stride
+                feat_offset = 0.5 * num_frames / feat_stride
+            fv = torch.from_numpy(np.ascontiguousarray(fv.transpose()))
+            fa = torch.from_numpy(np.ascontiguousarray(fa.transpose()))
+            if fv.shape[-1] != self.max_seq_len and self.force_upsampling:
+                fv = F.interpolate(fv[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
+                fa = F.interpolate(fa[None], size=self.max_seq_len, mode='linear', align_corners=False)[0]
+            fvs.append(fv); fas.append(fa)
+        feats = {'visual': torch.cat(fvs), 'audio': torch.cat(fas)}
 
         segments = torch.from_numpy(item['segments'] * item['fps'] / feat_stride - feat_offset)
         labels = torch.from_numpy(item['labels'])
