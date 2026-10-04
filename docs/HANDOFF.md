@@ -1,272 +1,175 @@
-# Bàn giao phiên làm việc: UniAV trên YouCook2
+# Bàn giao phiên làm việc UniAV, ngày 2026-10-04
 
-Repo `/home/minh/projects/UniAV`. Máy WSL2, RTX 3060 12 GB, RAM 15.9 GB.
+Repo: `/home/minh/projects/UniAV`, nhánh `test` (đã push lên `im-xiaoming/UniAV-fixed`, commit mới nhất khi viết file này là `d2de0d5`).
+Máy: WSL2, RTX 3060 12 GB, RAM 15.9 GB. Bản bàn giao trước nằm ở `docs/HANDOFF_2026-10-03.md`.
+
+Đọc thêm khi cần chi tiết:
+- `experiments/NOTES.md`: bài học rút ra từ từng thử nghiệm
+- `experiments/RESULTS.md`: bảng kết quả, sinh bằng `tools/summarize_runs.py`
+- `uniav_api/README.md`: tài liệu API
 
 ---
 
-## 1. Môi trường
+## 1. Việc ĐANG CHẠY, phải xử lý đầu tiên
 
-`/home/minh/uniav-env` là venv Python 3.8 dùng để train và eval.
+**Trích đặc trưng InternVideo2 trên Colab, phiên tên `omni` (A100).**
 
-| Gói | Phiên bản |
+| Mục | Trạng thái lúc 07:15 |
 |---|---|
-| torch | 1.11.0+cu113 |
-| numpy | **1.23.5**, không nâng lên 2.x |
-| nms_1d_cpu | đã biên dịch |
+| Tiến độ | 597/1500 video, không video nào lỗi |
+| Tốc độ | khoảng 32 giây video mỗi giây |
+| Dự kiến xong | khoảng 09:30 |
+| Compute unit | còn 259 unit, tiêu 5.3 unit/giờ |
+| Đầu ra trên Colab | `/content/iv2_feats/<video_id>.npz` |
+| Sao lưu sang Drive | `MyDrive/uniav_omni/iv2_feats/`, 10 phút một lần (561 file lúc 07:15) |
+| Log | `/content/out/iv2_full.log` (dòng cuối có ETA) |
+| Cờ báo xong | `/content/out/iv2_full.done` |
 
-Kích hoạt: `source /home/minh/uniav-env/bin/activate`
+Mỗi file `.npz` có ba mảng float16, mỗi giây video một dòng:
+- `v768`: vector video gộp của encoder InternVideo2-1B, trước khi chiếu
+- `v512`: vector video đã qua `vision_proj`, căn chỉnh với văn bản, chuẩn hoá L2
+- `a768`: vector audio BEATs
 
-**Bẫy 1.** `import nms_1d_cpu` một mình báo thiếu `libc10.so`. Phải import torch trước.
+**Giữ phiên Colab sống.** Colab tắt phiên khoảng 25 đến 30 phút sau lệnh `colab exec` cuối cùng từ máy khách. Kernel bận không được tính là hoạt động.
+- Vòng giữ kết nối: `tools/colab_keepalive.sh omni`, chạy bằng `setsid`, ghi log ở `logs/keepalive.log`.
+- Kiểm tra còn chạy: `ps -eo pid,args | grep "[t]ools/colab_keepalive"`, và `tail logs/keepalive.log` (mỗi 3 phút một dòng).
+- Nếu nó đã chết thì khởi động lại ngay:
+  `setsid nohup tools/colab_keepalive.sh omni > /dev/null 2>&1 < /dev/null &`
+  Nếu script báo "already running" mà không có tiến trình nào, thì là do một tiến trình `sleep 180` mồ côi còn giữ khoá. Giết nó trước.
+- **Khi trích xong:** chép đặc trưng về, rồi `touch logs/keepalive.stop` và `~/.local/bin/colab stop -s omni` để thôi tốn unit.
 
-**Bẫy 2.** Repo chạy được trên torch 2.x sau khi tôi vá 5 chỗ. Chi tiết ở mục 6.
-
----
-
-## 2. Hai hướng đã làm, kết quả
-
-### Hướng A: phân loại (cũ, đã bão hoà)
-
-Dùng `train.py` với 59 lớp do mô hình ngôn ngữ suy ra từ caption.
-
-| Cấu hình | Đỉnh Average mAP |
-|---|---|
-| Sàn zero-shot (checkpoint gốc) | 0.04 |
-| 281 video train | 2.74 |
-| 1103 video train | **3.48** (epoch 17) |
-| thêm chính quy hoá mạnh | 3.42 |
-
-**Kết luận: trần 3.4 tới 3.5, chính quy hoá không nâng được.** Overfit bị loại khỏi danh sách nghi phạm.
-
-Hai giả thuyết chưa kiểm chứng về nguyên nhân trần:
-- Độ phân giải thời gian. mAP tụt dốc dựng đứng theo ngưỡng tIoU (7.48 ở 0.5 xuống 0.03 ở 0.95), dấu hiệu biên không đủ mịn. Config `configs/youcook2_len512.yaml` đã chuẩn bị sẵn, an toàn với checkpoint, chưa chạy.
-- Chất lượng nhãn. Taxonomy ghi rõ `validation_captions_inspected: False`. Chưa ai kiểm tra nhãn validation lần nào.
-
-### Hướng B: tách sự kiện và sinh mô tả (mới, đang chạy)
-
-**Không còn lớp phân loại nào.** Backbone giữ nguyên, ba đầu ra thay cho một.
-
-Kết quả 5 epoch trên RTX 3060:
-
-| Epoch | Recall@IoU0.5 | mIoU | cos_gt | cos_nền |
-|---|---|---|---|---|
-| 0 | 37.4 | 41.1 | 0.39 | 0.06 |
-| 4 | 46.5 | 47.0 | **0.55** | 0.06 |
-
-`cos_gt` 0.55 so với nền 0.06 chứng minh model sinh ra vector mô tả **đúng nội dung sự kiện**. Mỗi epoch 85 giây, trọn 42 epoch khoảng một tiếng.
+Lấy kết quả về máy, chọn một trong hai cách:
+- `colab download`, mỗi lần một file. File nhỏ, khoảng 1 MB, nên tải từng file được.
+- Nén thành vài file tar trên Colab, đẩy lên repo HF `nguyenminh04/uniav-youcook2-data` (token ở dòng 3 của `.env`), rồi kéo về.
 
 ---
 
-## 3. Kiến trúc hướng B
+## 2. Việc tiếp theo
 
-```
-                         Video dài
-                             │
-                      Backbone (giữ nguyên)
-                             │
-              ┌──────────────┼──────────────┐
-              │              │              │
-        ĐẦU SỰ KIỆN     ĐẦU BIÊN       ĐẦU NHÚNG
-        (B, T, 1)       (B, T, 2)      (B, T, 512)
-        Có sự kiện?     Dài bao nhiêu?  Nội dung gì?
-              │              │              │
-              └──────┬───────┘              │
-                     │                      │
-            Các đoạn được tách              │
-            (NMS trên điểm sự kiện)         │
-                     └──────────┬───────────┘
-                                │
-                Mỗi đoạn một vector 512 chiều
-                                │
-                         So cosine với
-                      kho caption tập train
-                                │
-                      Câu mô tả gần nhất
-```
-
-Ba hàm mất mát: focal nhị phân cho đầu sự kiện, DIoU cho đầu biên, tương phản
-InfoNCE cho đầu nhúng với mẫu âm là mọi caption trong lô.
-
-**Lưu ý về loss tương phản.** Về công thức nó là cross-entropy trên tập ứng viên
-nên trông giống phân loại. Nhưng đầu ra model là một vector, lúc chạy thật không
-có danh sách lớp nào tồn tại. Đây đúng là cách CLIP được huấn luyện.
+1. **Đưa đặc trưng InternVideo2 vào dataset.**
+   - `libs/datasets/youcook2_cap.py` hiện chỉ đọc file `_one_peace_*.npy`, lưới 0.5 giây, `feat_stride 8`, `num_frames 16`, 16 fps.
+   - Đặc trưng InternVideo2 là 1 vector mỗi giây. Cần một tuỳ chọn nguồn đặc trưng trong config, đổi lưới thời gian tương ứng, và co giãn từng loại về 256 bước như hiện tại.
+2. **Train và so ba cấu hình,** dùng `--set` và hồ sơ chạy:
+   - chỉ InternVideo2,
+   - InternVideo2 ghép ONE-PEACE (ghép theo kênh),
+   - mốc hiện tại là `omni65`.
+   - Nhớ chạy 2 seed cho cấu hình tốt nhất.
+   Người dùng muốn **bỏ hẳn ONE-PEACE nếu InternVideo2 không kém hơn**.
+3. **Cập nhật API:** thêm `uniav_api/encoders/internvideo2.py` theo interface `encoders/base.py`. Logic trích đã có sẵn trong `tools/extract_internvideo2.py`.
+4. Các hướng khác đã bàn:
+   - dùng InternVideo3-8B làm bộ sinh caption cho từng đoạn, thay cho việc chọn câu trong kho,
+   - fine-tune thầy OmniRetriever bằng LoRA. Nên thử trước một lớp chuyển đổi nhỏ (MLP) trên vector có sẵn.
 
 ---
 
-## 4. File của hướng B
+## 3. Kết quả hiện tại (model sự kiện, tập val YouCook2 gồm 394 video)
+
+| Lượt | Thầy | R@0.5 | ret_sim | ret_sim câu đứng đầu | CIDEr | METEOR |
+|---|---|---|---|---|---|---|
+| `orig_baseline` (code gốc) | không | 49.6 | 0.717 (câu đứng đầu) | — | — | — |
+| `sched10` | không | 49.3 | 0.748 | 0.722 | 88.0 | 14.4 |
+| `omni65` (**checkpoint API đang dùng**) | có | 48.7 | **0.758** | **0.740** | 86.5 | **15.4** |
+| `omni100`, `omni100_seed2`, `_w05`, `_avonly` | có | 47 đến 50 | 0.753 đến 0.755 | 0.735 đến 0.741 | 84 đến 86 | 15.1 |
+
+Nhiễu giữa các seed: R@0.5 khoảng ±2, CIDEr khoảng ±5, ret_sim khoảng ±0.003.
+
+**Kết luận:**
+- **Phần tách đoạn không hơn code gốc.** R@0.5 vẫn quanh 49.
+- **Phần mô tả tăng rõ:** ret_sim từ 0.717 lên 0.758, chủ yếu nhờ loss so với toàn kho, chọn câu theo đồng thuận, và thầy OmniRetriever.
+- **Học trò đã đi được khoảng nửa quãng tới thầy.** Trên 500 clip GT tập val, thầy OmniRetriever-7B zero-shot đạt ret_sim 0.767, học trò 0.758, không thầy 0.748. Xem `experiments/teacher_vs_student.json` và `experiments/plots/`.
+- **Nút thắt là đặc trưng đầu vào.** Nhánh video ONE-PEACE K400 không căn chỉnh với văn bản, và model overfit từ epoch 7. Đó là lý do chuyển sang InternVideo2.
+
+---
+
+## 4. Bản đồ code
 
 | File | Vai trò |
 |---|---|
-| `libs/modeling/event_archs.py` | ba đầu ra, hàm mất mát, suy luận |
-| `libs/datasets/youcook2_cap.py` | dataset đọc caption, nhãn là chỉ số caption trong video |
-| `train_event.py` | huấn luyện một GPU, không cần distributed |
-| `configs/youcook2_event.yaml` | cấu hình |
-| `data/youcookii/caption_emb.npz` | 11594 vector caption, float16, **32 MB** |
+| `train_event.py` | Train và chấm. Các cờ: `--set k=v` ghi đè config; `--eval ckpt` chấm một checkpoint; `--finalize` chấm lại lượt đã xong; `--note`. Mỗi lượt ghi hồ sơ `experiments/runs/<máy>-<lượt>.json` (commit, config, lịch sử, kết quả chấm cuối). Lịch mặc định 10 epoch. |
+| `libs/modeling/event_archs.py` | Model: các đầu sự kiện, biên + IoU, nhúng, đoạn kèm bối cảnh video; tuỳ chọn thầy OmniRetriever (`omni_emb_file`) |
+| `libs/datasets/youcook2_cap.py` | Dataset: kho caption, chỉ số caption trong kho, vector thầy |
+| `configs/youcook2_event.yaml` | Cấu hình. Muốn bật thầy thì dùng `--set dataset.omni_emb_file=./data/youcookii/omni_emb_full.npz` |
+| `tools/summarize_runs.py`, `tools/plot_runs.py` | Sinh bảng `RESULTS.md` và đồ thị |
+| `tools/compare_teacher.py` | So học trò với thầy trên 500 clip GT |
+| `tools/omni_youcook2.py` | Cắt clip, tạo manifest, đo thầy zero-shot |
+| `tools/extract_internvideo2.py` | Trích InternVideo2 (không sửa repo upstream) |
+| `tools/embed_captions.py` | Sinh `caption_emb.npz` |
+| `tools/colab_keepalive.sh` | Giữ phiên Colab sống |
+| `uniav_api/` | **API dạng hàm Python** (người dùng không muốn web API). Xem mục 5. |
 
-Lệnh chạy:
+---
 
-```bash
-python train_event.py configs/youcook2_event.yaml --output eventB1 --epochs 40 2>&1 | tee eventB1.log
+## 5. API `uniav_api`
+
+```python
+import numpy as np, uniav_api as uv
+r = uv.describe_video('data/demo_videos/6uHoTJSLoL8.mp4')   # chạy cả encoder; RTX 3060 mất ~1.8 lần độ dài video
+r = uv.describe_features(v, a, duration, video_id='...')    # dùng đặc trưng có sẵn, khoảng 1 giây
+uv.show(r)               # bảng: bước thật cạnh đoạn dự đoán, kèm thanh thời gian (người dùng đã duyệt định dạng này)
+uv.compare_table(r)      # cùng bảng, dạng DataFrame
+uv.search('boil the noodles', top_k=5); uv.embed_text('add salt')
 ```
 
-**Mẹo thiết kế đáng nhớ.** Đặt `num_classes = 16` tức số caption tối đa của một
-video, và cho nhãn mang chỉ số caption thay vì id lớp. Nhờ vậy `label_points`,
-focal loss và DIoU loss có sẵn dùng lại được nguyên vẹn.
+- **Môi trường:** `/home/minh/uniav-api-env` (Python 3.11, torch 2.5.1 cu124). Kernel Jupyter tên `uniav-api-env (3.11)`.
+- **Kiểm tra đã làm:**
+  - đặc trưng audio trùng tuyệt đối với lúc train (cosine 1.00000), video gần tuyệt đối (0.99996),
+  - soft-NMS viết bằng numpy giống bản C++ ở 200/200 trường hợp,
+  - R@0.5 trên tập val = 48.70, đúng bằng lúc train,
+  - chạy từ video gốc và từ đặc trưng có sẵn cho cùng 7/7 caption.
+- **Ngưỡng chọn sự kiện:** `min_score 0.40`, chồng lấn tối đa 0.3, chọn trên tập val: F1 0.476 ở IoU 0.5.
+- **Thiết bị:** CUDA, rồi MPS, rồi CPU. CPU chạy được nhưng quá chậm với encoder ONE-PEACE: người dùng đã dừng test CPU sau 17 phút cho một clip 30 giây. Trên CPU chỉ nên dùng `describe_features`.
+- **Video demo:** `data/demo_videos/` có 3 video val (`-Ju39A-G0Dk`, `6uHoTJSLoL8`, `W2gnFLOi_AQ`).
 
 ---
 
-## 5. Dữ liệu
+## 6. Môi trường
 
-| Đường dẫn | Nội dung |
+| Môi trường | Dùng cho |
 |---|---|
-| `data/youcookii/av_features/` | 1500 video, 3000 file npy, 11 GB |
-| `data/youcookii/annotations/youcookii_annotations_trainval.json` | caption gốc chính thức |
-| `data/youcookii/annotations/youcookii.json` | 59 lớp, 1497 video |
-| `data/youcookii/annotations/youcookii_51.json` | 51 lớp sau khi gộp |
-| `data/youcookii/caption_emb.npz` | nhúng caption |
-
-Dùng được 1500 video, chia 1106 train và 394 validation, tổng 11594 đoạn.
-Còn 290 video có annotation nhưng **chưa trích feature**.
-
-### Số liệu đã đo, đừng đo lại
-
-- Đoạn dài trung vị 14 giây, video dài trung vị 291 giây, tỉ lệ 4.8%
-- Mỗi video 3 tới 16 caption, trung bình 7.7
-- Đoạn chồng lấn nhau chỉ 0.1%, nên `class_aware: False` là đúng
-- Mất cân bằng lớp 48 lần, 22 trên 59 lớp có dưới 50 đoạn
-- 13081 trên 13829 caption là duy nhất
-- **Chỉ 6.9% caption validation có mặt nguyên văn trong kho train.** Đây là trần
-  của mọi chỉ số đòi lấy ra đúng chuỗi ký tự, nên đừng dùng chỉ số đó
-- Đặc trưng ONE-PEACE thô ở 1536 chiều **không** khớp được với prompt văn bản,
-  top-1 chỉ 0.6% trong khi đoán bừa được 1.7%. Nhánh visual đã fine-tune trên
-  Kinetics-400 nên trôi khỏi không gian chung với văn bản
+| `/home/minh/uniav-env` | Train và chấm. Python 3.8, torch 1.11 cu113, numpy 1.23.5 |
+| `/home/minh/uniav-api-env` | API. Python 3.11, torch 2.5.1 |
+| Colab qua `~/.local/bin/colab` | Tài khoản có 259 unit; A100 tốn 5.3 unit/giờ |
 
 ---
 
-## 6. Năm chỗ đã vá để chạy được trên torch 2.x
+## 7. Thông tin đăng nhập và vận hành (KHÔNG in `.env` ra)
 
-| File | Vấn đề |
+- **`.env`, mỗi dòng một token:**
+  - dòng 1: fine-grained PAT GitHub, push bị lỗi 403,
+  - dòng 2: classic PAT GitHub, dùng để push,
+  - dòng 3: token ghi HuggingFace.
+- **Push:**
+  `GIT_ASKPASS=~/.config/uniav/git_askpass.sh GIT_TERMINAL_PROMPT=0 git -c credential.helper= push origin test`
+- **Colab không pull được:** thường do các file hồ sơ chạy chưa được git theo dõi trùng tên. Cất chúng sang chỗ khác và `git checkout -- libs/utils/nms_1d_cpu.egg-info` rồi pull lại.
+- **`pkill -f` hay khớp vào chính shell đang chạy nó.** Dùng mẫu kiểu `[x]yz`. Dấu `.` trong mẫu là ký tự đại diện, nên không để chuỗi khớp nằm sau trong cùng một lệnh.
+- **Không lưu gì quan trọng trong scratchpad:** nó bị dọn khi Claude Code khởi động lại. Tiến trình nền phải chạy bằng `setsid`.
+- **Upload lên Colab:** file lớn phải chia mẩu 64 MB, thư mục đích phải tồn tại trước. Tốc độ upload từ nhà khoảng 5 đến 9 MB/s.
+- **HF dataset:** tài khoản miễn phí giới hạn 1000 yêu cầu mỗi 5 phút. Nên đóng nhiều file nhỏ thành tar trước khi đẩy lên.
+- **METEOR trên Colab:** java hay chết giữa chừng. Đã xử lý bằng cách chạy METEOR trong tiến trình con có giới hạn thời gian; trên Colab cột METEOR bị bỏ trống.
+
+---
+
+## 8. Dữ liệu
+
+| Ở đâu | Gì |
 |---|---|
-| `libs/utils/task_utils.py:4` | `torch._six` bị xoá từ torch 2.0 |
-| `libs/utils/task_utils.py:121` | `.next()` của DataLoader bị xoá |
-| `libs/utils/lr_schedulers.py:7` | `_LRScheduler` đổi tên |
-| `libs/utils/metrics.py:301` | `np.float` bị xoá từ numpy 1.24 |
-| `train.py`, `eval.py` | torch 2.x truyền `--local-rank` gạch ngang |
-
-Và ba sửa đổi khác trong `train.py`:
-- Thêm cờ `--pretrain` để fine-tune đúng cách. Cờ `--resume` có sẵn **không dùng
-  được**, nó đặt `start_epoch` bằng epoch checkpoint cộng một nên vòng lặp train
-  không chạy lần nào mà cũng không báo lỗi
-- Lưu model tốt nhất. Mã gốc dựng `save_states` rồi **vứt đi**, không bao giờ ghi ra đĩa
-- Đường dẫn prompt đọc từ config qua khoá `prompt_file`, kèm sửa luôn lỗi
-  `data/dcase` thành `data/desed`
-
-Trong `libs/core/config.py` đổi `train_iter_gap` từ 4 xuống 1. Cơ chế gốc bóp
-iteration xuống một phần tư khi task bão hoà, chỉ có nghĩa khi chạy đa nhiệm,
-chạy một task thì nó chỉ làm chậm học.
+| `data/youcookii/av_features/` | Đặc trưng ONE-PEACE của 1500 video (11 GB); bản sao trên HF `nguyenminh04/uniav-youcook2-data` |
+| `data/youcookii/caption_emb.npz` | Vector ONE-PEACE text của 11594 caption |
+| `data/youcookii/omni_emb_full.npz` | Vector thầy OmniRetriever: 8218 text + 9060 av (train đủ, thiếu 3 clip hỏng; cộng 500 clip val) |
+| `data/youcook2_cut/videos/` | Clip sự kiện đã cắt sẵn (17.7 GB) |
+| HF `nguyenminh04/omni-model`, `nguyenminh04/omni-adapters` | Trọng số WAVE-7B (chưa vá `rope`, cần chạy `patch_wave_rope.py`) và adapter |
+| Drive `MyDrive/code KL/Omni/data/YouCookII/videos` | 1500 video gốc chưa cắt (32.5 GB); gắn Drive cần người dùng tự chạy `colab drivemount` |
+| `ONEPEACE_extract_embd_code/models/` | 3 checkpoint ONE-PEACE (video K400, audio, text) |
+| `ckpt/` | `omni65`, `omni100*`, `sched10`, `base_seed2`, `orig_baseline`, cùng checkpoint UniAV gốc |
 
 ---
 
-## 7. Công cụ sinh nhúng caption
+## 9. Thói quen và yêu cầu của người dùng
 
-`ONEPEACE_extract_embd_code/onepeace_text.py` là bản viết lại text encoder của ONE-PEACE
-bằng PyTorch thuần, **không cần fairseq**. Checkpoint rút gọn chỉ nhánh text nằm ở
-`ONEPEACE_extract_embd_code/models/one-peace-text.pt`, 6 GB thay vì 15 GB.
-
-Đã kiểm chứng: tái tạo 10 lớp DESED và so với file gốc của tác giả, sai lệch
-tuyệt đối lớn nhất 1.6e-07, cosine đường chéo bằng 1.000 cho cả 10 lớp.
-
-Chạy được trong `uniav-env` (torch 1.11, đã cài thêm `regex`), không cần venv riêng.
-Đã kiểm: sai lệch so với `caption_emb.npz` 3e-5, đúng mức làm tròn float16.
-
-Sinh lại toàn bộ: `python tools/embed_captions.py`, 52 phút trên CPU, lưu tiến độ
-sau mỗi 640 câu nên dừng giữa chừng chạy tiếp được.
-
----
-
-## 8. Việc tiếp theo, xếp theo thứ tự
-
-1. **Sinh vector thầy OmniRetriever cho 11594 clip** rồi train lại với `omni_emb_file`, xem mục 10.
-   Video gốc nằm ở máy Windows đã chạy cut.ipynb, cần A100 vì model 7B.
-2. **Trích feature cho 290 video còn lại**, pipeline nằm ở `ONEPEACE_extract_embd_code/`.
-   Thêm 19% dữ liệu.
-3. **Kiểm tra thủ công 50 đoạn validation** đối chiếu video thật. Nửa tiếng làm
-   việc này cho biết trần thực sự nằm ở đâu.
-4. **Thử `max_seq_len: 512`** nếu quay lại hướng phân loại. VRAM 11.2 GB ở batch 4,
-   chạy local không nổi, A100 thì dùng batch 8 chứ đừng 16.
-
-### Kỳ vọng thực tế
-
-UniAV đạt 36.1 trên ActivityNet với mười nghìn video và 200 lớp khác nhau rõ rệt.
-Bài này khó hơn hẳn: 1106 video, thao tác bếp na ná nhau, nhãn do mô hình ngôn
-ngữ sinh và chưa kiểm chứng. Mong con số ngang ActivityNet là không thực tế.
-
----
-
-## 9. Thư mục lớn còn giữ
-
-| Đường dẫn | Dung lượng | Có cần không |
-|---|---|---|
-| `ONEPEACE_extract_embd_code/` | 18 GB | ba model text, video, audio ở `models/`, cần để trích 290 video còn lại |
-| `data/` | 12 GB | cần |
-| `ckpt/multi_task_anet_unav_dcase_reproduce/` | 2 GB | checkpoint UniAV gốc, khó tải lại |
-
-Đã xoá trong phiên này: hai thư mục checkpoint cũ của hướng phân loại, bản clone
-`ONE-PEACE/`, các file log, và ba file của thiết kế trung gian đã bị thay thế.
-
----
-
-## 10. Phiên 2026-10-03: nâng cấp hướng B
-
-Kết quả chạy 10 epoch trên RTX 3060, checkpoint `ckpt/sched10/best_cap.pth.tar` (epoch 7):
-
-| Chỉ số | Bản cũ (Colab, epoch 8) | Bản mới |
-|---|---|---|
-| R@0.5 | 47.5 | **49.3** |
-| R@0.7 | 24.6 | **26.6** |
-| ret_sim | 0.669 | **0.748** |
-| CIDEr | chưa đo | **88.0** (METEOR 14.4) |
-
-ret_sim có sàn 0.46 (chọn bừa) và trần 0.896 (chọn câu tốt nhất có trong kho).
-
-**Những thay đổi có tác dụng, đã đo riêng từng cái:**
-- Chọn câu theo đồng thuận (MBR trên top 20), đổi lúc suy luận: CIDEr 71 → 88
-- Loss nhúng so với toàn kho 8218 câu, nhãn mềm theo độ giống ONE-PEACE: ret_sim top-1 0.694 → 0.711
-- Nhánh dự đoán IoU dùng để xếp hạng đoạn, `iou_power: 0.3`: R@0.5 +1.0, R@0.7 +1.4 trên cùng checkpoint
-- Trọng số loss nhúng 0.2: ở trọng số 1.0 loss nhúng chiếm hết gradient sau clip, R@0.5 tụt 2 điểm
-- Lịch 10 epoch: 40 epoch overfit từ epoch 7, R@0.5 rơi từ 50.8 xuống 42.9 ở epoch 12
-
-**Đã thử, không có tác dụng:**
-- Nạp checkpoint UniAV gốc (`--pretrain`): kém hơn ở cả hai lần thử
-- `max_seq_len: 512`: ngang 256
-- NMS cứng hoặc ngưỡng thấp: kém hơn soft-NMS 0.7
-- Chính quy hoá mạnh (weight decay 0.05, dropout 0.1, cắt 50–100%): ngang bản thường
-- Trung bình vector trên cả đoạn so với tại một mốc: ngang nhau, giữ vì cần cho thầy Omni
-
-**Mô tả trên đoạn GT ngang trên đoạn dự đoán** (ret_sim 0.742 so với 0.748), nên nút thắt
-của phần mô tả nằm ở chất lượng vector chứ không ở việc tách đoạn.
-
-**Thầy OmniRetriever-7B, code xong, chưa có dữ liệu.** Ý fusion-as-teacher của bài
-OmniRetriever: vector đoạn được chiếu sang không gian 3584 chiều, kéo về vector av của
-clip GT do model 7B sinh, và so với kho caption trong không gian đó. Đã chạy thông với
-vector giả. Quy trình ở `tools/omni_youcook2.py` (cut → manifest → extract trên A100 →
-`teacher` để đo zero-shot), rồi bỏ comment `omni_emb_file` trong config.
-Video gốc YouCook2 không có trên máy WSL này.
-
-**Chấm checkpoint:** `python train_event.py configs/youcook2_event.yaml --eval <ckpt>`
-in đủ các biến thể, kể cả `[oracle]` là mô tả trên đoạn GT.
-Cần `pip install pycocoevalcap` (METEOR cần java, chỉ dùng trong `--eval`).
-
----
-
-## 11. Dọn môi trường ngày 2026-10-03
-
-`ONEPEACE_embed_text/` đã gộp vào `ONEPEACE_extract_embd_code/`, phần notebook cũ nằm ở
-`text_embed/`. Ba model ONE-PEACE **không phải bản sao**: chúng dùng chung các lớp
-attention, khoảng 1.5 GB mỗi file, còn lại là FFN và adapter riêng của từng modality.
-
-Đã xoá ba môi trường Windows nằm trong WSL (`venv`, `op310`, `ONEPEACE_embed_text/venv`).
-Gọi từ WSL thì Python khởi động nhưng không thấy gói nào. Danh sách gói lưu ở
-`ONEPEACE_extract_embd_code/envs/` để dựng lại khi cần. Notebook `EXTRACT_local.ipynb`
-vẫn trỏ tới hai môi trường đó.
-
-Môi trường Linux còn lại duy nhất cho repo này là `/home/minh/uniav-env`.
+- Trao đổi bằng **tiếng Việt**. **Code, chú thích và log đều bằng tiếng Anh.**
+- Log và kết quả in ra phải **dễ đọc**: dạng bảng, gom thành một bảng thay vì bắt đối chiếu qua lại.
+- **Hỏi link hoặc đường dẫn dữ liệu, không tự đoán.** Có thì dùng HF hoặc Drive thay vì tải lên lại từ máy.
+- **Không để Colab tắt.** Nếu đang chờ việc gì lâu, phải báo tiến độ định kỳ, kiểm tra có bị treo không và sửa ngay.
+- **Mọi lượt chạy phải được ghi hồ sơ,** ghi lại cải tiến của từng biến thể để kết hợp ở lượt sau.
+- Người dùng sẵn sàng tăng độ phức tạp của model nếu cải thiện được độ chính xác.
+- Thư mục gốc gọn gàng: tài liệu để trong `docs/`, log trong `logs/`, kết quả trong `experiments/`.
