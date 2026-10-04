@@ -15,10 +15,10 @@ Use uv.load(...) to pick a device or checkpoint explicitly, or UniAVPipeline for
 """
 from .config import Config
 from .pipeline import UniAVPipeline
-from .report import format_events, load_gt, show
+from .report import compare_table, format_events, load_gt, show
 
 __all__ = ['Config', 'UniAVPipeline', 'load', 'describe_video', 'describe_features', 'search', 'embed_text',
-           'show', 'format_events', 'load_gt']
+           'show', 'compare_table', 'format_events', 'load_gt']
 
 _pipeline = None
 

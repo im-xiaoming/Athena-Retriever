@@ -1,9 +1,14 @@
-"""Readable side-by-side print of predicted events and the YouCook2 ground truth.
+"""Compare predicted events with the YouCook2 ground truth, one row per pair, in time order.
 
     import uniav_api as uv
     r = uv.describe_features(v, a, duration, video_id='-Ju39A-G0Dk')
-    uv.show(r)                       # GT looked up from the YouCook2 annotations by video_id
-    uv.show(r, gt=[(12.0, 30.5, 'cut the onion'), ...])   # or your own GT
+    uv.show(r)              # text: timeline bars + one table, GT step next to the prediction for it
+    uv.compare_table(r)     # the same table as a pandas DataFrame (renders as HTML in notebooks)
+
+Each real step is paired with at most one prediction (best overlap first). Verdicts:
+  good     IoU >= 0.5          partial  0 < IoU < 0.5
+  missed   no prediction overlaps this real step
+  extra    a prediction that overlaps no real step
 """
 import json
 import os
@@ -36,57 +41,73 @@ def _t(sec):
     return '%d:%02d' % (sec // 60, sec % 60)
 
 
-def _rows(items, cap_width):
-    """items: (index, time, extra cells..., caption, link). Captions wrap onto extra lines."""
-    out = []
-    for cells, caption, link in items:
-        lines = textwrap.wrap(caption, cap_width) or ['']
-        out.append(cells + '  ' + lines[0].ljust(cap_width) + '  ' + link)
-        for more in lines[1:]:
-            out.append(' ' * len(cells) + '  ' + more)
-    return out
-
-
-def format_events(result, gt='auto', iou_thr=0.5, cap_width=46):
-    """Text block: predicted events, ground truth, and how they match. Returns a string."""
+def pair_events(result, gt='auto'):
+    """Rows in time order: {gt, pred, iou, verdict}; gt / pred are (start, end, caption) or None."""
     if gt == 'auto':
         gt = load_gt(result.get('video_id', ''))
-    preds = [(e['start'], e['end'], e['caption'], e.get('score', 0.0)) for e in result['events']]
-    lines = ['=' * 100,
-             'Video %s   duration %s   predicted %d   ground truth %d'
-             % (result.get('video_id', '?'), _t(result.get('duration', 0)), len(preds), len(gt)),
-             '=' * 100]
-
-    best_gt = [max(((_iou(p[:2], g[:2]), j) for j, g in enumerate(gt)), default=(0.0, -1)) for p in preds]
-    best_pred = [max(((_iou(p[:2], g[:2]), i) for i, p in enumerate(preds)), default=(0.0, -1)) for g in gt]
-
-    lines.append('PREDICTED')
-    lines.append('  #   time            score  %s  best GT (IoU)' % 'caption'.ljust(cap_width))
-    items = []
-    for i, (p, (v, j)) in enumerate(zip(preds, best_gt)):
-        link = ('GT%-2d (%.2f)%s' % (j + 1, v, ' ok' if v >= iou_thr else '')) if j >= 0 else '-'
-        items.append(('  %-3d %5s - %-6s  %.2f ' % (i + 1, _t(p[0]), _t(p[1]), p[3]), p[2], link))
-    lines += _rows(items, cap_width)
-
-    if gt:
-        lines.append('')
-        lines.append('GROUND TRUTH')
-        lines.append('  #   time                   %s  best pred (IoU)' % 'caption'.ljust(cap_width))
-        items = []
-        for j, (g, (v, i)) in enumerate(zip(gt, best_pred)):
-            link = ('P%-3d (%.2f)%s' % (i + 1, v, ' ok' if v >= iou_thr else '')) if i >= 0 else '-'
-            items.append(('  GT%-2d %5s - %-6s      ' % (j + 1, _t(g[0]), _t(g[1])), g[2], link))
-        lines += _rows(items, cap_width)
-
-        tp_pred = sum(v >= iou_thr for v, _ in best_gt)
-        tp_gt = sum(v >= iou_thr for v, _ in best_pred)
-        lines.append('')
-        lines.append('MATCH @ IoU %.1f: %d / %d predictions hit a GT event (precision %.2f), '
-                     '%d / %d GT events are found (recall %.2f)'
-                     % (iou_thr, tp_pred, len(preds), tp_pred / max(len(preds), 1),
-                        tp_gt, len(gt), tp_gt / max(len(gt), 1)))
-    return '\n'.join(lines)
+    preds = [(e['start'], e['end'], e['caption']) for e in result['events']]
+    pairs = sorted(((_iou(p, g), i, j) for i, p in enumerate(preds) for j, g in enumerate(gt)), reverse=True)
+    used_p, used_g, rows = set(), set(), []
+    for v, i, j in pairs:   # greedy one-to-one matching, best overlap first
+        if v <= 0 or i in used_p or j in used_g:
+            continue
+        used_p.add(i); used_g.add(j)
+        rows.append({'gt': gt[j], 'pred': preds[i], 'iou': v, 'verdict': 'good' if v >= 0.5 else 'partial'})
+    rows += [{'gt': g, 'pred': None, 'iou': 0.0, 'verdict': 'missed'} for j, g in enumerate(gt) if j not in used_g]
+    rows += [{'gt': None, 'pred': p, 'iou': 0.0, 'verdict': 'extra'} for i, p in enumerate(preds) if i not in used_p]
+    rows.sort(key=lambda r: (r['gt'] or r['pred'])[0])
+    return rows, gt, preds
 
 
-def show(result, gt='auto', iou_thr=0.5, cap_width=46):
-    print(format_events(result, gt=gt, iou_thr=iou_thr, cap_width=cap_width))
+def _bar(segs, duration, width):
+    line = [' '] * width
+    for s, e, _ in segs:
+        a = int(s / max(duration, 1e-6) * width)
+        b = max(a + 1, int(round(e / max(duration, 1e-6) * width)))
+        for k in range(a, min(b, width)):
+            line[k] = '#'
+    return ''.join(line)
+
+
+def format_events(result, gt='auto', width=96):
+    rows, gt, preds = pair_events(result, gt)
+    dur = float(result.get('duration') or max([s[1] for s in gt + preds] or [1]))
+    n_good = sum(r['verdict'] == 'good' for r in rows)
+    out = ['Video %s, %s long: the model found %d events, the real recipe has %d steps.'
+           % (result.get('video_id', '?'), _t(dur), len(preds), len(gt)),
+           'Matched well (IoU >= 0.5): %d of %d real steps.' % (n_good, len(gt)) if gt else '', '']
+    bw = width - 8
+    ticks = ''.join((_t(dur * k / 4)).ljust(bw // 4) for k in range(4)) + _t(dur)
+    out += ['timeline  ' + ticks, 'real   |' + _bar(gt, dur, bw) + '|', 'model  |' + _bar(preds, dur, bw) + '|', '']
+
+    cw = (width - 34) // 2
+    head = '%-13s %-*s   %-13s %-*s  %s' % ('real time', cw, 'real step (ground truth)', 'model time', cw, 'model caption', 'verdict')
+    out += [head, '-' * len(head)]
+    for r in rows:
+        g, p = r['gt'], r['pred']
+        gl = textwrap.wrap(g[2], cw) if g else ['-']
+        pl = textwrap.wrap(p[2], cw) if p else ['-']
+        gt_time = '%s - %s' % (_t(g[0]), _t(g[1])) if g else ''
+        pr_time = '%s - %s' % (_t(p[0]), _t(p[1])) if p else ''
+        verdict = r['verdict'] + (' (IoU %.2f)' % r['iou'] if r['iou'] > 0 else '')
+        for k in range(max(len(gl), len(pl))):
+            out.append('%-13s %-*s   %-13s %-*s  %s' % (
+                gt_time if k == 0 else '', cw, gl[k] if k < len(gl) else '',
+                pr_time if k == 0 else '', cw, pl[k] if k < len(pl) else '', verdict if k == 0 else ''))
+    return '\n'.join(out)
+
+
+def show(result, gt='auto', width=110):
+    print(format_events(result, gt=gt, width=width))
+
+
+def compare_table(result, gt='auto'):
+    """pandas DataFrame with one row per (real step, prediction) pair, in time order."""
+    import pandas as pd
+    rows, _, _ = pair_events(result, gt)
+    return pd.DataFrame([{
+        'real time': '%s - %s' % (_t(r['gt'][0]), _t(r['gt'][1])) if r['gt'] else '',
+        'real step (ground truth)': r['gt'][2] if r['gt'] else '-',
+        'model time': '%s - %s' % (_t(r['pred'][0]), _t(r['pred'][1])) if r['pred'] else '',
+        'model caption': r['pred'][2] if r['pred'] else '-',
+        'IoU': round(r['iou'], 2), 'verdict': r['verdict']} for r in rows])

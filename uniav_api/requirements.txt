@@ -3,6 +3,7 @@
 #   Apple Silicon / CPU    : pip install torch
 torch>=2.1
 numpy<2.1
+pandas          # only for uniav_api.compare_table()
 opencv-python-headless
 librosa
 resampy
