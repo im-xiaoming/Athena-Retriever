@@ -77,7 +77,7 @@ class UniAVPipeline:
         self.model.load_state_dict(sd, strict=True)
         self.model = self.model.to(self.device).eval()   # small (138M): fp32 everywhere
         self.captioner = Captioner(self.cfg.caption_pool, self.model, self.device)
-        self._encoder = self._text = self._pool_query = None
+        self._encoder = self._text = self._pool_query = self._generator = None
         # one index per model: event vectors of different checkpoints are not comparable
         self.index_dir = os.path.join(self.cfg.index_dir, self.run)
         self.index = {}
@@ -109,6 +109,15 @@ class UniAVPipeline:
         return self._encoder
 
     @property
+    def generator(self):
+        if self._generator is None:
+            from .generator import CaptionGenerator
+            if not os.path.exists(self.cfg.generator):
+                raise FileNotFoundError('caption generator %s not found (caption_mode=generate)' % self.cfg.generator)
+            self._generator = CaptionGenerator(self.cfg.generator, self.device)
+        return self._generator
+
+    @property
     def text_encoder(self):
         """ONE-PEACE text encoder, or None when its 6 GB checkpoint is not available."""
         if self._text is None and os.path.exists(self.cfg.text_encoder):
@@ -125,6 +134,14 @@ class UniAVPipeline:
         secs = self.spec.to_seconds(segs, n, duration)
         keep = select_events(secs, scores, self.cfg.min_score, self.cfg.max_overlap, self.cfg.max_events)
         caps = self.captioner.caption(vecs[keep], alternatives=self.cfg.alternatives) if keep else []
+        if self.cfg.caption_mode == 'generate' and keep:
+            gen = self.generator
+            cands = None
+            if gen.rag:   # the generator also reads the best retrieved captions, in score order
+                top = (vecs[keep].float() @ self.captioner.pool_f.t()).topk(gen.rag).indices.tolist()
+                cands = [[self.captioner.texts[j] for j in row] for row in top]
+            texts = gen(vecs[keep], self.model.span_tokens(segs[keep]), cands)
+            caps = [dict(c, retrieved_caption=c['caption'], caption=t) for c, t in zip(caps, texts)]
         events = []
         for c, i in zip(caps, keep):
             events.append(dict(start=round(float(secs[i][0]), 2), end=round(float(secs[i][1]), 2),

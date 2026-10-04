@@ -34,6 +34,10 @@ class Config:
     max_overlap: float = 0.3        # drop an event overlapping a better one by more than this IoU
     max_events: int = 30
     alternatives: int = 3           # extra caption candidates returned per event
+    # caption source: 'retrieve' picks a train caption (default); 'generate' writes one with GPT-2
+    # (uniav_api/generator.py); the retrieved caption is then kept as 'retrieved_caption'
+    caption_mode: str = 'retrieve'
+    generator: str = os.path.join(ROOT, 'ckpt', 'api', 'capgen_prefix.pth')
 
     @classmethod
     def from_env(cls, **kw):

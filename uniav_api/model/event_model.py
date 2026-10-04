@@ -191,4 +191,17 @@ class EventCaptionModel(nn.Module):
                                      sigma=self.nms_sigma, min_score=0.001, max_num=self.max_seg)
         segs = torch.from_numpy(segs_np).to(dev)
         vecs = self.seg_ctx(raw0[0], len0, segs) if len(segs) else torch.zeros(0, raw0.shape[1], device=dev)
+        self.last_level0 = (raw0[0], len0)   # for span_tokens (caption generator)
         return segs_np, sc_np, vecs
+
+    @torch.no_grad()
+    def span_tokens(self, segs, k=8):
+        """Level-0 Embed Head features of the last forward() sampled at k points across each segment
+        (grid units), (N, k, D): the generator input, as in tools/capgen/dump_segments.py."""
+        raw0, L = self.last_level0
+        segs = torch.as_tensor(segs, dtype=torch.float32, device=raw0.device).reshape(-1, 2)
+        t = torch.linspace(0, 1, k, device=raw0.device)
+        pos = (segs[:, :1] + t[None] * (segs[:, 1:] - segs[:, :1])).clamp(0, L - 1)
+        lo = pos.floor().long(); hi = (lo + 1).clamp(max=L - 1); w = (pos - lo.float())[..., None]
+        r0 = raw0.t()
+        return r0[lo] * (1 - w) + r0[hi] * w

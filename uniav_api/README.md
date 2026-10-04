@@ -24,6 +24,10 @@ uv.search('boil the noodles', top_k=5)         # events of every video described
 uv.describe_features(v768, a768, duration)     # your own stored features (one row per second)
 ```
 
+```python
+uv.load(caption_mode='generate')               # captions written by GPT-2 instead of picked (see below)
+```
+
 Each event holds `start`, `end` (seconds), `score`, `caption`, `similarity`, `consensus`,
 `alternatives` (3 other candidate captions) and `embedding` (numpy, 512). Results are kept in
 `uniav_api/index/<model>/<video_id>.json` so `search()` covers earlier videos.
@@ -76,6 +80,25 @@ The last five were picked among the better videos (median F1 over the validation
    captions by word overlap (TF-IDF) and their vectors are averaged: phrase queries like
    recipe steps.
 
+## Generated captions (`caption_mode='generate'`)
+
+`uniav_api/generator.py`: GPT-2 small fine-tuned to write a caption from the event's vector q and
+8 level-0 feature tokens sampled across the event (a ClipCap-style prefix), trained on the YouCook2
+train steps of this model (`tools/capgen/`). The retrieved train caption stays in
+`retrieved_caption`. Checkpoint `ckpt/api/capgen_prefix.pth` (251 MB, fp16); GPT-2's tokenizer and
+config download from HuggingFace (`openai-community/gpt2`) on first use; needs `transformers`.
+
+| YouCook2 val | caption | CIDEr | METEOR | BLEU-4 |
+|---|---|---|---|---|
+| GT steps (3031) | retrieved (default) | 88.9 | 15.13 | 7.02 |
+| GT steps (3031) | generated | **97.6** | **15.72** | **8.41** |
+| events found by the model, matched to a GT step (2253) | retrieved | 86.0 | 14.91 | 6.89 |
+| events found by the model, matched to a GT step (2253) | generated | **95.1** | **15.42** | **7.93** |
+
+Generated captions read naturally and score higher on average, but can invent details (e.g. "lamb"
+for pork); retrieved captions are always real sentences. Check: on the GT steps of `6uHoTJSLoL8`
+the API writes exactly the training script's captions (6/6), CPU and fp16 checkpoint.
+
 ## Checks done (2026-10-04)
 
 | Check | Result |
@@ -98,6 +121,7 @@ The last five were picked among the better videos (median F1 over the validation
 | `ckpt/internvideo2/InternVideo2-stage2_1b-224p-f4.pt` | HF `OpenGVLab/InternVideo2-Stage2_1B-224p-f4` (gated) | describe_video |
 | `ckpt/internvideo2/audio_6b.pth` | HF `OpenGVLab/InternVideo2-Stage2-6B-Audio` | describe_video |
 | `ONEPEACE_extract_embd_code/models/one-peace-text.pt` | ONE-PEACE text encoder, 6 GB | search, optional |
+| `ckpt/api/capgen_prefix.pth` | caption generator, `tools/capgen/export_generator.py prefix` | caption_mode='generate' |
 
 `describe_video` also needs `timm`, `einops`, `torchaudio` (`pip install -r uniav_api/requirements.txt`).
 The older ONE-PEACE model still works: `uv.load(checkpoint='ckpt/omni65/best_cap.pth.tar')` with
