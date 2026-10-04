@@ -6,6 +6,7 @@
     for e in result['events']:
         print(e['start'], e['end'], e['caption'])
 
+    uv.show(result)                                    # predicted events next to the YouCook2 GT
     hits = uv.search('cut the onion', top_k=5)         # over every video described so far
     vec = uv.embed_text('add salt to the pot')         # 512-d query vector, same space as events
 
@@ -14,8 +15,10 @@ Use uv.load(...) to pick a device or checkpoint explicitly, or UniAVPipeline for
 """
 from .config import Config
 from .pipeline import UniAVPipeline
+from .report import format_events, load_gt, show
 
-__all__ = ['Config', 'UniAVPipeline', 'load', 'describe_video', 'describe_features', 'search', 'embed_text']
+__all__ = ['Config', 'UniAVPipeline', 'load', 'describe_video', 'describe_features', 'search', 'embed_text',
+           'show', 'format_events', 'load_gt']
 
 _pipeline = None
 
