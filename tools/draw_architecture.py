@@ -1,9 +1,10 @@
 """Draw the architecture of the new UniAV (event segmentation + caption retrieval).
 
-  python tools/draw_architecture.py      ->  docs/UniAV_new.drawio.svg
+  python tools/draw_architecture.py   ->  docs/UniAV_new.drawio.svg  and  docs/UniAV_new.drawio
 
-Writes one .drawio.svg: a plain SVG for viewing, with the same diagram embedded as draw.io
-XML so it opens editable in draw.io (like docs/Model Ar.drawio.svg). Panels go from the
+The .drawio.svg is a plain SVG for viewing with the same diagram embedded as draw.io XML (like
+docs/Model Ar.drawio.svg); the .drawio file holds that XML alone. In draw.io, arrows are attached
+to the boxes they start and end on, so they follow when a box is moved. Panels go from the
 overview on the right to the details on the left, as in the original UniAV diagram.
 Solid arrows run at inference (and training); dashed green arrows only during training.
 Green tags name the loss that supervises a block.
@@ -13,6 +14,7 @@ import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, 'docs', 'UniAV_new.drawio.svg')
+OUT_DRAWIO = os.path.join(ROOT, 'docs', 'UniAV_new.drawio')
 
 BG = '#1b1b1f'
 TEXT = '#f2f2f2'
@@ -30,6 +32,7 @@ KIND = {   # border colour per kind of block
 FONT = 'Helvetica, Arial, sans-serif'
 
 cells, svg = [], []
+BOXES = []   # every box, so arrows can be attached to the boxes they touch
 _id = [1]
 
 
@@ -52,9 +55,19 @@ def text_lines(x, y, lines, size=14, color=TEXT, anchor='middle', weight='normal
 
 
 def vertex(label, style, x, y, w, h):
+    i = nid()
     cells.append('<mxCell id="%s" value="%s" style="%s" vertex="1" parent="1"><mxGeometry x="%d" y="%d" '
                  'width="%d" height="%d" as="geometry"/></mxCell>'
-                 % (nid(), esc('<br>'.join(esc(l) for l in label.split('\n'))), style, x, y, w, h))
+                 % (i, esc('<br>'.join(esc(l) for l in label.split('\n'))), style, x, y, w, h))
+    return i
+
+
+def rect(x, y, w, h, fill, stroke, rx=8, sw=1.5, arc=None):
+    """Plain rectangle without text, in both the SVG and the draw.io model."""
+    svg.append('<rect x="%d" y="%d" width="%d" height="%d" rx="%d" fill="%s" stroke="%s" stroke-width="%s"/>'
+               % (x, y, w, h, rx, fill, stroke, sw))
+    vertex('', 'rounded=1;%shtml=1;fillColor=%s;strokeColor=%s;strokeWidth=%s;'
+           % ('arcSize=%d;' % arc if arc else '', fill, stroke, sw), x, y, w, h)
 
 
 class Box:
@@ -65,9 +78,11 @@ class Box:
                    % (x, y, w, h, BOX, stroke, 1.4 if kind == 'same' else 2.2,
                       ' stroke-dasharray="8 5"' if dashed else ''))
         text_lines(x + w / 2, y + h / 2, label.split('\n'), size=size, weight='bold' if bold else 'normal')
-        vertex(label, 'rounded=1;whiteSpace=wrap;html=1;fillColor=%s;strokeColor=%s;fontColor=%s;fontSize=%d;%s%s'
-               % (BOX, stroke, TEXT, size, 'dashed=1;' if dashed else '', 'fontStyle=1;' if bold else ''),
-               x, y, w, h)
+        self.id = vertex(label, 'rounded=1;whiteSpace=wrap;html=1;fillColor=%s;strokeColor=%s;fontColor=%s;'
+                         'fontSize=%d;strokeWidth=%s;%s%s'
+                         % (BOX, stroke, TEXT, size, 1.4 if kind == 'same' else 2.2, 'dashed=1;' if dashed else '',
+                            'fontStyle=1;' if bold else ''), x, y, w, h)
+        BOXES.append(self)
 
     top = property(lambda s: (s.x + s.w / 2, s.y))
     bottom = property(lambda s: (s.x + s.w / 2, s.y + s.h))
@@ -133,12 +148,38 @@ def arrow(pts, label=None, train=False, lpos=0.5, lside='right', color=None):
         else:
             text_lines(mx, my - 11, label.split('\n'), size=13, color=lc)
     pts_xml = ''.join('<mxPoint x="%.1f" y="%.1f"/>' % p for p in pts[1:-1])
+    # attach both ends to the boxes they lie on, at the same spot of the border
+    ends, attrs = '', ''
+    for (px, py), role, pre in ((pts[0], 'source', 'exit'), (pts[-1], 'target', 'entry')):
+        b = on_box(px, py)
+        if b is not None:
+            attrs += ' %s="%s"' % (role, b.id)
+            ends += '%sX=%.3f;%sY=%.3f;%sDx=0;%sDy=0;' % (pre, (px - b.x) / b.w, pre, (py - b.y) / b.h, pre, pre)
     cells.append('<mxCell id="%s" value="%s" style="html=1;endArrow=block;endFill=1;strokeColor=%s;fontColor=%s;'
-                 'fontSize=13;rounded=0;%s" edge="1" parent="1"><mxGeometry relative="1" as="geometry">'
-                 '<mxPoint x="%.1f" y="%.1f" as="sourcePoint"/><mxPoint x="%.1f" y="%.1f" as="targetPoint"/>'
-                 '<Array as="points">%s</Array></mxGeometry></mxCell>'
+                 'fontSize=13;rounded=0;edgeStyle=none;labelBackgroundColor=%s;%s%s" edge="1" parent="1"%s><mxGeometry relative="1" '
+                 'as="geometry"><mxPoint x="%.1f" y="%.1f" as="sourcePoint"/><mxPoint x="%.1f" y="%.1f" '
+                 'as="targetPoint"/><Array as="points">%s</Array></mxGeometry></mxCell>'
                  % (nid(), esc((label or '').replace('\n', '<br>')), color, GREEN if train else MUTED,
-                    'dashed=1;' if train else '', pts[0][0], pts[0][1], pts[-1][0], pts[-1][1], pts_xml))
+                    panel_colour(pts[0][0]), 'dashed=1;strokeWidth=1.8;' if train else 'strokeWidth=1.5;', ends, attrs,
+                    pts[0][0], pts[0][1], pts[-1][0], pts[-1][1], pts_xml))
+
+
+def panel_colour(x):
+    """Background of the panel containing x, so edge labels in draw.io sit on the panel colour."""
+    for px, pw, _, colour, _ in PANELS:
+        if px <= x < px + pw:
+            return colour
+    return BG
+
+
+def on_box(px, py, tol=2.0):
+    """The most recent box whose border passes through (px, py), or None."""
+    for b in reversed(BOXES):
+        inside = b.x - tol <= px <= b.x + b.w + tol and b.y - tol <= py <= b.y + b.h + tol
+        border = min(abs(px - b.x), abs(px - b.x - b.w), abs(py - b.y), abs(py - b.y - b.h)) <= tol
+        if inside and border:
+            return b
+    return None
 
 
 def down(a, b, label=None, src=None, dst=None, **kw):
@@ -246,7 +287,7 @@ for i, (n_, d_) in enumerate([
     note(x0 + 20, 1415 + i * 27, [n_], size=14, color=GREEN, weight='bold', w=130)
     note(x0 + 150, 1415 + i * 27, [d_], size=14, color=TEXT, w=520)
 lx, ly = x0 + 720, 1370
-svg.append('<rect x="%d" y="%d" width="520" height="225" rx="8" fill="#151518" stroke="#55555c"/>' % (lx, ly))
+rect(lx, ly, 520, 225, '#151518', '#55555c', sw=1)
 note(lx + 18, ly + 22, ['Chú thích'], size=15, color=TEXT, weight='bold', w=200)
 arrow([(lx + 20, ly + 55), (lx + 90, ly + 55)]); note(lx + 105, ly + 55, ['suy luận (và cả lúc train)'], w=300)
 arrow([(lx + 20, ly + 85), (lx + 90, ly + 85)], train=True); note(lx + 105, ly + 85, ['chỉ lúc train'], w=300)
@@ -254,11 +295,9 @@ for i, (k, t) in enumerate([('same', 'như UniAV gốc'), ('changed', 'giữ, đ
                             ('new', 'mới thêm'), ('frozen', 'pretrained, đóng băng')]):
     yy = ly + 118 + (i // 2) * 34
     xx = lx + 20 + (i % 2) * 250
-    svg.append('<rect x="%d" y="%d" width="40" height="22" rx="5" fill="%s" stroke="%s" stroke-width="2"/>'
-               % (xx, yy - 11, BOX, KIND[k]))
+    rect(xx, yy - 11, 40, 22, BOX, KIND[k], rx=5, sw=2)
     note(xx + 50, yy, [t], size=13, w=200)
-svg.append('<rect x="%d" y="%d" width="64" height="22" rx="11" fill="#14301a" stroke="%s" stroke-width="1.5"/>'
-           % (lx + 20, ly + 187, GREEN))
+rect(lx + 20, ly + 187, 64, 22, '#14301a', GREEN, rx=11, arc=50)
 note(lx + 94, ly + 198, ['loss dạy khối này'], size=13, w=300)
 
 # ------------------------------------------------------------------ segment vector & caption choice
@@ -289,8 +328,7 @@ ss = Box(cx - 230, 860, 460, 40, 'score of each of the 8218 captions = sum of bo
 down(c1, ss); down(c2, ss)
 # worked example of the consensus pick
 ex_y = 950
-svg.append('<rect x="%d" y="%d" width="780" height="250" rx="8" fill="%s" stroke="%s" stroke-width="2.2"/>'
-           % (cx - 390, ex_y, BOX, KIND['new']))
+ex_box = Box(cx - 390, ex_y, 780, 250, '', 'new')
 down(ss, None, dst=(cx, ex_y), src=ss.bottom)
 note(cx - 370, ex_y + 26, ['Top 20 by score, then pick by consensus (example)'], size=15, color=TEXT,
      weight='bold', w=700)
@@ -424,4 +462,6 @@ doc = ('<?xml version="1.0" encoding="UTF-8"?>\n'
        % (W, H, W, H, esc(mx_xml), WHITE, GREEN, BG, '\n'.join(svg)))
 with open(OUT, 'w') as f:
     f.write(doc)
-print('wrote %s (%d cells)' % (OUT, len(cells)))
+with open(OUT_DRAWIO, 'w') as f:
+    f.write(mx_xml + '\n')
+print('wrote %s and %s (%d cells)' % (OUT, OUT_DRAWIO, len(cells)))
