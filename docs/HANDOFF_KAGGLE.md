@@ -44,7 +44,9 @@ HF dataset `nguyenminh04/uniav-youcook2-data` là **private**: cần token, ngư
 | Đặc trưng InternVideo2 + BEATs, 1500 video, 1 dòng/giây | HF `iv2_feats/iv2_feats_00..07.tar` + `manifest.json` (khoảng 2 GB) | giải nén vào `data/youcookii/iv2_feats/` |
 | Vector thầy OmniRetriever-7B (cho mọi lượt có thầy) | HF `teacher/omni_emb_full.npz` (132 MB) | `data/youcookii/omni_emb_full.npz` |
 | Checkpoint của API (model `iv2`) | HF `api/uniav_iv2.pth` | `ckpt/api/uniav_iv2.pth` |
-| Đặc trưng lệch nửa giây (để ghép thành 2 dòng/giây) | HF `iv2_feats_shift/` sau khi lượt trích trên Colab xong (khoảng 20:30 hôm nay) | `data/youcookii/iv2_feats_shift/` |
+| Đặc trưng lệch nửa giây (để ghép thành 2 dòng/giây) | HF `iv2_feats_shift/iv2_feats_shift_00..07.tar` + `manifest.json` (1500 file, đã kiểm tra) | giải nén vào `data/youcookii/iv2_feats_shift/` |
+| Encoder ONE-PEACE text (để tính ret_sim) | HF `encoders/one-peace-text.pt` (6.4 GB) | đặt biến `UNIAV_TEXT_ENCODER` trỏ tới file |
+| Bộ sinh câu GPT-2 (prefix) cho API | HF `api/capgen_prefix.pth` (251 MB) | `ckpt/api/capgen_prefix.pth`; code ở nhánh `api-capgen` |
 | Đặc trưng ONE-PEACE (chỉ để so sánh, đã bỏ) | HF `av_features/` (11 GB) | không cần nữa |
 
 ```python
@@ -103,7 +105,19 @@ Tách đoạn đã chững quanh 52–54 R@0.5. Phần chọn câu tăng nhẹ v
 | đoạn model đoán (2253) | chọn câu | 86.0 | 14.91 | 6.89 |
 | đoạn model đoán (2253) | **GPT-2 sinh câu** | **95.1** | **15.42** | **7.93** |
 
-Biến thể RAG (`--rag 5`: thêm 5 câu ứng viên) và ret_sim (đo bằng encoder ONE-PEACE text) đang chạy trên PC. Phiên PC sẽ push kết quả lên `exp-dense-capgen` khi xong.
+Đã xong trên PC:
+
+| Đoạn | Cách | CIDEr | METEOR | ret_sim |
+|---|---|---|---|---|
+| val GT | chọn câu (MBR) | 88.9 | 15.13 | **0.753** |
+| val GT | GPT-2 prefix | 97.6 | **15.72** | 0.727 |
+| val GT | GPT-2 + 5 câu ứng viên (`rag5`) | **99.0** | 15.61 | 0.731 |
+| đoạn model đoán | chọn câu (MBR) | 86.0 | 14.91 | **0.753** |
+| đoạn model đoán | GPT-2 prefix | **95.1** | **15.42** | 0.727 |
+| đoạn model đoán | GPT-2 + 5 câu ứng viên (`rag5`) | 91.2 | 15.16 | 0.730 |
+
+- **Sinh câu thắng về n-gram (CIDEr, METEOR), thua về ret_sim.** ret_sim thiên về chọn câu, vì câu được chọn trong đúng không gian ONE-PEACE mà ret_sim dùng để đo.
+- **RAG không hơn prefix** trên đoạn model đoán, mà lại chậm gấp 3. API giữ bản prefix.
 
 ## 5. Việc tiếp theo, theo thứ tự đề xuất
 
@@ -121,6 +135,6 @@ Biến thể RAG (`--rag 5`: thêm 5 câu ứng viên) và ret_sim (đo bằng e
 ## 6. Những gì còn chạy trên PC lúc bàn giao
 
 - `tools/capgen/train_capgen.py --name rag5`: xong thì tự chấm ret_sim cho cả `prefix` lẫn `rag5`.
-- Lượt trích lệch nửa giây trên Colab (phiên `iv2shift`): script `tools/iv2_finish.sh` trên PC tự kiểm tra từng file, lưu lên Drive và HF (`iv2_feats_shift/`), rồi tắt phiên.
+- Lượt trích lệch nửa giây trên Colab: **đã xong** (20:28). 1500 file đã lên Drive và HF `iv2_feats_shift/`, phiên Colab đã tắt.
 
 Phiên PC sẽ commit các kết quả này lên `exp-dense-capgen`. Pull nhánh đó để lấy.
