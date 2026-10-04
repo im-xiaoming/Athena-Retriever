@@ -121,21 +121,21 @@ def build_audio_model(repo, ckpt, device):
     return model.to(device).eval()
 
 
-def ffmpeg_frames(path, fps=2, size=224):
-    cmd = ['ffmpeg', '-v', 'error', '-i', path, '-vf', 'fps=%d,scale=%d:%d' % (fps, size, size),
+def ffmpeg_frames(path, fps=2, size=224, ffmpeg='ffmpeg'):
+    cmd = [ffmpeg, '-v', 'error', '-i', path, '-vf', 'fps=%d,scale=%d:%d' % (fps, size, size),
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     raw = subprocess.run(cmd, capture_output=True).stdout
     return np.frombuffer(raw, np.uint8).reshape(-1, size, size, 3)
 
 
-def ffmpeg_audio(path, sr=16000):
-    cmd = ['ffmpeg', '-v', 'error', '-i', path, '-vn', '-ac', '1', '-ar', str(sr), '-f', 'f32le', '-']
+def ffmpeg_audio(path, sr=16000, ffmpeg='ffmpeg'):
+    cmd = [ffmpeg, '-v', 'error', '-i', path, '-vn', '-ac', '1', '-ar', str(sr), '-f', 'f32le', '-']
     return np.frombuffer(subprocess.run(cmd, capture_output=True).stdout, np.float32)
 
 
-def decode(path):
-    frames = ffmpeg_frames(path)
-    wav = ffmpeg_audio(path)
+def decode(path, ffmpeg='ffmpeg'):
+    frames = ffmpeg_frames(path, ffmpeg=ffmpeg)
+    wav = ffmpeg_audio(path, ffmpeg=ffmpeg)
     return frames, wav
 
 
