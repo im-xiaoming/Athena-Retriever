@@ -28,6 +28,10 @@ Lessons from each change and what to combine next. The results table is in
 | Teacher at 100% coverage (`omni100`, `omni100_seed2`) | same as 65%: ret_sim 0.754–0.755, top-1 0.736–0.739 | yes |
 | Teacher weights 0.5/0.5 (`omni100_w05`) or av target only (`omni100_avonly`) | within noise of the default 0.2/0.2 | default |
 | Span-mean vector instead of single anchor point | no difference | kept, needed by the teacher |
+| InternVideo2 v768 + BEATs a768 instead of ONE-PEACE (`iv2`, `iv2_seed2`; same teacher, full data) | R@0.5 47.4–49.1 → 52.8–54.3, R@0.7 +5; ret_sim, top-1 within noise; CIDEr +2 | yes, API model |
+| Add the text-aligned v512 to v768 (`iv2_v512`) | between ONE-PEACE and v768 alone on R@0.5 (52.9); captions same | no |
+| InternVideo2 + ONE-PEACE concatenated (`iv2op`) | R@0.5 48.8: ONE-PEACE's large raw norms (~27) swamp the L2-normalised InternVideo2 rows; stuck near 35 until epoch 6 | no, ONE-PEACE dropped |
+| Teacher score added at caption choice (vs caption space only) | ret_sim changes by <= 0.003 in every run | API uses caption space only |
 | Original UniAV checkpoint (`--pretrain`) | worse twice: R@0.5 −3.7, CIDEr −17 | no |
 | `max_seq_len: 512` | same as 256 | no |
 | Hard NMS / lower NMS IoU | worse than soft-NMS 0.7 | no |
