@@ -39,6 +39,10 @@ run iv2_emb04 'iv2, embedding and span loss weights 0.4 (ret_sim still rising at
   --set "$TEACHER" "$IV2" model.train_cfg.loss_weight_emb=0.4 model.train_cfg.loss_weight_span=0.4
 run iv2_ep8 'iv2, 8 epochs instead of 10 (cosine ends before the overfitting)' \
   --epochs 8 --set "$TEACHER" "$IV2"
+# round 2: confirm the 8-epoch schedule, and combine it with the regularisation
+run iv2_ep8_seed2 'iv2_ep8, second seed' --epochs 8 --set "$TEACHER" "$IV2" init_rand_seed=2024
+run iv2_ep8_reg 'iv2, 8 epochs + dropout 0.1, drop-path 0.2' \
+  --epochs 8 --set "$TEACHER" "$IV2" model.train_cfg.dropout=0.1 model.train_cfg.droppath=0.2
 
 $PY tools/summarize_runs.py >> "$Q" 2>&1
 say "QUEUE_DONE"
