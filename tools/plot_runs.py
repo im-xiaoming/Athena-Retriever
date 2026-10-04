@@ -7,6 +7,7 @@ whose record has no history (backfilled runs and the original-code baseline).
 Writes experiments/plots/:
   {curves,final,losses}.png            original model -> improved -> teacher -> InternVideo2
   variants_{curves,final,losses}.png   variants of the InternVideo2 model
+  round3_{curves,final,losses}.png     512 steps, OmniRetriever text as caption space, T+V+A teacher target
   features_{curves,final,losses}.png   input features under the same teacher setup, full data:
                                        ONE-PEACE vs InternVideo2 (and both concatenated)
 
@@ -53,12 +54,20 @@ VARIANT_GROUPS = [
     ('8 epochs', '#008300', ['iv2_ep8', 'iv2_ep8_seed2']),
     ('8 epochs + dropout', '#4a3aa7', ['iv2_ep8_reg']),
 ]
+# round 3: resolution, caption space and teacher target (single runs, iv2 = 2 seeds)
+ROUND3_GROUPS = [
+    ('iv2 (default)', '#eda100', ['iv2', 'iv2_seed2']),
+    ('512 steps', '#2a78d6', ['iv2_len512']),
+    ('teacher text as caption space', '#eb6834', ['txt_omni']),
+    ('T+V+A teacher target', '#e87ba4', ['teach_tva']),
+]
 SHORT = {'Original model': 'Original', 'Improved, no teacher': 'No teacher',
          'Improved + OmniRetriever teacher': 'Teacher', 'InternVideo2 + teacher': 'InternVideo2',
          'ONE-PEACE': 'ONE-PEACE', 'InternVideo2 v768': 'IV2', 'InternVideo2 v768 + v512': 'IV2 +v512',
          'InternVideo2 + ONE-PEACE': 'IV2 +OP', 'iv2 (default)': 'iv2', 'no teacher': 'no teacher',
          'dropout 0.1, drop-path 0.2': 'dropout', 'emb / span loss 0.4': 'emb 0.4', '8 epochs': '8 ep',
-         '8 epochs + dropout': '8 ep +drop'}
+         '8 epochs + dropout': '8 ep +drop', '512 steps': '512 steps',
+         'teacher text as caption space': 'omni text', 'T+V+A teacher target': 'T+V+A'}
 HEAD_TO_KEY = {'event': 'ev_loss', 'reg': 'reg_loss', 'iou': 'iou_loss', 'embed': 'emb_loss',
                'span': 'span_loss', 'o_txt': 'omni_txt_loss', 'o_av': 'omni_av_loss', 'total': 'final_loss'}
 
@@ -117,8 +126,11 @@ def series(hist, runs, key):
     out = []
     for r in runs:
         rows = hist.get(r) or []
-        xs = [row['epoch'] for row in rows if key in row]
-        ys = [row[key] for row in rows if key in row]
+        # cos_gt does not exist when captions live outside ONE-PEACE space (older records stored 0)
+        ok = [row for row in rows if key in row and not (key == 'cos_gt' and not row[key])
+              and row[key] == row[key]]
+        xs = [row['epoch'] for row in ok]
+        ys = [row[key] for row in ok]
         if xs:
             out.append((r, np.array(xs), np.array(ys)))
     return out
@@ -202,7 +214,8 @@ def main():
               ('ret_sim', 'ret_sim'), ('cos_gt', 'cos_gt'), ('CIDEr', 'CIDEr')]
     for prefix, groups, what in (('', GROUPS, ''),
                                  ('features_', FEATURE_GROUPS, ' - input features, same teacher, full data'),
-                                 ('variants_', VARIANT_GROUPS, ' - variants of the InternVideo2 model')):
+                                 ('variants_', VARIANT_GROUPS, ' - variants of the InternVideo2 model'),
+                                 ('round3_', ROUND3_GROUPS, ' - resolution, caption space, teacher target')):
         plot_curves(hist, curves, prefix + 'curves.png', 'Validation metrics per epoch' + what, groups)
         plot_curves(hist, [('ev_loss', 'event loss (train)'), ('reg_loss', 'boundary loss (train)'),
                            ('final_loss', 'total loss (train, not comparable across groups)')],

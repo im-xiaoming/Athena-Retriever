@@ -39,6 +39,11 @@ Lessons from each change and what to combine next. The results table is in
 | 8 epochs instead of 10 (`iv2_ep8`, `iv2_ep8_seed2`) | same as 10 within noise (R@0.5 52.9 vs 53.5, ret_sim 0.758 vs 0.756), 20% faster | optional |
 | 8 epochs + dropout (`iv2_ep8_reg`) | R@0.5 54.4, single run, inside iv2's seed range | no |
 
+| max_seq_len 512 with the 1 row/s features (`iv2_len512`) | segmentation same (R@0.5 53.0); captions best single run so far: ret_sim 0.761, CIDEr 91.1, METEOR 16.14 | promising, needs a second seed |
+| OmniRetriever text as the caption space instead of ONE-PEACE (`txt_omni`) | all within noise (ret_sim 0.756, CIDEr 87.8) | ONE-PEACE text can be dropped without loss |
+| Teacher target = clip audio+video + its caption, T+V+A (`teach_tva`) | captions up (ret_sim 0.760, CIDEr 92.2, METEOR 16.09), R@0.5 51.8 (-1.7) | promising for captions, single run |
+| Caption generator: GPT-2 with a segment prefix (`tools/capgen`, on the iv2 model) | val GT spans: CIDEr 97.6 vs 88.9 retrieval, METEOR 15.72 vs 15.13, BLEU-4 8.4 vs 7.0; predicted segments: CIDEr 95.1 vs 86.0 | yes, best captioning so far |
+
 Conclusion of the variants (2026-10-04 afternoon): the InternVideo2 model is on a plateau for
 these hyper-parameters; every change lands inside the seed noise. Further gains need a bigger
 change (see docs/HANDOFF.md, next steps).
