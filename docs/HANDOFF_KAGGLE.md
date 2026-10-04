@@ -105,7 +105,19 @@ Tách đoạn đã chững quanh 52–54 R@0.5. Phần chọn câu tăng nhẹ v
 | đoạn model đoán (2253) | chọn câu | 86.0 | 14.91 | 6.89 |
 | đoạn model đoán (2253) | **GPT-2 sinh câu** | **95.1** | **15.42** | **7.93** |
 
-Biến thể RAG (`--rag 5`: thêm 5 câu ứng viên) và ret_sim (đo bằng encoder ONE-PEACE text) đang chạy trên PC. Phiên PC sẽ push kết quả lên `exp-dense-capgen` khi xong.
+Đã xong trên PC:
+
+| Đoạn | Cách | CIDEr | METEOR | ret_sim |
+|---|---|---|---|---|
+| val GT | chọn câu (MBR) | 88.9 | 15.13 | **0.753** |
+| val GT | GPT-2 prefix | 97.6 | **15.72** | 0.727 |
+| val GT | GPT-2 + 5 câu ứng viên (`rag5`) | **99.0** | 15.61 | 0.731 |
+| đoạn model đoán | chọn câu (MBR) | 86.0 | 14.91 | **0.753** |
+| đoạn model đoán | GPT-2 prefix | **95.1** | **15.42** | 0.727 |
+| đoạn model đoán | GPT-2 + 5 câu ứng viên (`rag5`) | 91.2 | 15.16 | 0.730 |
+
+- **Sinh câu thắng về n-gram (CIDEr, METEOR), thua về ret_sim.** ret_sim thiên về chọn câu, vì câu được chọn trong đúng không gian ONE-PEACE mà ret_sim dùng để đo.
+- **RAG không hơn prefix** trên đoạn model đoán, mà lại chậm gấp 3. API giữ bản prefix.
 
 ## 5. Việc tiếp theo, theo thứ tự đề xuất
 

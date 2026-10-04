@@ -43,6 +43,8 @@ Lessons from each change and what to combine next. The results table is in
 | OmniRetriever text as the caption space instead of ONE-PEACE (`txt_omni`) | all within noise (ret_sim 0.756, CIDEr 87.8) | ONE-PEACE text can be dropped without loss |
 | Teacher target = clip audio+video + its caption, T+V+A (`teach_tva`) | captions up (ret_sim 0.760, CIDEr 92.2, METEOR 16.09), R@0.5 51.8 (-1.7) | promising for captions, single run |
 | Caption generator: GPT-2 with a segment prefix (`tools/capgen`, on the iv2 model) | val GT spans: CIDEr 97.6 vs 88.9 retrieval, METEOR 15.72 vs 15.13, BLEU-4 8.4 vs 7.0; predicted segments: CIDEr 95.1 vs 86.0 | yes, best captioning so far |
+| Generated vs retrieved, ret_sim (ONE-PEACE text cosine to GT, `score_retsim.py`) | generated 0.727 vs retrieval 0.753 on both GT and predicted segments. ret_sim favours retrieval: the pick is made in the same ONE-PEACE space the metric uses; CIDEr/METEOR do not depend on it. Lengths match (8.2 vs 8.4 words, GT 9.0); generation is more varied (1958 vs 1273 distinct captions on 2253 segments) | report both; generation wins on n-gram metrics only |
+| Caption generator with the 5 retrieved captions in the prompt (`rag5`, `--rag 5`) | GT spans CIDEr 99.0 (prefix 97.6), predicted segments 91.2 (prefix 95.1), ret_sim 0.730 (+0.003); train loss 0.96 vs prefix, overfits the candidates; 3x slower to train | no, API keeps the prefix generator |
 
 Conclusion of the variants (2026-10-04 afternoon): the InternVideo2 model is on a plateau for
 these hyper-parameters; every change lands inside the seed noise. Further gains need a bigger
