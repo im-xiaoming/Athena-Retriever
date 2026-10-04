@@ -35,7 +35,7 @@ class YouCook2CaptionDataset(Dataset):
         class_aware, trunc_thresh, crop_ratio, num_classes, file_prefix,
         file_ext, force_upsampling, multi_modal, omni_emb_file=None,
         feat_source='onepeace', iv2_folder='./data/youcookii/iv2_feats',
-        iv2_video_keys=('v768',), iv2_l2norm=True, require_iv2=False,
+        iv2_video_keys=('v768',), iv2_l2norm=True, require_iv2=False, caption_space='onepeace', iv2_rows_per_sec=1,
     ):
         self.sources = feat_source.split('+')
         assert set(self.sources) <= {'onepeace', 'iv2'}, 'unknown feat_source %s' % feat_source
@@ -43,6 +43,7 @@ class YouCook2CaptionDataset(Dataset):
         self.iv2_folder = iv2_folder
         self.iv2_video_keys = list(iv2_video_keys)
         self.iv2_l2norm = iv2_l2norm
+        self.iv2_rows_per_sec = iv2_rows_per_sec   # 2: tools/make_iv2_dense.py (iv2_folder: .../iv2_dense)
         # require_iv2 keeps only videos with InternVideo2 features, so ONE-PEACE runs can be
         # scored on exactly the same videos as InternVideo2 runs
         self.require_iv2 = require_iv2 or 'iv2' in self.sources
@@ -79,6 +80,15 @@ class YouCook2CaptionDataset(Dataset):
         self.omni = bool(omni_emb_file) and is_training   # only the train split needs the teacher
         if self.omni:
             self._load_omni(omni_emb_file)
+        # caption space the model is trained in and picks captions from. ONE-PEACE (pool_emb) stays
+        # the space of the metrics (ret_sim, consensus pick) whatever is chosen here.
+        assert caption_space in ('onepeace', 'omni'), caption_space
+        self.caption_space = caption_space
+        if caption_space == 'omni' and is_training:
+            assert self.omni and self.omni_text_ok.all(), 'caption_space omni needs teacher text for every caption'
+            self.pool_train = self.omni_text_pool.astype(np.float32)
+        else:
+            self.pool_train = self.pool_emb
         self.db_attributes = {
             'dataset_name': 'YouCook2 caption grounding',
             'tiou_thresholds': np.array([0.3, 0.5, 0.7]),
@@ -130,7 +140,7 @@ class YouCook2CaptionDataset(Dataset):
         self.omni_dim = z[z.files[0]].shape[0]
         txt = np.zeros((len(self.pool_text), self.omni_dim), dtype=np.float16)
         self.omni_text_ok = np.zeros(len(self.pool_text), dtype=bool)
-        av, self.cap_av_idx = [], {}
+        av, self.cap_av_idx, self.av_text_idx = [], {}, []
         for it in self.data_list:
             for i in range(it['n_cap']):
                 k = '%s#%d' % (it['id'], i)
@@ -139,6 +149,7 @@ class YouCook2CaptionDataset(Dataset):
                     txt[j] = z[k + '__text']; self.omni_text_ok[j] = True
                 if k + '__av' in have:
                     self.cap_av_idx[k] = len(av); av.append(z[k + '__av'])
+                    self.av_text_idx.append(j)   # caption of this clip, for a fused T+V+A target
         self.omni_text_pool = txt
         self.omni_av_pool = (np.stack(av) if av else
                              np.zeros((0, self.omni_dim), dtype=np.float16))
@@ -195,7 +206,7 @@ class YouCook2CaptionDataset(Dataset):
             fa = np.load(pre + '_one_peace_audio' + self.file_ext).astype(np.float32)
             stride, window = self.feat_stride, self.num_frames
         else:
-            # row i is centred on i + 0.5 s, so the grid matches stride = window = 1 s
+            # row i is centred on i / rows_per_sec + 0.5 s: stride 1 / rows_per_sec s, window 1 s
             z = np.load(os.path.join(self.iv2_folder, vid + '.npz'))
             parts = [z[k].astype(np.float32) for k in self.iv2_video_keys]
             fa = z['a768'].astype(np.float32)
@@ -203,7 +214,7 @@ class YouCook2CaptionDataset(Dataset):
                 parts = [p / np.maximum(np.linalg.norm(p, axis=1, keepdims=True), 1e-6) for p in parts]
                 fa = fa / np.maximum(np.linalg.norm(fa, axis=1, keepdims=True), 1e-6)
             fv = np.concatenate(parts, axis=1)
-            stride = window = self.default_fps
+            stride, window = self.default_fps // self.iv2_rows_per_sec, self.default_fps
         n = min(fv.shape[0], fa.shape[0])
         return fv[:n], fa[:n], stride, window
 

@@ -17,6 +17,7 @@ run() {   # run <name> <note> <train_event.py arguments...>
   if grep -qs '"final_eval": {' "experiments/runs/$(hostname)-$name.json"; then
     say "$name already finished, skipped"; return
   fi
+  while pgrep -f "[t]rain_event.py" > /dev/null; do sleep 60; done   # one training at a time (RAM)
   say "start $name: $*"
   $PY train_event.py configs/youcook2_event.yaml --output "$name" --note "$note" "$@" > "logs/$name.log" 2>&1
   say "end   $name (exit $?): $(final "$name")"
@@ -43,6 +44,16 @@ run iv2_ep8 'iv2, 8 epochs instead of 10 (cosine ends before the overfitting)' \
 run iv2_ep8_seed2 'iv2_ep8, second seed' --epochs 8 --set "$TEACHER" "$IV2" init_rand_seed=2024
 run iv2_ep8_reg 'iv2, 8 epochs + dropout 0.1, drop-path 0.2' \
   --epochs 8 --set "$TEACHER" "$IV2" model.train_cfg.dropout=0.1 model.train_cfg.droppath=0.2
+
+# round 3: caption space without ONE-PEACE, teacher and loss changes from the OmniRetriever paper, capacity
+run txt_omni 'iv2, captions trained and picked in the OmniRetriever text space instead of ONE-PEACE' \
+  --set "$TEACHER" "$IV2" dataset.caption_space=omni
+run teach_tva 'iv2, teacher target = clip audio+video fused with its caption (T+V+A)' \
+  --set "$TEACHER" "$IV2" model.train_cfg.omni_target=tva
+run modal_aux 'iv2, fusion-as-teacher inside the model: video-only and audio-only segment vectors (weight 0.1)' \
+  --set "$TEACHER" "$IV2" model.train_cfg.loss_weight_modal=0.1
+run wide 'iv2, embedding and head width 768 instead of 512 (299M parameters)' \
+  --set "$TEACHER" "$IV2" model.embd_dim=768 model.head_dim=768
 
 $PY tools/summarize_runs.py >> "$Q" 2>&1
 say "QUEUE_DONE"

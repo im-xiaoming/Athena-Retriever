@@ -128,7 +128,10 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     from pycocoevalcap.cider.cider import Cider
     model.eval()
     pool_f = F.normalize(model.embed_head.clip_proj(pool_raw), dim=-1)
-    pool_n = F.normalize(pool_raw, dim=-1)
+    # metrics and the consensus pick always use ONE-PEACE vectors, whatever space the model is trained in
+    pool_n = F.normalize(getattr(model, 'pool_metric', None) if getattr(model, 'pool_metric', None) is not None
+                         else pool_raw, dim=-1)
+    same_space = pool_raw.shape[1] == model.embed_head.clip_proj.in_features and getattr(model, 'pool_metric', None) is None
     scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
     omni = model.omni_dim > 0
     if omni:
@@ -152,7 +155,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
             emb_pt = r['embeds_pt'][:k].to(device).float()
             n_pred += k
             cap_raw = x['cap_emb'].to(device).float()
-            cap_proj = F.normalize(model.embed_head.clip_proj(cap_raw), dim=-1)
+            cap_proj = F.normalize(model.embed_head.clip_proj(cap_raw), dim=-1) if same_space else None
             cap_n = F.normalize(cap_raw, dim=-1)
             if full:
                 # caption the GT spans themselves: measures captioning alone
@@ -175,7 +178,8 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
                 if best < 0.3:
                     continue
                 q = F.normalize(emb[j], dim=-1)
-                cos_gt.append(float(q @ cap_proj[gi]))
+                if cap_proj is not None:   # GT caption vectors exist only in ONE-PEACE space
+                    cos_gt.append(float(q @ cap_proj[gi]))
                 ridx = int(torch.randint(len(pool_f), (1,), generator=g))
                 cos_rand.append(float(q @ pool_f[ridx]))
                 key = len(gts_txt); gts_txt[key] = [texts[gi]]
@@ -402,6 +406,7 @@ def main(a):
     if ds.omni:
         cfg['model']['omni_dim'] = ds.omni_dim
         use_omni_columns()
+    cfg['model']['clip_dim'] = ds.pool_train.shape[1]   # caption space (dataset.caption_space)
     model = make_multimodal_meta_arch('EventCaptionTransformer', **cfg['model'])
     if a.pretrain:
         load_pretrain(model, a.pretrain)
@@ -409,12 +414,17 @@ def main(a):
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
     # the caption pool comes from the TRAIN split only; val captions are never used
-    pool_raw = torch.from_numpy(ds.pool_emb).to(dev)
+    pool_raw = torch.from_numpy(ds.pool_train).to(dev)
     model.set_caption_pool(pool_raw)
+    if ds.caption_space != 'onepeace':
+        model.pool_metric = torch.from_numpy(ds.pool_emb).to(dev)
+        print('Captions     : trained and picked in %s space (%d-d); metrics in ONE-PEACE space'
+              % (ds.caption_space, pool_raw.shape[1]), flush=True)
     if ds.omni:
         model.set_omni_pool(torch.from_numpy(ds.omni_text_pool).to(dev),
                             torch.from_numpy(ds.omni_text_ok).to(dev),
-                            torch.from_numpy(ds.omni_av_pool).to(dev))
+                            torch.from_numpy(ds.omni_av_pool).to(dev),
+                            torch.as_tensor(ds.av_text_idx, dtype=torch.long, device=dev))
     print('Caption pool : %d unique train captions' % len(ds.pool_text), flush=True)
     if a.eval:
         return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text)

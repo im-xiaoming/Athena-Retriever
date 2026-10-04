@@ -22,6 +22,14 @@ idea of the OmniRetriever paper: the segment vector is projected into its
   - pulled toward the frozen audio+video vector the 7B model gives the GT clip
   - contrasted with the caption pool in that space, with the same soft targets
 At inference the scores of both spaces are added.
+
+Options (train_cfg), all off by default:
+  omni_target: 'tva'      the teacher target of a clip is its audio+video vector fused with the
+                          vector of its caption (T+V+A), instead of audio+video alone
+  loss_weight_modal: w    fusion-as-teacher inside the model (OmniRetriever's L_D): a segment
+                          vector from the video stream alone and one from the audio stream alone
+                          are each pulled toward the fused segment vector (stop-gradient) and
+                          toward the right caption of the pool
 """
 import numpy as np
 import torch
@@ -183,6 +191,8 @@ class EventCaptionTransformer(nn.Module):
         self.iou_power = test_cfg.get('iou_power', 0.5)
         self.w_omni_txt = train_cfg.get('loss_weight_omni_txt', 0.2)
         self.w_omni_av = train_cfg.get('loss_weight_omni_av', 0.2)
+        self.omni_target = train_cfg.get('omni_target', 'av')
+        self.w_modal = train_cfg.get('loss_weight_modal', 0.0)
         self.pool_raw = None
         self.omni_dim = omni_dim
 
@@ -201,6 +211,8 @@ class EventCaptionTransformer(nn.Module):
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, clip_dim)
         self.seg_ctx = SegmentContext(head_dim)
+        if self.w_modal > 0:   # single-stream students, training only
+            self.modal_proj = nn.ModuleDict({m: nn.Linear(embd_dim, head_dim) for m in ('v', 'a')})
         if omni_dim > 0:
             self.omni_proj = nn.Sequential(nn.Linear(head_dim, head_dim * 2), nn.GELU(),
                                            nn.Linear(head_dim * 2, omni_dim))
@@ -211,12 +223,15 @@ class EventCaptionTransformer(nn.Module):
         self.pool_raw = pool_raw
         self.pool_n = F.normalize(pool_raw, dim=-1)
 
-    def set_omni_pool(self, text_pool, text_ok, av_pool):
+    def set_omni_pool(self, text_pool, text_ok, av_pool, av_text_idx=None):
         """Teacher pools: caption vectors (N, d) aligned with the caption pool, and the
-        audio+video vector of every GT clip (K, d)."""
+        audio+video vector of every GT clip (K, d); av_text_idx (K,) is each clip's caption."""
         self.omni_text = F.normalize(text_pool.float(), dim=-1)
         self.omni_text_ok = text_ok
         self.omni_av = F.normalize(av_pool.float(), dim=-1)
+        if self.omni_target == 'tva':
+            assert av_text_idx is not None
+            self.omni_av = F.normalize(self.omni_av + self.omni_text[av_text_idx], dim=-1)
 
     def omni_embed(self, q):
         return F.normalize(self.omni_proj(q), dim=-1)
@@ -243,6 +258,7 @@ class EventCaptionTransformer(nn.Module):
     def forward(self, video_list):
         V, A, masks = self.preprocessing(video_list)
         fV, fA, msk = self.backbone(V, A, masks, 'TASK1', 'TAL')
+        self._streams0 = (fV[0], fA[0])   # level-0 streams, for the single-stream students
         feats = [torch.cat((v, a), 1) for v, a in zip(fV, fA)]
         ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)   # (B, P)
         bd, qu = self.bound_head(feats, msk)
@@ -318,7 +334,7 @@ class EventCaptionTransformer(nn.Module):
             em_loss = self.pool_loss(em[bi, pi], gt, pool_f)
         # 4. span embedding: mean over the GT span, plus a jittered copy so the model
         #    copes with predicted boundaries that are slightly off at inference
-        qs, gs, avs = [], [], []
+        qs, gs, avs, zs = [], [], [], {'v': [], 'a': []}
         for b, x in enumerate(video_list):
             seg = x['segments'].to(dev).float()
             if seg.numel() == 0:
@@ -328,6 +344,9 @@ class EventCaptionTransformer(nn.Module):
             j = self.span_jitter * w[:, None] * (2 * torch.rand_like(seg) - 1)
             for sg in (seg, seg + j):
                 qs.append(self.seg_ctx(raw0[b], L, sg))
+                if self.w_modal > 0:
+                    for m, f in zip(('v', 'a'), self._streams0):
+                        zs[m].append(F.normalize(self.modal_proj[m](span_mean(f[b], L, sg)), dim=-1))
                 gs.append(cap_pool[b, x['labels'].to(dev)])
                 if self.omni_dim > 0:
                     avs.append(x['cap_av_idx'].to(dev)[x['labels'].to(dev)])
@@ -341,6 +360,17 @@ class EventCaptionTransformer(nn.Module):
         out['span_loss'] = span_loss
         total = (ev_loss + self.w_reg * rg_loss + self.w_iou * iou_loss
                  + self.w_emb * em_loss + self.w_span * span_loss)
+        # fusion-as-teacher inside the model: each stream alone toward the fused vector and the caption
+        if self.w_modal > 0 and len(gs):
+            teacher = qs.detach()
+            scale = self.embed_head.logit_scale.exp().clamp(max=100)
+            ml = 0
+            for m in ('v', 'a'):
+                z = torch.cat(zs[m])
+                ml = ml + F.cross_entropy(scale * z @ teacher.t(), torch.arange(len(z), device=dev))
+                ml = ml + self.pool_loss(z, gs, pool_f)
+            out['modal_loss'] = ml / 2
+            total = total + self.w_modal * out['modal_loss']
         # 5. OmniRetriever teacher: captions in its space, and the GT clip as target
         if self.omni_dim > 0:
             zero = 0 * raw0.sum()
