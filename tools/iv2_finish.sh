@@ -124,7 +124,7 @@ timeout 60 $C sessions >> "$LOG" 2>&1
 # ---- 4. local copy ------------------------------------------------------------------------
 mkdir -p "$DEST/_tar"
 if [ $hf_ok -eq 0 ]; then
-  TOK=$(sed -n 3p "$ROOT/.env" | tr -d '\r\n ')
+  TOK=$(sed -n 's/^HF_TOKEN=//p' "$ROOT/.env" | tr -d '\r\n ')
   say "downloading the shards from HF"
   curl -sfL --retry 5 -H "Authorization: Bearer $TOK" "$HF/manifest.json" -o "$DEST/_tar/manifest.json"
   for f in $(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['shards']))" "$DEST/_tar/manifest.json"); do
