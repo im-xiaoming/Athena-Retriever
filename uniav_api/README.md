@@ -83,6 +83,7 @@ The last five were picked among the better videos (median F1 over the validation
 | Model parity, val set, k = #GT (`python -m uniav_api.calibrate`) | R@0.5 54.27 (training eval 54.27), fp16 checkpoint |
 | Event selection at min_score 0.36, val set | F1@IoU0.5 0.534, 8.4 events per video |
 | numpy soft-NMS vs the C++ extension, 200 random cases | identical |
+| `describe_video` encoder vs the Colab features, `6uHoTJSLoL8` (182 s) | cosine 1.00000 (mean and min) for v768, v512, a768; 42 s on an RTX 3060 including model loading, peak GPU 4.3 GB |
 
 `python -m uniav_api.demo` prints every sample next to its annotations and runs a few searches.
 

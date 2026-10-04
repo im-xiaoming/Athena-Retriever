@@ -89,7 +89,7 @@ Biểu đồ: `experiments/plots/variants_{curves,final,losses}.png`.
 
 Theo thứ tự nên làm:
 
-1. **Kiểm tra encoder InternVideo2 của API** (`describe_video`) khi máy rảnh: so với `data/youcookii/iv2_feats/6uHoTJSLoL8.npz` (cosine từng dòng phải xấp xỉ 1). Đây là việc duy nhất của API chưa được kiểm tra.
+1. ~~Kiểm tra encoder InternVideo2 của API~~: **đã xong lúc 15:40**, cosine 1.00000 so với đặc trưng Colab; một video 182 giây mất 42 giây trên RTX 3060 (mục "Checks done" trong `uniav_api/README.md`).
 2. **Có thể áp dụng `iou_power 0.5`** cho API: sửa `test_cfg.iou_power` trong config của checkpoint export, chạy lại `python -m uniav_api.calibrate`, đặt lại `min_score`. Làm trên nhánh mới, không đụng `test`.
 3. **Muốn tiến thêm cần thay đổi lớn hơn siêu tham số:**
    - **Phần chọn câu:** "trần" hiện tại là chọn câu trong kho với đoạn GT (ret_sim oracle khoảng 0.753). Cao hơn nữa cần sinh câu thay vì chọn: dùng InternVideo3-8B hoặc model ngôn ngữ để viết caption cho từng đoạn. Hoặc thêm vector text của InternVideo2 (đã căn chỉnh với v512) làm không gian chọn câu thứ hai.
@@ -104,4 +104,4 @@ Theo thứ tự nên làm:
 - **Hồ sơ lượt chạy bị đánh dấu `dirty`** nếu còn file đã theo dõi mà chưa commit, kể cả `experiments/RESULTS.md`. Commit trước khi khởi động hàng đợi.
 - **Hàng đợi:** `tools/run_queue_iv2.sh` (so sánh đặc trưng) và `tools/run_queue_variants.sh` (biến thể). Cả hai bỏ qua các lượt đã có `final_eval`, nên chạy lại an toàn.
 - **Colab:** nhớ tắt phiên khi xong. Keepalive dừng bằng `touch logs/keepalive.stop`.
-- **Encoder InternVideo2 cho `describe_video`** (`uniav_api/encoders/internvideo2.py`) chưa được so với đặc trưng trích trên Colab. Lần thử dừng giữa chừng vì OOM. Trọng số đã có ở `ckpt/internvideo2/`, `timm` và `torchaudio` đã cài vào `uniav-api-env`. Cần chạy so sánh khi máy rảnh.
+- **Encoder InternVideo2 cho `describe_video`** đã được kiểm tra trên máy, khớp tuyệt đối với đặc trưng Colab. Trọng số ở `ckpt/internvideo2/`, repo upstream ở `InternVideo/`. Nhớ chạy khi không có lượt train nào (đỉnh RAM khoảng 7 GB).
