@@ -90,6 +90,8 @@ model:
     cls_prior_prob: 0.01
     init_loss_norm: 400
     loss_weight_span: 0.2
+    # ground head: a sentence finds its own span (video + text queries); 0 = no head
+    loss_weight_ground: 1.0
     dropout: 0.0
     droppath: 0.1
   test_cfg:

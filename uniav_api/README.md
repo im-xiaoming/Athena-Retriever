@@ -28,6 +28,24 @@ uv.describe_features(v768, a768, duration)     # your own stored features (one r
 uv.load(caption_mode='generate')               # captions written by GPT-2 instead of picked (see below)
 ```
 
+## Three kinds of input (`uv.query`)
+
+| Input | Call | Returns |
+|---|---|---|
+| a video | `uv.query(video='cooking.mp4')` (a file, a sample id or a stored id) | every step of the video with a caption, as `describe_video` |
+| a video and a sentence | `uv.query(video='cooking.mp4', text='cut the onion')` = `uv.ground(...)` | where in that video the sentence happens: `matches` [{start, end, score, caption}], best first |
+| a sentence | `uv.query(text='cut the onion')` = `uv.search(...)` | where it happens across every stored video: `hits` [{video_id, start, end, score, caption}] |
+
+A sentence goes through InternVideo2's text tower and the model's **ground head**
+(`loss_weight_ground` in training): the model reads the whole video again with the sentence as a
+condition, so the answer does not have to be one of the steps found without it. `score` is the
+model's probability that the segment is the event the sentence describes; `caption` is what the
+model itself would call that segment. A sentence alone first ranks the stored videos by their event
+vectors, then is grounded in the best 20 (`rerank`); every processed video keeps its features
+(`index/<model>/<id>.npz`, fp16) for that. A checkpoint without a ground head (trained before
+2026-10-05) answers both by ranking the stored events by cosine (`method: event cosine`).
+A video file given with a sentence right after it was described is not encoded again.
+
 Each event holds `start`, `end` (seconds), `score`, `caption`, `similarity`, `consensus`,
 `alternatives` (3 other candidate captions) and `embedding` (numpy, 512). Results are kept in
 `uniav_api/index/<model>/<video_id>.json` so `search()` covers earlier videos.

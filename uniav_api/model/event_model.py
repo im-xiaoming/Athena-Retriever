@@ -7,6 +7,8 @@ OmniRetriever projection is kept only so teacher-trained checkpoints load strict
 Input : visual and audio features (C, T) already resampled to the grid (see pipeline.py).
 Output: candidate segments in grid units, their scores, and one L2-normalised vector per
         segment in the caption space (the space captions are projected into by clip_proj).
+        With a ground head (checkpoints trained with loss_weight_ground > 0), ground() then finds
+        the segments of the same video that a sentence describes.
 """
 import numpy as np
 import torch
@@ -118,13 +120,41 @@ class BoundaryHead(nn.Module):
         return res, qual
 
 
+class GroundHead(nn.Module):
+    """Sentence-conditioned event head (see libs/modeling/event_archs.py:GroundHead)."""
+
+    def __init__(self, in_dim, feat_dim, text_dim, n_layers=3, ks=3, with_ln=True):
+        super().__init__()
+        self.act = nn.ReLU()
+        self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
+        self.film = nn.Linear(text_dim, 2 * feat_dim)
+        self.out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
+        self.cos_scale = nn.Parameter(torch.tensor(5.0))
+
+    def forward(self, fpn_feats, fpn_masks, query, query_e, em):
+        """One video (batch of 1), Q queries -> logits (Q, P)."""
+        gamma, beta = self.film(query).chunk(2, dim=-1)
+        Q, res = len(query), []
+        for x, m in zip(fpn_feats, fpn_masks):
+            x, _ = self.head[0](x, m)
+            x = self.act(self.norm[0](x)).expand(Q, -1, -1)
+            m = m.expand(Q, -1, -1)
+            x = x * (1 + gamma[:, :, None]) + beta[:, :, None]
+            for i in range(1, len(self.head)):
+                x, _ = self.head[i](x, m)
+                x = self.act(self.norm[i](x))
+            o, _ = self.out(x, m)
+            res.append(o.squeeze(1))
+        return torch.cat(res, dim=1) + self.cos_scale * (query_e @ em.t())
+
+
 class EventCaptionModel(nn.Module):
     """Segment events and give each one a caption-space vector."""
 
     def __init__(self, backbone_arch, scale_factor, input_dim_V, input_dim_A, n_head, embd_kernel_size,
                  embd_dim, embd_with_ln, head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, max_seq_len, test_cfg, train_cfg=None, clip_dim=1536, omni_dim=0,
-                 **unused):
+                 ground=None, **unused):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)]
         self.max_seq_len = max_seq_len
@@ -147,6 +177,10 @@ class EventCaptionModel(nn.Module):
                                        head_kernel_size, head_with_ln)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size, head_with_ln, clip_dim)
         self.seg_ctx = SegmentContext(head_dim)
+        if ground is None:
+            ground = (train_cfg or {}).get('loss_weight_ground', 0) > 0
+        self.ground_head = GroundHead(D, head_dim, clip_dim, head_num_layers, head_kernel_size,
+                                      head_with_ln) if ground else None
         if omni_dim > 0:   # only so teacher-trained checkpoints load; unused at inference
             self.omni_proj = nn.Sequential(nn.Linear(head_dim, head_dim * 2), nn.GELU(),
                                            nn.Linear(head_dim * 2, omni_dim))
@@ -175,24 +209,56 @@ class EventCaptionModel(nn.Module):
         valid = torch.cat([m.squeeze(1) for m in msk], dim=1)[0]
         len0 = int(msk[0].squeeze(1).sum())
 
-        a = self.iou_power
-        prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
         pts = torch.cat(self.points(self.fpn_strides, T), dim=0).to(dev)
-        keep = (prob > self.score_thresh).nonzero(as_tuple=True)[0]
+        self.last_level0 = (raw0[0], len0)   # for span_tokens (caption generator) and ground()
+        self._last = dict(feats=feats, msk=msk, em=em, bd=bd, qu=qu, valid=valid, pts=pts)
+        segs_np, sc_np = self._decode(ev)
+        segs = torch.from_numpy(segs_np).to(dev)
+        vecs = self.seg_ctx(raw0[0], len0, segs) if len(segs) else torch.zeros(0, raw0.shape[1], device=dev)
+        return segs_np, sc_np, vecs
+
+    def _decode(self, logit, max_seg=None, score_thresh=None):
+        """Step logits (P,) of the last forward pass -> segments (grid units) and scores after soft-NMS.
+        A step's score is its probability times the boundary head's IoU quality (iou_power)."""
+        L = self._last
+        a = self.iou_power
+        prob = logit.sigmoid().pow(1 - a) * L['qu'].sigmoid().pow(a) * L['valid'].float()
+        max_seg = max_seg or self.max_seg
+        pts, bd = L['pts'], L['bd']
+        thresh = self.score_thresh if score_thresh is None else score_thresh
+        keep = (prob > thresh).nonzero(as_tuple=True)[0]
         if keep.numel() == 0:
             keep = prob.topk(1).indices
-        sc, order = prob[keep].topk(min(self.max_seg * 5, keep.numel()))
+        sc, order = prob[keep].topk(min(max_seg * 5, keep.numel()))
         keep = keep[order]
         p, o = pts[keep], bd[keep]
         segs = torch.stack((p[:, 0] - o[:, 0] * p[:, 3], p[:, 0] + o[:, 1] * p[:, 3]), -1)
         ok = (segs[:, 1] - segs[:, 0]) > self.duration_thresh
-        segs, sc = segs[ok], sc[ok]
+        if ok.any():   # never drop every candidate: the best one stays even if very short
+            segs, sc = segs[ok], sc[ok]
+        else:
+            segs, sc = segs[:1], sc[:1]
         segs_np, sc_np, _ = soft_nms(segs.float().cpu().numpy(), sc.float().cpu().numpy(),
-                                     sigma=self.nms_sigma, min_score=0.001, max_num=self.max_seg)
-        segs = torch.from_numpy(segs_np).to(dev)
-        vecs = self.seg_ctx(raw0[0], len0, segs) if len(segs) else torch.zeros(0, raw0.shape[1], device=dev)
-        self.last_level0 = (raw0[0], len0)   # for span_tokens (caption generator)
-        return segs_np, sc_np, vecs
+                                     sigma=self.nms_sigma, min_score=0.001, max_num=max_seg)
+        return segs_np, sc_np
+
+    @torch.no_grad()
+    def ground(self, query, top_k=5):
+        """Sentences (Q, clip_dim raw InternVideo2 caption vectors) -> for each, up to top_k segments of
+        the video of the last forward pass: [(segments (k, 2) grid units, scores (k,), vectors (k, D))].
+        A score is the probability that the segment is the event the sentence describes."""
+        assert self.ground_head is not None, 'this checkpoint has no ground head'
+        L = self._last
+        q = query.float()
+        logits = self.ground_head(L['feats'], L['msk'], q, self.embed_head.embed_captions(q), L['em'])
+        raw0, len0 = self.last_level0
+        out = []
+        for lg in logits:
+            segs_np, sc_np = self._decode(lg, top_k, score_thresh=0.0)   # always the top_k, with their scores
+            segs = torch.from_numpy(segs_np).to(raw0.device)
+            vecs = self.seg_ctx(raw0, len0, segs) if len(segs) else torch.zeros(0, raw0.shape[0], device=raw0.device)
+            out.append((segs_np, sc_np, vecs))
+        return out
 
     @torch.no_grad()
     def span_tokens(self, segs, k=8):

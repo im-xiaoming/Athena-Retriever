@@ -1,10 +1,21 @@
-"""Video -> events with captions and retrieval vectors, and text search over processed videos.
+"""The three production inputs: a video, a video and a sentence, or a sentence alone.
 
     from uniav_api.pipeline import UniAVPipeline
     pipe = UniAVPipeline()
+    pipe.query(video='cooking.mp4')                       # video: its events, each with a caption
+    pipe.query(video='cooking.mp4', text='cut the onion') # video + sentence: where it happens in that video
+    pipe.query(text='cut the onion')                      # sentence: where it happens in every stored video
+
     result = pipe.process('cooking.mp4')           # events: start, end, score, caption, embedding
     result = pipe.process_sample('6uHoTJSLoL8')    # the same from features shipped in uniav_api/samples
-    hits = pipe.search('cut the onion', top_k=5)   # events of processed videos matching a query
+    hits = pipe.ground('6uHoTJSLoL8', 'add soy sauce')    # segments of one video matching a sentence
+    hits = pipe.search('cut the onion', top_k=5)   # segments of processed videos matching a sentence
+
+A sentence goes through the ground head (a checkpoint trained with loss_weight_ground > 0): the
+model looks at the whole video again with the sentence as a condition, so the segment does not have
+to be one of the events found without it. search() ranks the stored videos by their event vectors
+first, then grounds the sentence in the best ones (their features are stored next to the index).
+A checkpoint without a ground head falls back to ranking the stored events by cosine.
 
 Event vectors and query vectors live in the same 512-d space (the space the model projects
 caption vectors into with clip_proj), so search is a cosine. The caption vectors come from the
@@ -83,7 +94,7 @@ class UniAVPipeline:
                              'tools/export_api_ckpt.py' % (self.cfg.checkpoint, self.caption_space))
         omni_dim = sd['omni_proj.2.weight'].shape[0] if 'omni_proj.2.weight' in sd else 0
         model_cfg = dict(mcfg['model'], input_dim_V=self.spec.dims[0], input_dim_A=self.spec.dims[1],
-                         omni_dim=omni_dim)
+                         omni_dim=omni_dim, ground=any(k.startswith('ground_head.') for k in sd))
         self.model = EventCaptionModel(**model_cfg)
         self.model.load_state_dict(sd, strict=True)
         self.model = self.model.to(self.device).eval()   # small (68M): fp32 everywhere
@@ -165,11 +176,12 @@ class UniAVPipeline:
         """Like process(), but from precomputed features."""
         t0 = time.time()
         events = self.process_features(visual, audio, duration)
+        self._feats, self._feats_src = (video_id, visual, audio, duration), None
         result = {'video_id': video_id, 'duration': round(float(duration), 2), 'has_audio': has_audio,
                   'num_events': len(events), 'timing': {'encode_s': 0.0, 'model_s': round(time.time() - t0, 2)},
                   'device': str(self.device), 'model': self.run, 'events': events}
         if store:
-            self._store(result)
+            self._store(result, visual, audio)
         return result
 
     def samples(self):
@@ -183,10 +195,14 @@ class UniAVPipeline:
         visual, audio = self.spec.from_npz(z)
         return self.process_stored(visual, audio, float(z['duration']), video_id, store=store)
 
-    def _store(self, result):
-        self.index[result['video_id']] = to_json(result)
-        with open(os.path.join(self.index_dir, result['video_id'] + '.json'), 'w') as f:
-            json.dump(self.index[result['video_id']], f)
+    def _store(self, result, visual, audio):
+        """Keep the result for search(), and the features (fp16) so a sentence can be grounded later."""
+        vid = result['video_id']
+        self.index[vid] = to_json(result)
+        with open(os.path.join(self.index_dir, vid + '.json'), 'w') as f:
+            json.dump(self.index[vid], f)
+        np.savez(os.path.join(self.index_dir, vid + '.npz'), visual=np.asarray(visual, np.float16),
+                 audio=np.asarray(audio, np.float16), duration=float(result['duration']))
 
     def process(self, path, video_id=None, store=True):
         t0 = time.time()
@@ -194,12 +210,15 @@ class UniAVPipeline:
         feats = self._cached_features(path, video_id)
         t1 = time.time()
         events = self.process_features(feats['visual'], feats['audio'], feats['duration'])
+        st = os.stat(path)   # which file these features are from, for ground() on the same file
+        self._feats, self._feats_src = (video_id, feats['visual'], feats['audio'], feats['duration']), \
+            (os.path.abspath(path), st.st_size, st.st_mtime)
         result = {'video_id': video_id, 'duration': round(float(feats['duration']), 2),
                   'has_audio': bool(feats['has_audio']), 'num_events': len(events),
                   'timing': {'encode_s': round(t1 - t0, 1), 'model_s': round(time.time() - t1, 2)},
                   'device': str(self.device), 'model': self.run, 'events': events}
         if store:
-            self._store(result)
+            self._store(result, feats['visual'], feats['audio'])
         return result
 
     def _cached_features(self, path, video_id):
@@ -237,7 +256,84 @@ class UniAVPipeline:
             self._pool_query = PoolQuery(self.captioner)
         return self._pool_query(text)
 
-    def search(self, query, top_k=10, video_ids=None):
+    @property
+    def can_ground(self):
+        return self.model.ground_head is not None
+
+    def _video_features(self, video):
+        """A video given as a stored or sample id, or a file path -> (video_id, visual, audio, duration).
+        Unknown videos are processed (and stored) first."""
+        if os.path.isfile(video):
+            # a file: the features of the last call if it was this same file, else encode it (process()
+            # names it by its basename, which another file may share, so the index is not trusted here)
+            st = os.stat(video)
+            src = (os.path.abspath(video), st.st_size, st.st_mtime)
+            if getattr(self, '_feats_src', None) != src:
+                self.process(video)
+            return self._feats
+        if getattr(self, '_feats', None) is not None and self._feats[0] == video:
+            return self._feats
+        f = os.path.join(self.index_dir, '%s.npz' % video)
+        if os.path.exists(f):
+            z = np.load(f)
+            return video, z['visual'], z['audio'], float(z['duration'])
+        if video in self.samples():
+            self.process_sample(video)
+        else:
+            raise FileNotFoundError('%s is neither a stored video, a sample nor a file' % video)
+        return self._feats
+
+    @torch.no_grad()
+    def _ground_features(self, visual, audio, duration, q_raw, top_k):
+        """Features of one video, query vectors (Q, 512) -> per query a list of {start, end, score, ...}."""
+        fv, fa, n = self.spec.prepare(visual, audio)
+        self.model(fv.to(self.device), fa.to(self.device))
+        out = []
+        for segs, scores, vecs in self.model.ground(q_raw.to(self.device), top_k):
+            secs = self.spec.to_seconds(segs, n, duration)
+            caps = self.captioner.caption(vecs, alternatives=0) if len(segs) else []
+            out.append([dict(start=round(float(a), 2), end=round(float(b), 2), score=round(float(sc), 4),
+                             caption=c['caption']) for (a, b), sc, c in zip(secs, scores, caps)])
+        return out
+
+    def _query_raw(self, texts):
+        """Sentences -> raw InternVideo2 caption vectors (N, 512), the ground head's input."""
+        enc = self.text_encoder
+        if enc is None:
+            raise FileNotFoundError('grounding a sentence needs the InternVideo2 text tower (%s)'
+                                    % self.cfg.iv2_video_encoder)
+        return enc(texts).float()
+
+    def ground(self, video, text, top_k=3):
+        """A video (stored id, sample id or file) and a sentence (or a list of them) -> the segments of
+        that video the sentence describes, best first: {'video_id', 'query', 'matches': [{start, end,
+        score, caption}]}. score is the model's probability that the segment is that event; caption
+        is what the model itself would call the segment."""
+        texts = [text] if isinstance(text, str) else list(text)
+        vid, visual, audio, duration = self._video_features(video)
+        if not self.can_ground:   # older checkpoint: the video's own events, ranked by cosine
+            q = torch.stack([self.embed_query(t) for t in texts]).cpu().numpy()
+            ev = self.index[vid]['events'] if vid in self.index else self.process_stored(
+                visual, audio, duration, vid)['events']
+            res = []
+            for t, qv in zip(texts, q):
+                hits = sorted(({'start': e['start'], 'end': e['end'], 'caption': e['caption'],
+                                'score': round(float(np.dot(qv, np.asarray(e['embedding'], np.float32))), 4)}
+                               for e in ev), key=lambda h: -h['score'])[:top_k]
+                res.append({'video_id': vid, 'query': t, 'matches': hits, 'method': 'event cosine'})
+        else:
+            res = [{'video_id': vid, 'query': t, 'matches': m, 'method': 'ground head'}
+                   for t, m in zip(texts, self._ground_features(visual, audio, duration,
+                                                                self._query_raw(texts), top_k))]
+        return res[0] if isinstance(text, str) else res
+
+    def search(self, query, top_k=10, video_ids=None, rerank=20):
+        """A sentence alone -> the best-matching segments among stored videos:
+        [{video_id, start, end, caption, score}].
+
+        The stored event vectors rank the videos (fast, every video); with a ground head the sentence
+        is then grounded in the best `rerank` videos and their segments are ranked by its score.
+        """
         q = self.embed_query(query).cpu().numpy()
         hits = []
         for vid, r in self.index.items():
@@ -247,7 +343,43 @@ class UniAVPipeline:
                 hits.append({'video_id': vid, 'start': e['start'], 'end': e['end'], 'caption': e['caption'],
                              'score': round(float(np.dot(q, np.asarray(e['embedding'], np.float32))), 4)})
         hits.sort(key=lambda h: -h['score'])
-        return hits[:top_k]
+        if not self.can_ground or not hits:
+            return hits[:top_k]
+        q_raw = self._query_raw([query])
+        videos = list(dict.fromkeys(h['video_id'] for h in hits))[:rerank]
+        out = []
+        for vid in videos:
+            f = os.path.join(self.index_dir, vid + '.npz')
+            if not os.path.exists(f):   # stored before features were kept: keep its cosine hits
+                out += [dict(h, method='event cosine') for h in hits if h['video_id'] == vid][:top_k]
+                continue
+            z = np.load(f)
+            m = self._ground_features(z['visual'], z['audio'], float(z['duration']), q_raw, top_k)[0]
+            out += [dict(h, video_id=vid, method='ground head') for h in m]
+        out.sort(key=lambda h: -h['score'])
+        return out[:top_k]
+
+    def query(self, video=None, text=None, top_k=5):
+        """The single production entry point:
+          video only      -> process(): every event of the video with a caption
+          video and text  -> ground(): where in that video the sentence happens
+          text only       -> search(): where it happens across every stored video
+        """
+        if video is None and text is None:
+            raise ValueError('give a video, a sentence, or both')
+        if text is None:
+            if os.path.isfile(video):
+                return self.process(video)
+            if video in self.samples():
+                return self.process_sample(video)
+            vf = os.path.join(self.index_dir, '%s.npz' % video)
+            if os.path.exists(vf):
+                z = np.load(vf)
+                return self.process_stored(z['visual'], z['audio'], float(z['duration']), video)
+            raise FileNotFoundError('%s is neither a stored video, a sample nor a file' % video)
+        if video is None:
+            return {'query': text, 'hits': self.search(text, top_k=top_k)}
+        return self.ground(video, text, top_k=top_k)
 
 
 def to_json(result):

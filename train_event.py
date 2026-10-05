@@ -65,7 +65,11 @@ def load_ckpt(path):
 def load_weights(model, path):
     """Load a training checkpoint into the model (older layouts are upgraded); returns the checkpoint."""
     ck = load_ckpt(path)
-    model.load_state_dict(upgrade_state_dict(ck['state_dict']))
+    sd = upgrade_state_dict(ck['state_dict'])
+    if hasattr(model, 'ground_head') and not any(k.startswith('ground_head.') for k in sd):
+        raise SystemExit('%s has no ground head (trained before it existed): add '
+                         '--set model.train_cfg.loss_weight_ground=0' % path)
+    model.load_state_dict(sd)
     return ck
 
 
@@ -124,6 +128,8 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     txt_sim  : how close the chosen caption is to the GT caption, cosine in InternVideo2 text space
                (runs before 2026-10-05 stored ret_sim, the same in ONE-PEACE space: not comparable)
     CIDEr    : standard captioning metric, word overlap, independent of any encoder
+    G R1@t   : grounding (with the ground head): each GT caption is the query, its best segment
+               must overlap the caption's own span with IoU >= t; G mIoU is the mean IoU
     full     : also score variants (top-1, single-point vector, each embedding space
                separately when the OmniRetriever teacher is on, oracle GT spans)
     With the teacher, a caption's score is the sum of cosines in both spaces.
@@ -145,6 +151,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     ret = {v: [] for v in ('top1', 'mbr', 'pt_top1', 'mbr_student', 'mbr_omni', 'oracle')}
     gts_txt, hyp = {}, {v: {} for v in ret}
     gts_or, hyp_or = {}, {}
+    g_ious = []
     g = torch.Generator().manual_seed(0)
     for batch in loader:
         for x in batch:
@@ -152,6 +159,8 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
         res = model(batch)
         for r, x in zip(res, batch):
             gts, texts = r['gt_segments'], r['gt_text']
+            if r.get('ground_segments') is not None:
+                g_ious += [iou(p, gt) for p, gt in zip(r['ground_segments'].tolist(), gts)]
             k = min(len(gts), r['segments'].shape[0])
             preds = r['segments'][:k].tolist()
             emb = r['embeds'][:k].to(device).float()
@@ -211,6 +220,10 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     out['cos_rand'] = mean(cos_rand)
     out['txt_sim'] = mean(ret['mbr'])
     out['CIDEr'] = cider('mbr')
+    if g_ious:
+        for t in (0.5, 0.7):
+            out['G R1@%.1f' % t] = 100.0 * mean([i >= t for i in g_ious])
+        out['G mIoU'] = 100.0 * mean(g_ious)
     if full:
         for v in ('top1', 'pt_top1') + (('mbr_student', 'mbr_omni') if omni else ()):
             out['txt_sim[%s]' % v] = mean(ret[v])
@@ -250,6 +263,16 @@ def use_omni_columns():
     """Add the two OmniRetriever teacher losses to the table."""
     global HEAD, RULE
     GROUPS[0][1][5:5] = [('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f')]
+    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+    RULE = '-' * (len(HEAD) + 4)
+
+
+def use_ground_columns():
+    """Add the grounding loss and the grounding scores to the table."""
+    global HEAD, RULE
+    GROUPS[0][1][-1:-1] = [('ground', 'ground_loss', 6, '.3f')]
+    GROUPS.append(('grounding (val)', [('R1@.5', 'G R1@0.5', 6, '.2f'), ('R1@.7', 'G R1@0.7', 6, '.2f'),
+                                       ('mIoU', 'G mIoU', 6, '.2f')]))
     HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
     RULE = '-' * (len(HEAD) + 4)
 
@@ -376,6 +399,8 @@ def main(a):
         cfg['model']['omni_dim'] = ds.omni_dim
         use_omni_columns()
     cfg['model']['clip_dim'] = ds.pool_train.shape[1]   # caption space (dataset.caption_space)
+    if cfg['model']['train_cfg'].get('loss_weight_ground', 0) > 0:
+        use_ground_columns()
     model = EventCaptionTransformer(**cfg['model']).to(dev)
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 

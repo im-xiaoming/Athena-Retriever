@@ -48,3 +48,7 @@ Sau khi tải:
 
 - **Ghép expert TAL + AVEL của UniAV gốc:** expert AVEL trong model của mình chưa bao giờ được train. Checkpoint gốc từng làm kết quả kém hơn hai lần (R@0.5 −3.7, CIDEr −17). Dữ liệu AVEL (UnAV-100) là sự kiện âm thanh chung, xa domain nấu ăn.
 - **Đưa nhãn COIN vào kho câu khi suy luận:** model sẽ hay chọn câu ngắn, khái quát, làm CIDEr trên YouCook2 tụt.
+
+## Đầu vào production (2026-10-05, nhánh `multimodal-query`)
+
+Ba kiểu đầu vào: chỉ video, video + câu mô tả, chỉ câu mô tả (`uv.query`). Đã thêm **ground head** (câu điều khiển việc chấm điểm từng thời điểm, biên lấy từ boundary head, +2.9M tham số, `loss_weight_ground: 1.0`). Đã chạy thử pipeline trên PC, **chưa train**. Lần train tới cần xem thêm `G R1@0.5`, `G R1@0.7`, `G mIoU` bên cạnh R@0.5 và CIDEr, và kiểm tra ground head không làm tụt hai chỉ số kia. Với COIN: nhãn bước COIN cũng dùng làm câu truy vấn được.

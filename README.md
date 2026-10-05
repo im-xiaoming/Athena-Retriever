@@ -10,6 +10,10 @@ reduced to a single task:
 - **Captioning**: each event's vector (span mean + video context) is matched against the 8218 train
   captions in InternVideo2's own text space (the space of its v512 video projection) and a caption is
   picked by consensus; a GPT-2 generator writes captions instead (`tools/capgen/`).
+- **Grounding**: a ground head finds the span a sentence describes (FiLM-conditioned on the sentence's
+  InternVideo2 text vector, boundaries from the boundary head). Production takes a video, a video and
+  a sentence, or a sentence alone (`uniav_api`, `uv.query`). Val metric: `G R1@0.5` / `G R1@0.7`
+  (each GT caption must find its own span), `G mIoU`.
 - **Teacher**: OmniRetriever-7B embeddings of every GT clip and caption guide the event vectors
   during training (off at inference).
 
@@ -33,7 +37,7 @@ All runs, configs and lessons: `experiments/RESULTS.md`, `experiments/NOTES.md`.
 | `train_event.py` | training and evaluation; writes `experiments/runs/<host>-<run>.json` per run |
 | `configs/youcook2_event.yaml` | the config; every option can be overridden with `--set key=value` |
 | `libs/datasets/youcook2_cap.py` | dataset: features, caption pool, teacher vectors |
-| `libs/modeling/event_archs.py` | the model and its losses |
+| `libs/modeling/event_archs.py` | the model and its losses (event, boundary, embedding and ground heads) |
 | `libs/modeling/multimodal_backbones.py`, `blocks.py` | audio-visual ConvTransformer backbone |
 | `uniav_api/` | inference API (video or stored features -> events with captions, search); see its README |
 | `tools/` | feature extraction, caption vectors, teacher vectors, API export, plots, caption generator |

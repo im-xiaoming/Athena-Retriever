@@ -1,10 +1,17 @@
 """Event segmentation + captioning architecture, with no classification layer.
 
-Three outputs:
+Outputs:
   - event head     (B, T, 1) : is this time step inside an event
   - boundary head  (B, T, 2) : distances to the two boundaries of that event,
                                plus an IoU-quality score used for ranking
   - embedding head (B, T, D) : content vector in the same space as the captions
+  - ground head    (Q, T)    : given a sentence, is this time step inside the event the sentence
+                               describes (built when loss_weight_ground > 0). Its segments come
+                               from the boundary head too, so a query only changes which steps win.
+
+The three production inputs map onto these heads (uniav_api): a video alone -> events from the
+event head, each captioned; a video and a sentence -> segments from the ground head; a sentence
+alone -> the ground head over every stored video.
 
 Inference: segments come from the event and boundary heads. Each segment's vector is
 the mean embedding over its whole span (plus video context), compared by cosine with
@@ -156,6 +163,47 @@ class BoundaryHead(nn.Module):
         return res, qual
 
 
+class GroundHead(nn.Module):
+    """Query-conditioned event head: is this time step inside the event the sentence describes.
+
+    The query is a caption-space vector (InternVideo2 text, centred like the caption pool). It
+    modulates the features after the first conv layer (FiLM: a per-channel scale and shift, both
+    starting at zero), and the cosine between each step's embedding and the projected query is
+    added to the logit, so the head starts from what the embedding head already knows.
+    The first layer does not depend on the query, so it runs once per video, not once per query.
+    """
+
+    def __init__(self, in_dim, feat_dim, text_dim, n_layers=3, ks=3, with_ln=True, prior_prob=0.01):
+        super().__init__()
+        assert n_layers >= 2
+        self.act = nn.ReLU()
+        self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
+        self.film = nn.Linear(text_dim, 2 * feat_dim)
+        nn.init.zeros_(self.film.weight); nn.init.zeros_(self.film.bias)
+        self.out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
+        torch.nn.init.constant_(self.out.conv.bias, -np.log((1 - prior_prob) / prior_prob))
+        self.cos_scale = nn.Parameter(torch.tensor(5.0))
+
+    def forward(self, fpn_feats, fpn_masks, vid, query, query_e, em):
+        """vid (Q,) video of each query in the batch, query (Q, text_dim) caption-space vectors,
+        query_e (Q, D) the same projected into the event space, em (B, P, D) step embeddings.
+        Returns logits (Q, P) over the steps of every pyramid level."""
+        gamma, beta = self.film(query).chunk(2, dim=-1)                      # (Q, C)
+        res = []
+        for x, m in zip(fpn_feats, fpn_masks):
+            x, _ = self.head[0](x, m)
+            x = self.act(self.norm[0](x))[vid]                               # (Q, C, T)
+            m = m[vid]
+            x = x * (1 + gamma[:, :, None]) + beta[:, :, None]
+            for i in range(1, len(self.head)):
+                x, _ = self.head[i](x, m)
+                x = self.act(self.norm[i](x))
+            o, _ = self.out(x, m)
+            res.append(o.squeeze(1))                                         # (Q, T)
+        cos = (em[vid] * query_e[:, None]).sum(-1)                           # (Q, P)
+        return torch.cat(res, dim=1) + self.cos_scale * cos
+
+
 class EventCaptionTransformer(nn.Module):
     """Segment events, then caption them. No classification layer."""
 
@@ -192,6 +240,11 @@ class EventCaptionTransformer(nn.Module):
         self.w_omni_av = train_cfg.get('loss_weight_omni_av', 0.2)
         self.omni_target = train_cfg.get('omni_target', 'av')
         self.w_modal = train_cfg.get('loss_weight_modal', 0.0)
+        # grounding: every caption of a video is a query for its own span; captions of other videos
+        # in the batch (not close to any caption of this video) are queries with no span
+        self.w_ground = train_cfg.get('loss_weight_ground', 0.0)
+        self.ground_neg = train_cfg.get('ground_neg_per_video', 2)
+        self.ground_neg_max_cos = train_cfg.get('ground_neg_max_cos', 0.7)
         self.pool_raw = None
         self.omni_dim = omni_dim
 
@@ -209,6 +262,10 @@ class EventCaptionTransformer(nn.Module):
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, clip_dim)
         self.seg_ctx = SegmentContext(head_dim)
+        if self.w_ground > 0:
+            assert clip_dim == 512, 'the ground head takes InternVideo2 text queries (caption_space iv2)'
+            self.ground_head = GroundHead(D, head_dim, clip_dim, head_num_layers, head_kernel_size,
+                                          head_with_ln, train_cfg['cls_prior_prob'])
         if self.w_modal > 0:   # single-stream students, training only
             self.modal_proj = nn.ModuleDict({m: nn.Linear(embd_dim, head_dim) for m in ('v', 'a')})
         if omni_dim > 0:
@@ -266,6 +323,7 @@ class EventCaptionTransformer(nn.Module):
         em = torch.cat(em, dim=1)                                        # (B, P, D)
         len0 = msk[0].squeeze(1).sum(-1)                                 # (B,)
         fpn_masks = torch.cat([m.squeeze(1) for m in msk], dim=1)        # (B, P)
+        self._fpn = (feats, msk, em)                                     # for the ground head
         if self.training:
             return self.losses(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
         return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
@@ -385,8 +443,40 @@ class EventCaptionTransformer(nn.Module):
                     oa = F.cross_entropy(la, ai[ok])
             out['omni_txt_loss'], out['omni_av_loss'] = ot, oa
             total = total + self.w_omni_txt * ot + self.w_omni_av * oa
+        # 6. grounding: each caption finds its own span, other videos' captions find none
+        if self.w_ground > 0:
+            out['ground_loss'] = self.ground_loss(video_list, gt_cls, cap_pool, valid)
+            total = total + self.w_ground * out['ground_loss']
         out['final_loss'] = total
         return out
+
+    def ground(self, vid, query):
+        """Ground-head logits (Q, P) on the last forward pass; vid (Q,) batch index of each query,
+        query (Q, 512) InternVideo2 caption vectors."""
+        feats, msk, em = self._fpn
+        q = query.float()
+        return self.ground_head(feats, msk, vid, q, self.embed_head.embed_captions(q), em)
+
+    def ground_loss(self, video_list, gt_cls, cap_pool, valid):
+        dev = gt_cls.device
+        vid, qi, tgt = [], [], []
+        B = len(video_list)
+        own = [cap_pool[b][cap_pool[b] >= 0] for b in range(B)]          # pool ids of each video's captions
+        for b, x in enumerate(video_list):
+            for j in x['labels'].unique().tolist():                       # captions still in the (cropped) clip
+                vid.append(b); qi.append(int(cap_pool[b, j])); tgt.append(gt_cls[b, :, j])
+            if B < 2 or self.ground_neg == 0:
+                continue
+            others = torch.cat([own[c] for c in range(B) if c != b])
+            sim = (self.pool_n[others] @ self.pool_n[own[b]].t()).max(-1).values
+            cand = others[sim < self.ground_neg_max_cos]
+            for k in torch.randperm(len(cand), device=dev)[:self.ground_neg].tolist():
+                vid.append(b); qi.append(int(cand[k])); tgt.append(torch.zeros_like(gt_cls[b, :, 0]))
+        vid = torch.as_tensor(vid, device=dev)
+        logit = self.ground(vid, self.pool_raw[torch.as_tensor(qi, device=dev)])
+        tgt = torch.stack(tgt).clamp(max=1)
+        ok = valid[vid]
+        return sigmoid_focal_loss(logit[ok], tgt[ok], reduction='sum') / tgt[ok].sum().clamp(min=1)
 
     @torch.no_grad()
     def inference(self, video_list, valid, ev, bd, qu, em, raw0, len0):
@@ -429,14 +519,24 @@ class EventCaptionTransformer(nn.Module):
                 span = emb.to(raw0.device)
             omni = self.omni_embed(span).cpu() if self.omni_dim > 0 else None
             span = span.cpu()
+            st, nf, fps = v['feat_stride'], v['feat_num_frames'], v['fps']
             # vectors of the GT spans themselves, to score captioning apart from segmentation
             gseg = v['segments'].to(raw0.device).float()
             gemb = self.seg_ctx(raw0[b], int(len0[b]), gseg)
             gomni = self.omni_embed(gemb).cpu() if self.omni_dim > 0 else None
-            st, nf, fps = v['feat_stride'], v['feat_num_frames'], v['fps']
             segs = (segs * st + 0.5 * nf) / fps
             segs = segs.clamp(min=0.0, max=float(v['duration']))
-            out.append({'video_id': v['video_id'], 'segments': segs,
+            gr = None
+            if self.w_ground > 0:   # each GT caption as a query: its best segment, in seconds
+                n = len(v['segments_sec'])
+                gl = self.ground(torch.full((n,), b, device=ev.device), v['cap_emb'][:n].to(ev.device))
+                gp = gl.sigmoid().pow(1 - a) * qu[b][None].sigmoid().pow(a) * valid[b][None].float()
+                best = gp.argmax(-1)
+                gpt = torch.cat(v['points'], dim=0).to(ev.device)[best]
+                go = bd[b][best]
+                gr = torch.stack((gpt[:, 0] - go[:, 0] * gpt[:, 3], gpt[:, 0] + go[:, 1] * gpt[:, 3]), -1).cpu()
+                gr = ((gr * st + 0.5 * nf) / fps).clamp(min=0.0, max=float(v['duration']))
+            out.append({'video_id': v['video_id'], 'segments': segs, 'ground_segments': gr,
                         'scores': scores, 'embeds': span, 'embeds_pt': emb,
                         'embeds_omni': omni, 'embeds_gt': gemb.cpu(), 'embeds_gt_omni': gomni,
                         'gt_segments': v['segments_sec'], 'gt_text': v['cap_text']})
