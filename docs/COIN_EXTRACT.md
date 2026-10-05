@@ -6,7 +6,7 @@ Script điều phối là `tools/coin_hub.py` (nhánh `coin-extract`). Repo HF t
 | Thư mục trên HF | Ai ghi | Nội dung |
 |---|---|---|
 | `videos/coin_videos_NNNN.tar` | PC (`coin_hub.py upload`, chạy liên tục khi đang tải) | 100 video mp4 ≤480p mỗi gói, khoảng 0.8 GB |
-| `videos/manifest.json`, `videos/DONE` | PC | gói → danh sách video; file DONE xuất hiện khi PC tải xong |
+| `videos/manifest.json`, `videos/DONE` | PC | gói → danh sách video; DONE chỉ được ghi khi chạy tay `coin_hub.py upload --final` sau khi đã tải xong |
 | `claims/NNNN__<tên máy>` | máy GPU | máy nào đang làm gói nào (claim). Máy claim trước thắng; claim cũ hơn 6 giờ coi như đã chết |
 | `feats/coin_feats_NNNN.tar` | máy GPU | mỗi video một `<id>.npz` (v768, v512, a768; float16; 1 dòng/giây), kèm `failed.txt` |
 
