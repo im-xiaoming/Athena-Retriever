@@ -1,6 +1,7 @@
 """Build data/youcookii/caption_emb_iv2.npz: InternVideo2 text vectors (512-d) of every YouCook2 caption.
 
   python tools/embed_captions.py            # uniav-api-env, GPU: under a minute
+  python tools/embed_captions.py --coin     # data/coin_label_emb_iv2.npz: the 749 COIN step labels
 
 Same keys ("<video>#<segment index>") and sentences as caption_emb.npz, the ONE-PEACE text vectors
 that stay the space of the ret_sim metric (made by an earlier version of this script). The new
@@ -28,7 +29,32 @@ DATA = os.path.join(ROOT, 'data', 'youcookii')
 CKPT = os.path.join(ROOT, 'ckpt', 'internvideo2', 'InternVideo2-stage2_1b-224p-f4.pt')
 
 
+def coin():
+    """COIN step labels (datasets/annotations/COIN.json) -> data/coin_label_emb_iv2.npz.
+
+    emb is centred on the COIN label mean (centring on the YouCook2 mean leaves them at pairwise
+    cosine 0.63; on their own mean 0.01); raw (normalised, uncentred), mean and mean_youcook2 are
+    kept so a joint model can choose its own centring.
+    """
+    with open(os.path.join(ROOT, 'datasets', 'annotations', 'COIN.json')) as f:
+        d = json.load(f)['database']
+    labels = sorted({a['label'] for v in d.values() for a in v['annotation']})
+    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    enc = InternVideo2TextEncoder(CKPT, dev, torch.float32)
+    raw = np.concatenate([enc(labels[i:i + 256]).cpu().numpy() for i in range(0, len(labels), 256)])
+    mean = raw.mean(0)
+    emb = raw - mean
+    emb /= np.linalg.norm(emb, axis=1, keepdims=True)
+    out = os.path.join(ROOT, 'data', 'coin_label_emb_iv2.npz')
+    np.savez_compressed(out, labels=np.array(labels, dtype=str), emb=emb.astype(np.float16), raw=raw.astype(np.float16),
+                        mean=mean.astype(np.float32),
+                        mean_youcook2=np.load(os.path.join(DATA, 'caption_emb_iv2.npz'))['mean'])
+    print('done: %d labels -> %s' % (len(labels), out), flush=True)
+
+
 def main():
+    if '--coin' in sys.argv:
+        return coin()
     src = np.load(os.path.join(DATA, 'caption_emb.npz'), allow_pickle=True)
     keys, caps = src['keys'], [str(s) for s in src['sentences']]
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

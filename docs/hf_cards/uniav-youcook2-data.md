@@ -27,6 +27,8 @@ git repo (`data/youcookii/`), not here.
 | `iv2_feats/iv2_feats_00..07.tar` + `manifest.json` | 1.9 GB | **main input features**: one `<youtube_id>.npz` per video (1,500), 1 row per second |
 | `iv2_feats_shift/iv2_feats_shift_00..07.tar` + `manifest.json` | 1.9 GB | the same features with every window moved by +0.5 s. Interleaving the two gives 2 rows per second (`tools/make_iv2_dense.py`) |
 | `teacher/omni_emb_full.npz` | 132 MB | OmniRetriever-7B embeddings (3584-d, float16): `<video>#<step>__av` for the audio+video clip of a step (9,060), `<video>#<step>__text` for its caption (8,718) |
+| `text_feats/caption_emb_iv2.npz` | 11 MB | **InternVideo2 text vectors** (512-d) of every caption, in the space of `v512`; centred on the train-caption mean (`mean` stored) because raw vectors are anisotropic (pairwise cosine 0.95). Keys `"<video>#<step>"`, plus `sentences`. Caption space of `dataset.caption_space=iv2` |
+| `text_feats/caption_emb_onepeace.npz` | 33 MB | ONE-PEACE text vectors (1536-d) of the same captions: default caption space, and the space of the ret_sim metric |
 | `api/uniav_iv2.pth` | 263 MB | API checkpoint of run `iv2` (fp16 weights + training config + final evaluation), for `uniav_api` |
 | `api/capgen_prefix.pth` | 251 MB | GPT-2 caption generator (prefix variant) for `uniav_api` with `caption_mode='generate'` |
 | `encoders/one-peace-text.pt` | 6.4 GB | ONE-PEACE text encoder: the space of the ret_sim metric, and the text search of the API |
@@ -42,7 +44,7 @@ Each `.npz` holds three float16 arrays, with **row i centred on i + 0.5 s**:
 | `v512` | (T, 512) | `vision_proj(v768)`, L2-normalised, in InternVideo2's video-text space |
 | `a768` | (T, 768) | BEATs (InternVideo2-Stage2-6B-Audio) on a 3 s window of 16 kHz mono audio centred on second i |
 
-Extracted with `tools/extract_internvideo2.py`. The COIN features in `nguyenminh04/coin-data` use the same script, settings and checkpoints.
+Extracted with `tools/extract_internvideo2.py`; text vectors with `tools/embed_captions.py` (InternVideo2's BERT-large text tower, first 19 layers + `text_proj`). The COIN features in `nguyenminh04/coin-data` use the same script, settings and checkpoints.
 
 ## Samples
 

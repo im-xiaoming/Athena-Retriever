@@ -32,6 +32,7 @@ GPUs (a Colab T4 and 2 Kaggle T4). See `videos/manifest.json` and the `feats/` f
 | `videos/manifest.json` | `{"NNNN": [youtube_id, ...]}`: which videos are in which shard |
 | `videos/DONE` | written once the download is complete |
 | `claims/NNNN__<worker>` | bookkeeping: which GPU worker took which shard |
+| `text_feats/coin_label_emb_iv2.npz` | InternVideo2 text vectors (512-d) of the 749 step labels: `labels`, `emb` (centred on the COIN label mean, pairwise cosine 0.01), `raw` (normalised, uncentred), `mean`, `mean_youcook2`. Same text tower as YouCook2's `caption_emb_iv2.npz`; made by `tools/embed_captions.py --coin` |
 | `parity/6uHoTJSLoL8.mp4` | a YouCook2 video used to check that every worker reproduces the YouCook2 features (cosine 1.00000) |
 
 About 18% of COIN videos are no longer available on YouTube (deleted or private), so roughly 9,700 videos are expected.
