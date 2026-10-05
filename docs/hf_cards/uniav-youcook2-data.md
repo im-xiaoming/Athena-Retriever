@@ -27,12 +27,9 @@ git repo (`data/youcookii/`), not here.
 | `iv2_feats/iv2_feats_00..07.tar` + `manifest.json` | 1.9 GB | **main input features**: one `<youtube_id>.npz` per video (1,500), 1 row per second |
 | `iv2_feats_shift/iv2_feats_shift_00..07.tar` + `manifest.json` | 1.9 GB | the same features with every window moved by +0.5 s. Interleaving the two gives 2 rows per second (`tools/make_iv2_dense.py`) |
 | `teacher/omni_emb_full.npz` | 132 MB | OmniRetriever-7B embeddings (3584-d, float16): `<video>#<step>__av` for the audio+video clip of a step (9,060), `<video>#<step>__text` for its caption (8,718) |
-| `text_feats/caption_emb_iv2.npz` | 11 MB | **InternVideo2 text vectors** (512-d) of every caption, in the space of `v512`; centred on the train-caption mean (`mean` stored) because raw vectors are anisotropic (pairwise cosine 0.95). Keys `"<video>#<step>"`, plus `sentences`. Caption space of `dataset.caption_space=iv2` |
-| `text_feats/caption_emb_onepeace.npz` | 33 MB | ONE-PEACE text vectors (1536-d) of the same captions: default caption space, and the space of the ret_sim metric |
-| `api/uniav_iv2.pth` | 263 MB | API checkpoint of run `iv2` (fp16 weights + training config + final evaluation), for `uniav_api` |
-| `api/capgen_prefix.pth` | 251 MB | GPT-2 caption generator (prefix variant) for `uniav_api` with `caption_mode='generate'` |
-| `encoders/one-peace-text.pt` | 6.4 GB | ONE-PEACE text encoder: the space of the ret_sim metric, and the text search of the API |
-| `av_features/` | 11.6 GB | older ONE-PEACE video + audio features (`<id>_one_peace_video_finetune.npy`, `<id>_one_peace_audio.npy`, (T, 1536), one row per 0.5 s). No longer used by the current code |
+| `text_feats/caption_emb_iv2.npz` | 11 MB | **InternVideo2 text vectors** (512-d) of every caption, in the space of `v512`; centred on the train-caption mean (`mean` stored) because raw vectors are anisotropic (pairwise cosine 0.95). Keys `"<video>#<step>"`, plus `sentences`. The caption space of the model and of the `txt_sim` metric |
+| `api/uniav_iv2.pth` | 263 MB | **legacy** API checkpoint of run `iv2`, trained in the removed ONE-PEACE caption space; only the `test`-branch Colab demo still loads it. Its replacement, trained in InternVideo2 caption space, will be `api/uniav_civ2_v512.pth` |
+| `api/capgen_prefix.pth` | 251 MB | GPT-2 caption generator (prefix variant) trained on `uniav_iv2.pth` segments (legacy, same as above) |
 
 ## Feature format (`iv2_feats`)
 
@@ -72,13 +69,15 @@ t = np.load(f'{d}/teacher/omni_emb_full.npz')
 t['6uHoTJSLoL8#0__av'].shape, t['6uHoTJSLoL8#0__text'].shape   # (3584,), (3584,)
 ```
 
-## Checkpoint `api/uniav_iv2.pth`
+ONE-PEACE (features, text encoder, caption vectors) was removed on 2026-10-05.
+
+## Legacy checkpoint `api/uniav_iv2.pth`
 
 `{'state_dict', 'config', 'run': 'iv2', 'commit', 'epoch': 7, 'final_eval'}`. It is loaded by
 `uniav_api` (`UniAVPipeline`), which also reads checkpoints saved before the 2026-10-05 cleanup.
 YouCook2 validation, 394 videos:
 
-| R@0.5 | R@0.7 | ret_sim | CIDEr (retrieved) | METEOR | CIDEr (generated, `capgen_prefix`) |
+| R@0.5 | R@0.7 | ret_sim (ONE-PEACE) | CIDEr (retrieved) | METEOR | CIDEr (generated, `capgen_prefix`) |
 |---|---|---|---|---|---|
 | 54.3 | 31.2 | 0.754 | 87.9 | 15.56 | 95.1 |
 
