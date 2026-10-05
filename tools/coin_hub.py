@@ -5,7 +5,8 @@ The PC downloads COIN from YouTube (datasets/annotations/download_videos.py); cl
 
   PC     : python tools/coin_hub.py upload
            packs finished downloads into shards of 100 videos -> videos/coin_videos_NNNN.tar,
-           every 10 min while the download runs; writes videos/DONE when it has stopped.
+           every 10 min, until stopped. When the download is complete, run it once with --final:
+           it also uploads the last partial shard and writes videos/DONE.
   worker : HF_TOKEN=... python tools/coin_hub.py work --name colab-t4 \\
                --repo /content/InternVideo --video-ckpt .../InternVideo2-stage2_1b-224p-f4.pt \\
                --audio-ckpt .../audio_6b.pth
@@ -74,18 +75,13 @@ def owner(claims, k, stale):
 
 
 # ---------------------------------------------------------------------------------------- PC side
-def downloading():
-    r = subprocess.run(['pgrep', '-f', 'download_videos.py'], capture_output=True, text=True)
-    return bool(r.stdout.strip())
-
-
 def upload(a):
     api = hub()
     api.create_repo(REPO, repo_type='dataset', private=True, exist_ok=True)
     tmp = a.tmp or os.path.join(ROOT, 'logs', 'coin_tmp')
     os.makedirs(tmp, exist_ok=True)
     while True:
-        active = downloading()
+        active = not a.final
         ids = list(dict.fromkeys(l.strip() for l in open(os.path.join(COIN, 'downloaded.txt')) if l.strip()))
         paths = {}
         for d, _, fs in os.walk(os.path.join(COIN, 'videos')):
@@ -188,6 +184,7 @@ if __name__ == '__main__':
     p.add_argument('cmd', choices=('upload', 'work', 'status'))
     p.add_argument('--name', default='worker'); p.add_argument('--tmp', default='')
     p.add_argument('--every', type=int, default=10, help='upload: minutes between checks')
+    p.add_argument('--final', action='store_true', help='upload: download finished, write the last shard and DONE')
     p.add_argument('--stale', type=float, default=6.0, help='hours after which a claim is dead')
     p.add_argument('--repo', default=''); p.add_argument('--video-ckpt', default='')
     p.add_argument('--audio-ckpt', default=''); p.add_argument('--workers', type=int, default=4)
