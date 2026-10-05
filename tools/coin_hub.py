@@ -134,8 +134,23 @@ def upload(a):
 
 
 def plan(a):
-    """dl/plan.json: COIN ids neither downloaded by the PC nor failed for good, in chunks of SHARD."""
+    """dl/plan.json: COIN ids neither downloaded by the PC nor failed for good, in chunks of SHARD.
+    --retry: dl/plan_retry.json instead, from the chunks already fetched: their 'retry' ids and the
+    failures that look transient (RETRY), in chunks from --first (use 2000); run it with fetch --plan
+    dl/plan_retry.json on the PC, with cookies."""
     api = hub()
+    if a.retry:
+        from huggingface_hub import hf_hub_download
+        done, _, _ = dl_state(api)
+        todo = []
+        for k in sorted(done):
+            r = json.load(open(hf_hub_download(REPO, 'dl/done/%04d.json' % k, repo_type='dataset', token=api.token)))
+            todo += list(r['retry']) + [v for v, why in r['failed'].items() if any(m in why for m in RETRY)]
+        chunks = {'%04d' % (a.first + i): todo[i * SHARD:(i + 1) * SHARD] for i in range(-(-len(todo) // SHARD))}
+        api.upload_file(path_or_fileobj=json.dumps(chunks).encode(), path_in_repo='dl/plan_retry.json', repo_id=REPO,
+                        repo_type='dataset', commit_message='retry plan: %d videos' % len(todo))
+        log('dl/plan_retry.json: %d videos from %d fetched chunks, %d chunks' % (len(todo), len(done), len(chunks)))
+        return
     db = json.load(open(os.path.join(COIN, 'COIN.json')))['database']
     skip = set()
     for f in ('downloaded.txt', 'failed.txt'):
@@ -165,7 +180,8 @@ def dl_state(api):
 
 
 BLOCK = ('not a bot', 'HTTP Error 429', 'Too Many Requests', 'rate-limit', 'rate limit')
-RETRY = ('sign in', 'Sign in', 'Interrupted', 'cookies are no longer valid')   # not permanent: try again later
+# not permanent: try again later (age gate / login: from the PC with cookies; 403 and empty files are transient)
+RETRY = ('sign in', 'Sign in', 'Interrupted', 'cookies are no longer valid', 'HTTP Error 403', 'downloaded file is empty')
 
 
 def fetch_one(vid, out_dir, a):
@@ -200,7 +216,7 @@ def fetch(a):
     from huggingface_hub import CommitOperationAdd, CommitOperationDelete, hf_hub_download
     api = hub()
     tmp = a.tmp or '/tmp/coin_fetch_%s' % a.name
-    chunks = json.load(open(hf_hub_download(REPO, 'dl/plan.json', repo_type='dataset', token=api.token,
+    chunks = json.load(open(hf_hub_download(REPO, a.plan, repo_type='dataset', token=api.token,
                                             force_download=True)))
     while True:
         done, claims, files = dl_state(api)
@@ -337,6 +353,8 @@ if __name__ == '__main__':
     p.add_argument('--audio-ckpt', default=''); p.add_argument('--workers', type=int, default=4)
     p.add_argument('--flush', action='store_true', help='upload: also the last partial shard, but no DONE')
     p.add_argument('--first', type=int, default=1000, help='plan: number of the first chunk')
+    p.add_argument('--retry', action='store_true', help='plan: dl/plan_retry.json from the fetched chunks')
+    p.add_argument('--plan', default='dl/plan.json', help='fetch: the plan to work through')
     p.add_argument('--jobs', type=int, default=3, help='fetch: parallel yt-dlp processes')
     p.add_argument('--sleep', type=int, default=2, help='fetch: seconds yt-dlp waits before a download (x2 max)')
     p.add_argument('--cookies', default='', help='fetch: cookies.txt for yt-dlp (PC only)')
