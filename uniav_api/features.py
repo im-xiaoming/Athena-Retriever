@@ -19,10 +19,10 @@ def _l2(x):
 class FeatureSpec:
     def __init__(self, dataset_cfg):
         d = dataset_cfg
-        self.source = d.get('feat_source', 'onepeace')
+        self.source = d.get('feat_source')
         if self.source != 'iv2':
-            raise ValueError('uniav_api takes InternVideo2 checkpoints only (this one: feat_source %r); '
-                             'ONE-PEACE feature models were dropped' % self.source)
+            raise ValueError('uniav_api takes InternVideo2-feature checkpoints only (this one: feat_source %r)'
+                             % self.source)
         self.max_seq_len = d['max_seq_len']
         self.fps = d['default_fps']
         self.video_keys = list(d.get('iv2_video_keys', ['v768']))

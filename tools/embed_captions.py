@@ -3,10 +3,10 @@
   python tools/embed_captions.py            # uniav-api-env, GPU: under a minute
   python tools/embed_captions.py --coin     # data/coin_label_emb_iv2.npz: the 749 COIN step labels
 
-Same keys ("<video>#<segment index>") and sentences as caption_emb.npz, the ONE-PEACE text vectors
-that stay the space of the ret_sim metric (made by an earlier version of this script). The new
-vectors are the caption space of dataset.caption_space=iv2: InternVideo2's text tower is aligned
-with its video tower, whose 512-d projection is the v512 input feature.
+Every caption of the videos with InternVideo2 features (data/youcookii/iv2_feats), keyed
+"<video>#<segment index>". InternVideo2's text tower is aligned with its video tower, whose 512-d
+projection is the v512 input feature. These vectors are the caption space of the model and the
+space of the txt_sim metric.
 
 Raw InternVideo2 text vectors are strongly anisotropic: any two captions have cosine ~0.95, so the
 soft targets of the embedding loss (softmax of caption-caption cosine / 0.02) would spread over
@@ -55,13 +55,18 @@ def coin():
 def main():
     if '--coin' in sys.argv:
         return coin()
-    src = np.load(os.path.join(DATA, 'caption_emb.npz'), allow_pickle=True)
-    keys, caps = src['keys'], [str(s) for s in src['sentences']]
+    with open(os.path.join(DATA, 'annotations', 'youcookii_annotations_trainval.json')) as f:
+        db = json.load(f)['database']
+    have = {f[:-4] for f in os.listdir(os.path.join(DATA, 'iv2_feats')) if f.endswith('.npz')}
+    keys, caps = [], []
+    for vid in sorted(db):
+        if vid in have:
+            for i, a in enumerate(db[vid]['annotations']):
+                keys.append('%s#%d' % (vid, i)); caps.append(a['sentence'])
+    keys = np.array(keys)
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     enc = InternVideo2TextEncoder(CKPT, dev, torch.float32)
     emb = np.concatenate([enc(caps[i:i + 256]).cpu().numpy() for i in range(0, len(caps), 256)])
-    with open(os.path.join(DATA, 'annotations', 'youcookii_annotations_trainval.json')) as f:
-        db = json.load(f)['database']
     first = {}
     for i, k in enumerate(keys):   # unique train captions, as the dataset's caption pool
         if db[str(k).split('#')[0]]['subset'] == 'training':
@@ -70,7 +75,7 @@ def main():
     emb = emb - mean
     emb /= np.linalg.norm(emb, axis=1, keepdims=True)
     out = os.path.join(DATA, 'caption_emb_iv2.npz')
-    np.savez_compressed(out, keys=keys, emb=emb.astype(np.float16), sentences=src['sentences'],
+    np.savez_compressed(out, keys=keys, emb=emb.astype(np.float16), sentences=np.array(caps, dtype=str),
                         mean=mean.astype(np.float32))
     print('done: %s -> %s, %.1f MB' % (emb.shape, out, os.path.getsize(out) / 1e6), flush=True)
 

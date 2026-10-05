@@ -10,6 +10,5 @@ einops
 timm            # InternVideo2 encoder (describe_video)
 torchaudio      # BEATs audio encoder (describe_video), same version as torch
 pyyaml
-regex           # ONE-PEACE text tokenizer (search with a ONE-PEACE caption-space model)
 transformers<4.50  # GPT-2 caption generator, InternVideo2 text encoder (search)
 imageio-ffmpeg

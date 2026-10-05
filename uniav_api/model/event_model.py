@@ -69,7 +69,7 @@ class EmbedHead(nn.Module):
         return res, raw0
 
     def embed_captions(self, cap):
-        """ONE-PEACE caption or query vectors (N, 1536) -> caption space (N, D), normalised."""
+        """InternVideo2 caption or query vectors (N, 512) -> event space (N, D), normalised."""
         return F.normalize(self.clip_proj(cap), dim=-1)
 
 

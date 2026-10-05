@@ -121,8 +121,9 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     Captioning is scored only on GT segments matched by a prediction with IoU >= 0.3.
     cos_gt   : cosine between the predicted segment vector and its GT caption
     cos_rand : the same against a random caption, i.e. the floor
-    ret_sim  : how close the chosen caption is to the GT caption, in ONE-PEACE space
-    CIDEr    : standard captioning metric, word overlap, independent of ONE-PEACE
+    txt_sim  : how close the chosen caption is to the GT caption, cosine in InternVideo2 text space
+               (runs before 2026-10-05 stored ret_sim, the same in ONE-PEACE space: not comparable)
+    CIDEr    : standard captioning metric, word overlap, independent of any encoder
     full     : also score variants (top-1, single-point vector, each embedding space
                separately when the OmniRetriever teacher is on, oracle GT spans)
     With the teacher, a caption's score is the sum of cosines in both spaces.
@@ -130,7 +131,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     from pycocoevalcap.cider.cider import Cider
     model.eval()
     pool_f = F.normalize(model.embed_head.clip_proj(pool_raw), dim=-1)
-    # metrics and the consensus pick always use ONE-PEACE vectors, whatever space the model is trained in
+    # metrics and the consensus pick use the InternVideo2 caption vectors, whatever space the model is trained in
     pool_n = F.normalize(getattr(model, 'pool_metric', None) if getattr(model, 'pool_metric', None) is not None
                          else pool_raw, dim=-1)
     same_space = pool_raw.shape[1] == model.embed_head.clip_proj.in_features and getattr(model, 'pool_metric', None) is None
@@ -141,7 +142,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     cov = {t: 0 for t in ths}
     n_gt = n_pred = 0
     best_ious, cos_gt, cos_rand = [], [], []
-    ret = {v: [] for v in ('top1', 'mbr', 'pt_top1', 'mbr_onepeace', 'mbr_omni', 'oracle')}
+    ret = {v: [] for v in ('top1', 'mbr', 'pt_top1', 'mbr_student', 'mbr_omni', 'oracle')}
     gts_txt, hyp = {}, {v: {} for v in ret}
     gts_or, hyp_or = {}, {}
     g = torch.Generator().manual_seed(0)
@@ -180,22 +181,22 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
                 if best < 0.3:
                     continue
                 q = F.normalize(emb[j], dim=-1)
-                if cap_proj is not None:   # GT caption vectors exist only in ONE-PEACE space
+                if cap_proj is not None:   # only when the model is trained in the metric space
                     cos_gt.append(float(q @ cap_proj[gi]))
                 ridx = int(torch.randint(len(pool_f), (1,), generator=g))
                 cos_rand.append(float(q @ pool_f[ridx]))
                 key = len(gts_txt); gts_txt[key] = [texts[gi]]
-                s_op = pool_f @ q
-                s = s_op
+                s_st = pool_f @ q
+                s = s_st
                 if omni:
                     s_om = o_txt @ r['embeds_omni'][j].to(device).float()
-                    s = s_op + s_om
+                    s = s_st + s_om
                 t1, mb = mbr_pick(s, pool_n, scale)
                 picks = {'top1': t1, 'mbr': mb}
                 if full:
                     picks['pt_top1'] = int((pool_f @ F.normalize(emb_pt[j], dim=-1)).argmax())
                     if omni:
-                        picks['mbr_onepeace'] = mbr_pick(s_op, pool_n, scale)[1]
+                        picks['mbr_student'] = mbr_pick(s_st, pool_n, scale)[1]
                         picks['mbr_omni'] = mbr_pick(s_om, pool_n, scale)[1]
                 for v, i in picks.items():
                     ret[v].append(float(pool_n[i] @ cap_n[gi]))
@@ -206,18 +207,18 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     out = {'R@%.1f' % t: 100.0 * cov[t] / max(n_gt, 1) for t in ths}
     out['mIoU'] = 100.0 * mean(best_ious)
     out['seg/vid'] = n_pred / max(len(loader.dataset), 1)
-    out['cos_gt'] = mean(cos_gt) if cos_gt else float('nan')   # not defined outside ONE-PEACE caption space
+    out['cos_gt'] = mean(cos_gt) if cos_gt else float('nan')   # not defined when trained in another space
     out['cos_rand'] = mean(cos_rand)
-    out['ret_sim'] = mean(ret['mbr'])
+    out['txt_sim'] = mean(ret['mbr'])
     out['CIDEr'] = cider('mbr')
     if full:
-        for v in ('top1', 'pt_top1') + (('mbr_onepeace', 'mbr_omni') if omni else ()):
-            out['ret_sim[%s]' % v] = mean(ret[v])
+        for v in ('top1', 'pt_top1') + (('mbr_student', 'mbr_omni') if omni else ()):
+            out['txt_sim[%s]' % v] = mean(ret[v])
             out['CIDEr[%s]' % v] = cider(v)
         m = meteor(gts_txt, hyp['mbr'])
         if m is not None:
             out['METEOR'] = m
-        out['ret_sim[oracle]'] = mean(ret['oracle'])
+        out['txt_sim[oracle]'] = mean(ret['oracle'])
         out['CIDEr[oracle]'] = Cider().compute_score(gts_or, hyp_or)[0] * 100
         out['n_captioned'] = len(gts_txt)
     return out
@@ -232,7 +233,7 @@ GROUPS = [
                             ('R@0.7', 'R@0.7', 6, '.2f'), ('mIoU', 'mIoU', 6, '.2f'),
                             ('seg/vid', 'seg/vid', 7, '.2f')]),
     ('captioning (val)', [('cos_gt', 'cos_gt', 6, '.3f'), ('cos_rand', 'cos_rand', 8, '.3f'),
-                          ('ret_sim', 'ret_sim', 7, '.3f'), ('CIDEr', 'CIDEr', 6, '.2f')]),
+                          ('txt_sim', 'txt_sim', 7, '.3f'), ('CIDEr', 'CIDEr', 6, '.2f')]),
 ]
 LEAD = '{:>6} {:>5} {:>8}'
 
@@ -255,8 +256,8 @@ def use_omni_columns():
 
 def print_header():
     print('Legend       : S = new best R@0.5, C = new best CIDEr (each saves its checkpoint)')
-    print('               cos_rand = cosine to a random caption (floor), ret_sim = similarity of')
-    print('               chosen caption to GT caption (ONE-PEACE space), CIDEr = word overlap')
+    print('               cos_rand = cosine to a random caption (floor), txt_sim = similarity of')
+    print('               chosen caption to GT caption (InternVideo2 text space), CIDEr = word overlap')
     print(RULE)
     widths = [sum(c[2] for c in cols) + len(cols) - 1 for _, cols in GROUPS]
     print(LEAD.format('', '', '') + ' | ' + ' | '.join(
@@ -381,9 +382,9 @@ def main(a):
     # the caption pool comes from the TRAIN split only; val captions are never used
     pool_raw = torch.from_numpy(ds.pool_train).to(dev)
     model.set_caption_pool(pool_raw)
-    if ds.caption_space != 'onepeace':
+    if ds.caption_space != 'iv2':
         model.pool_metric = torch.from_numpy(ds.pool_emb).to(dev)
-        print('Captions     : trained and picked in %s space (%d-d); metrics in ONE-PEACE space'
+        print('Captions     : trained and picked in %s space (%d-d); metrics in InternVideo2 text space'
               % (ds.caption_space, pool_raw.shape[1]), flush=True)
     if ds.omni:
         model.set_omni_pool(torch.from_numpy(ds.omni_text_pool).to(dev),

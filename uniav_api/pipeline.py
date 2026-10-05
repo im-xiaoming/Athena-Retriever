@@ -8,7 +8,7 @@
 
 Event vectors and query vectors live in the same 512-d space (the space the model projects
 caption vectors into with clip_proj), so search is a cosine. The caption vectors come from the
-text encoder of the checkpoint's caption space (dataset.caption_space): ONE-PEACE or InternVideo2.
+InternVideo2 text tower (the same encoder the caption vectors come from, centred the same way).
 
 The checkpoint decides which features the model takes (features.py): an API checkpoint made by
 tools/export_api_ckpt.py carries its training config; a raw training checkpoint uses
@@ -73,9 +73,12 @@ class UniAVPipeline:
         self.max_seq_len = self.spec.max_seq_len
         sd = upgrade_state_dict({k: v.float() for k, v in ck['state_dict'].items()})
         self.caption_space = mcfg['dataset'].get('caption_space', 'onepeace')
-        # train-space caption vectors, for a model not trained in ONE-PEACE space (export_api_ckpt.py)
+        if self.caption_space == 'onepeace':
+            raise ValueError('checkpoint %s was trained in the ONE-PEACE caption space, which was removed; '
+                             'use a model trained with caption_space iv2' % self.cfg.checkpoint)
+        # teacher-space caption vectors, for a model trained with caption_space omni (export_api_ckpt.py)
         self.pool_train = ck.get('caption_pool')
-        if self.caption_space != 'onepeace' and self.pool_train is None:
+        if self.caption_space != 'iv2' and self.pool_train is None:
             raise ValueError('checkpoint %s (caption space %s) has no caption_pool; export it with '
                              'tools/export_api_ckpt.py' % (self.cfg.checkpoint, self.caption_space))
         omni_dim = sd['omni_proj.2.weight'].shape[0] if 'omni_proj.2.weight' in sd else 0
@@ -122,20 +125,16 @@ class UniAVPipeline:
 
     @property
     def text_encoder(self):
-        """Text encoder of the caption space, or None when its checkpoint is not available.
+        """InternVideo2's text tower (read from the video encoder checkpoint), or None without it.
 
-        onepeace: ONE-PEACE text (6 GB). iv2: InternVideo2's text tower, from the video encoder
-        checkpoint; its vectors are centred on the train-caption mean as in tools/embed_captions.py.
+        Its vectors are centred on the train-caption mean, as in tools/embed_captions.py. Only a
+        model trained in that space (caption_space iv2) can use it.
         """
-        if self._text is None:
-            if self.caption_space == 'onepeace' and os.path.exists(self.cfg.text_encoder):
-                from .encoders.onepeace_text import TextEncoder
-                self._text = TextEncoder(self.cfg.text_encoder, self.device, self.dtype)
-            elif self.caption_space == 'iv2' and os.path.exists(self.cfg.iv2_video_encoder):
-                from .encoders.internvideo2_text import InternVideo2TextEncoder
-                enc = InternVideo2TextEncoder(self.cfg.iv2_video_encoder, self.device, self.dtype)
-                mean = torch.as_tensor(np.asarray(self.pool_train['mean']), device=self.device)
-                self._text = lambda texts: torch.nn.functional.normalize(enc(texts) - mean, dim=-1)
+        if self._text is None and self.caption_space == 'iv2' and os.path.exists(self.cfg.iv2_video_encoder):
+            from .encoders.internvideo2_text import InternVideo2TextEncoder
+            enc = InternVideo2TextEncoder(self.cfg.iv2_video_encoder, self.device, self.dtype)
+            mean = self.captioner.mean.to(self.device)
+            self._text = lambda texts: torch.nn.functional.normalize(enc(texts) - mean, dim=-1)
         return self._text
 
     # ------------------------------------------------------------------ core

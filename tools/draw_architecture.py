@@ -267,8 +267,8 @@ arrow([tav.left, (xr - 40, tav.left[1]), (xr - 40, sctx.y + 32), (sctx.x + sctx.
       train=True)
 note(xr - 50, 560, ['target of q', '(L_omni_av)'], size=13, color=GREEN, anchor='end', w=150)
 caps = Box(xr, 650, wr, 56, 'train captions\n8218 unique sentences')
-opt = Box(xr, 760, wr, 56, 'ONE-PEACE text encoder\n(frozen)  ->  1536', 'frozen', size=13)
-cpj = Box(xr, 870, wr, 56, 'clip_proj: Linear 1536 -> 512\n(trained)', 'new', size=13)
+opt = Box(xr, 760, wr, 56, 'InternVideo2 text encoder\n(frozen)  ->  512', 'frozen', size=13)
+cpj = Box(xr, 870, wr, 56, 'clip_proj: Linear 512 -> 512\n(trained)', 'new', size=13)
 down(caps, opt); down(opt, cpj)
 arrow([(cpj.x + 150, cpj.y + cpj.h), (cpj.x + 150, ret.y + 20), (ret.x + ret.w, ret.y + 20)],
       'caption vectors', lpos=1.0)
@@ -320,7 +320,7 @@ arrow([(s1.x + 30, s1.y + s1.h), (s1.x + 30, 579), (add.x, 579)], 'residual: q s
 q = Box(cx - 170, 640, 340, 42, 'L2 norm  ->  segment vector q', 'new', bold=True)
 down(add, q)
 tag(q, 'L_span')
-c1 = Box(cx - 395, 740, 360, 60, 'cos(q, caption vector)\ncaption vector = clip_proj(ONE-PEACE text)', 'new', size=13)
+c1 = Box(cx - 395, 740, 360, 60, 'cos(q, caption vector)\ncaption vector = clip_proj(InternVideo2 text)', 'new', size=13)
 c2 = Box(cx + 35, 740, 360, 60, 'omni_proj: 512 -> 1024 -> 3584, L2\ncos with the teacher text vector', 'new', size=13)
 down(q, c1); down(q, c2)
 tag(c2, 'L_omni_*')
@@ -358,7 +358,7 @@ note(x0 + 20, 1410, [
     'Lớp Linear cuối bắt đầu bằng 0, nên ban đầu q chính là trung bình đoạn.',
     '',
     'omni_proj chủ yếu để thầy dạy q lúc train. Cộng thêm điểm thầy lúc chọn câu không giúp',
-    'đo được (ret_sim chênh <= 0.003), nên uniav_api chỉ dùng điểm trong không gian caption.'],
+    'đo được (chênh <= 0.003), nên uniav_api chỉ dùng điểm trong không gian caption.'],
     size=14, color=TEXT, w=800)
 
 # ------------------------------------------------------------------ heads

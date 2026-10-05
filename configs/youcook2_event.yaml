@@ -8,9 +8,9 @@ val_split:
 - validation
 dataset:
   json_file: ./data/youcookii/annotations/youcookii_annotations_trainval.json
-  # ONE-PEACE text vectors of the captions: the caption space by default, and always the space
-  # of the ret_sim metric and of the consensus pick
-  caption_emb_file: ./data/youcookii/caption_emb.npz
+  # InternVideo2 text vectors of the captions (tools/embed_captions.py): the space of the txt_sim
+  # metric and of the consensus pick, and the caption space unless caption_space is omni
+  caption_emb_file: ./data/youcookii/caption_emb_iv2.npz
   default_fps: 16
   max_seq_len: 256
   max_buffer_len_factor: 1.0
@@ -45,9 +45,8 @@ dataset:
   iv2_video_keys: [v768]   # v768 = pooled vision, v512 = its projection into InternVideo2's text space
   iv2_l2norm: true
   iv2_rows_per_sec: 1      # 2 with iv2_folder ./data/youcookii/iv2_dense (tools/make_iv2_dense.py)
-  # caption space: onepeace | iv2 (InternVideo2 text, tools/embed_captions.py) | omni (teacher text)
-  caption_space: onepeace
-  caption_emb_iv2_file: ./data/youcookii/caption_emb_iv2.npz
+  # caption space: iv2 (InternVideo2 text) | omni (teacher text)
+  caption_space: iv2
   # OmniRetriever-7B teacher vectors (tools/omni_youcook2.py, HF teacher/omni_emb_full.npz).
   # Every run since omni100 uses it; set to null to train without the teacher
   omni_emb_file: ./data/youcookii/omni_emb_full.npz
@@ -84,7 +83,7 @@ model:
   use_abs_pe: true
   max_seq_len: 256
   nmax: 16
-  clip_dim: 1536       # set by train_event.py from the caption space
+  clip_dim: 512        # set by train_event.py from the caption space
   train_cfg:
     loss_weight_reg: 1.0
     loss_weight_emb: 0.2

@@ -4,9 +4,9 @@
 
 Keeps the best captioning checkpoint (best_cap) in fp16, without the OmniRetriever projection
 (training only), plus the run's dataset / model config and its final evaluation, so the API
-knows which features the model expects without configs/youcook2_event.yaml. A model trained
-outside the ONE-PEACE caption space also gets its caption vectors (caption_pool: emb in the order
-of uniav_api/assets/caption_pool.npz, plus the centring mean for InternVideo2 text).
+knows which features the model expects without configs/youcook2_event.yaml. A model trained in
+the teacher's text space (caption_space omni) also gets those caption vectors (caption_pool, in
+the order of uniav_api/assets/caption_pool.npz).
 """
 import argparse
 import glob
@@ -25,27 +25,22 @@ DATASET_KEYS = ('feat_source', 'default_fps', 'max_seq_len', 'force_upsampling',
 
 
 def caption_pool(cfg):
-    """Train-space caption vectors in the order of the API caption pool, or None for ONE-PEACE."""
+    """Teacher-space caption vectors in the order of the API caption pool (caption_space omni), else None.
+
+    A model in the default InternVideo2 caption space uses uniav_api/assets/caption_pool.npz as is.
+    """
     space = cfg['dataset'].get('caption_space', 'onepeace')
-    if space == 'onepeace':
+    assert space != 'onepeace', 'ONE-PEACE caption-space models are no longer supported by uniav_api'
+    if space == 'iv2':
         return None
     texts = [str(t) for t in np.load(os.path.join(ROOT, 'uniav_api', 'assets', 'caption_pool.npz'))['texts']]
-    if space == 'iv2':
-        z = np.load(os.path.join(ROOT, cfg['dataset'].get('caption_emb_iv2_file', './data/youcookii/caption_emb_iv2.npz')),
-                    allow_pickle=True)
-        vec = {}
-        for t, e in zip(z['sentences'], z['emb']):
-            vec.setdefault(str(t), e)
-        return {'emb': np.stack([vec[t] for t in texts]).astype(np.float16), 'mean': z['mean']}
-    if space == 'omni':
-        z = np.load(os.path.join(ROOT, cfg['dataset']['omni_emb_file']))
-        e = np.load(os.path.join(ROOT, 'data', 'youcookii', 'caption_emb.npz'), allow_pickle=True)
-        key = {}
-        for k, t in zip(e['keys'], e['sentences']):
-            if str(k) + '__text' in z.files:
-                key.setdefault(str(t), str(k) + '__text')
-        return {'emb': np.stack([z[key[t]] for t in texts]).astype(np.float16)}
-    raise ValueError(space)
+    z = np.load(os.path.join(ROOT, cfg['dataset']['omni_emb_file']))
+    e = np.load(os.path.join(ROOT, 'data', 'youcookii', 'caption_emb_iv2.npz'), allow_pickle=True)
+    key = {}
+    for k, t in zip(e['keys'], e['sentences']):
+        if str(k) + '__text' in z.files:
+            key.setdefault(str(t), str(k) + '__text')
+    return {'emb': np.stack([z[key[t]] for t in texts]).astype(np.float16)}
 
 
 def main():
@@ -68,7 +63,7 @@ def main():
     n = sum(v.numel() for v in sd.values())
     print('%s: %.1fM parameters, %.0f MB, features %s, caption space %s, epoch %d'
           % (out, n / 1e6, os.path.getsize(out) / 1e6, dataset['feat_source'],
-             dataset.get('caption_space', 'onepeace'), ck['epoch'] + 1))
+             dataset.get('caption_space'), ck['epoch'] + 1))
 
 
 if __name__ == '__main__':

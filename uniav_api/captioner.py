@@ -1,11 +1,12 @@
 """Caption pool and caption choice for event vectors.
 
-The pool holds the unique train captions and their ONE-PEACE text vectors (the model never
-saw validation captions). Captions are projected once into the event space with the model's
-clip_proj: their ONE-PEACE vectors, or, for a model trained in another caption space, the vectors
-of that space stored in the API checkpoint (caption_pool). An event vector is matched against
-them by cosine and the caption is picked by consensus (minimum Bayes risk over the top 20) in
-ONE-PEACE space, exactly as train_event.py scores it.
+The pool holds the unique train captions and their InternVideo2 text vectors (the model never
+saw validation captions; assets/caption_pool.npz, with the centring mean used for new sentences).
+Captions are projected once into the event space with the model's clip_proj: their InternVideo2
+vectors, or, for a model trained in the teacher's text space, the vectors stored in the API
+checkpoint (caption_pool). An event vector is matched against them by cosine and the caption is
+picked by consensus (minimum Bayes risk over the top 20) in InternVideo2 text space, exactly as
+train_event.py scores it.
 """
 import json
 import os
@@ -16,7 +17,7 @@ import torch.nn.functional as F
 
 
 def build_caption_pool(caption_emb, annotations, out):
-    """caption_emb.npz + annotations -> unique train captions with their ONE-PEACE vectors."""
+    """caption_emb_iv2.npz + annotations -> unique train captions with their InternVideo2 vectors."""
     z = np.load(caption_emb, allow_pickle=True)
     with open(annotations) as f:
         subset = {v: x['subset'] for v, x in json.load(f)['database'].items()}
@@ -28,7 +29,8 @@ def build_caption_pool(caption_emb, annotations, out):
         seen.add(text); texts.append(text); embs.append(emb)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     # plain unicode array, no pickle: readable by any numpy version (1.x and 2.x)
-    np.savez_compressed(out, texts=np.array(texts, dtype=str), emb=np.stack(embs).astype(np.float16))
+    np.savez_compressed(out, texts=np.array(texts, dtype=str), emb=np.stack(embs).astype(np.float16),
+                        mean=np.asarray(z['mean'], np.float32))
     return len(texts)
 
 
@@ -36,6 +38,7 @@ class Captioner:
     def __init__(self, pool_path, model, device, pool_train=None):
         z = np.load(pool_path)
         self.texts = [str(t) for t in z['texts']]
+        self.mean = torch.from_numpy(z['mean'].astype(np.float32))   # centring of new sentences
         raw = torch.from_numpy(z['emb'].astype(np.float32)).to(device)
         train = raw
         if pool_train is not None:   # caption vectors of the model's own caption space, same order

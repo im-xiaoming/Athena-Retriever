@@ -49,6 +49,8 @@ Lessons from each change and what to combine next. The results table is in
 | Unused task experts removed (2026-10-05) | every transformer block held three FFN experts (TAL, AVEL, SED) from the multi-task UniAV; only TAL ever ran. 135.4M -> 68.2M parameters, `ckpt/iv2` re-evaluated: identical to the digit | cleanup, all later runs |
 | InternVideo2 text as caption space, analysis before training (`caption_emb_iv2.npz`) | zero-shot v512 span -> caption: R@1 2.6% of 1174 val clips (chance 0.09%). Raw vectors are anisotropic (mean pairwise cos 0.95: soft targets over ~7000 captions), centred 0.38 (~50; ONE-PEACE ~2). Nearest train caption of each val caption, CIDEr: ONE-PEACE 243.6, IV2 centred 237.8, raw 233.5 | stored centred; needs training runs |
 
+| ONE-PEACE removed completely (2026-10-05, user's decision) | InternVideo2 text space for captions gives the same results (`civ2`, `civ2_v512` on Kaggle) and drops a 6 GB encoder. Metric `ret_sim` (ONE-PEACE) replaced by `txt_sim` (InternVideo2 text space, not comparable); CIDEr / METEOR are the main caption metrics | done; old ONE-PEACE checkpoints need the code before this date |
+
 Conclusion of the variants (2026-10-04 afternoon): the InternVideo2 model is on a plateau for
 these hyper-parameters; every change lands inside the seed noise. Further gains need a bigger
 change (see docs/HANDOFF.md, next steps).

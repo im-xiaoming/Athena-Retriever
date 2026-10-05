@@ -34,8 +34,11 @@ Each event holds `start`, `end` (seconds), `score`, `caption`, `similarity`, `co
 
 ## Model
 
-`ckpt/api/uniav_iv2.pth` (263 MB, fp16), exported from run `iv2` by `tools/export_api_ckpt.py`. It
-carries its training config, so the API knows the features it takes. YouCook2 validation, 394 videos:
+**Being replaced (2026-10-05): ONE-PEACE was removed from the project.** Captions are now matched in
+InternVideo2's own text space, so the API needs a model trained with `caption_space: iv2` (run
+`civ2_v512` on Kaggle: R@0.5 53.1, CIDEr 90.2, one seed), exported by `tools/export_api_ckpt.py`.
+`ckpt/api/uniav_iv2.pth` below was trained in ONE-PEACE caption space and no longer loads; its
+numbers stay here for reference. YouCook2 validation, 394 videos (ret_sim: ONE-PEACE text space):
 
 | | R@0.5 | R@0.7 | ret_sim | CIDEr | METEOR |
 |---|---|---|---|---|---|
@@ -73,14 +76,12 @@ The last five were picked among the better videos (median F1 over the validation
    IoU heads, then Gaussian soft-NMS (`postprocess.py`, a numpy port of the C++ op).
 3. **Select**: events with score >= `min_score`, at most `max_overlap` IoU with a better event.
 4. **Caption** (`captioner.py`): each event vector against the train captions, consensus pick
-   (MBR over the top 20). Only the caption space is used; adding the OmniRetriever teacher
-   space changed ret_sim by at most 0.003 on validation.
-5. **Search**: the query goes through the text encoder of the model's caption space and the
-   model's caption projection: ONE-PEACE text (6 GB, optional) for the current model, or
-   InternVideo2's own text tower (read from the InternVideo2 video checkpoint) for a model
-   trained with `caption_space: iv2`. Without the encoder, the query is matched to the closest
-   train captions by word overlap (TF-IDF) and their vectors are averaged: phrase queries like
-   recipe steps.
+   (MBR over the top 20), in InternVideo2 text space. Adding the OmniRetriever teacher space
+   changed caption similarity by at most 0.003 on validation, so only the caption space is used.
+5. **Search**: the query goes through InternVideo2's text tower (read from the InternVideo2 video
+   checkpoint, centred like the caption vectors) and the model's caption projection. Without that
+   checkpoint, the query is matched to the closest train captions by word overlap (TF-IDF) and
+   their vectors are averaged: phrase queries like recipe steps.
 
 ## Generated captions (`caption_mode='generate'`)
 
@@ -117,18 +118,17 @@ the API writes exactly the training script's captions (6/6), CPU and fp16 checkp
 | Path | What | For |
 |---|---|---|
 | `ckpt/api/uniav_iv2.pth` | event model; HF dataset `nguyenminh04/uniav-youcook2-data`, file `api/uniav_iv2.pth` (private) | everything |
-| `uniav_api/assets/caption_pool.npz` | train captions + ONE-PEACE text vectors (in git) | everything |
+| `uniav_api/assets/caption_pool.npz` | train captions + InternVideo2 text vectors + centring mean (in git) | everything |
 | `data/youcookii/annotations/youcookii_annotations_trainval.json` | GT steps (in git) | show / plot |
 | `InternVideo/` | `git clone --depth 1 https://github.com/OpenGVLab/InternVideo` (unmodified) | describe_video |
 | `ckpt/internvideo2/InternVideo2-stage2_1b-224p-f4.pt` | HF `OpenGVLab/InternVideo2-Stage2_1B-224p-f4` (gated) | describe_video |
 | `ckpt/internvideo2/audio_6b.pth` | HF `OpenGVLab/InternVideo2-Stage2-6B-Audio` | describe_video |
-| `ONEPEACE_extract_embd_code/models/one-peace-text.pt` | ONE-PEACE text encoder, 6 GB; HF `encoders/one-peace-text.pt` | search with a ONE-PEACE caption-space model, optional |
 | `ckpt/api/capgen_prefix.pth` | caption generator, `tools/capgen/export_generator.py prefix` | caption_mode='generate' |
 
 `describe_video` also needs `timm`, `einops`, `torchaudio` (`pip install -r uniav_api/requirements.txt`).
-Only InternVideo2-feature models are supported; the ONE-PEACE-feature models (`omni65`, `omni100`)
-need the code before the 2026-10-05 cleanup. Checkpoints saved before that cleanup (with unused
-AVEL / SED feed-forward layers, 135M parameters instead of 68M) load unchanged.
+Only models with InternVideo2 features and the InternVideo2 caption space (or the teacher's) are
+supported; ONE-PEACE models need the code before 2026-10-05. Checkpoints saved before the cleanup
+of that day (with unused AVEL / SED feed-forward layers, 135M parameters instead of 68M) load unchanged.
 
 ## Devices and memory
 

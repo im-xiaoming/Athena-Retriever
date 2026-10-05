@@ -1,7 +1,7 @@
 """YouCook2 dataset for event segmentation + captioning.
 
   - each segment's label is the CAPTION INDEX within the video (0..N-1), not a global class id
-  - every sample carries its captions' ONE-PEACE text vectors (NMAX, 1536) and a validity mask (NMAX,)
+  - every sample carries its captions' text vectors (NMAX, 512) and a validity mask (NMAX,)
   - num_classes = NMAX, the maximum number of captions in one video
 so label_points produces gt_cls_labels (P, NMAX) unchanged.
 
@@ -9,13 +9,10 @@ Input features: InternVideo2 video (iv2_video_keys, v768 and/or v512) + BEATs au
 per second (iv2_rows_per_sec=2 with tools/make_iv2_dense.py), from tools/extract_internvideo2.py,
 resampled to max_seq_len steps.
 
-Caption space (caption_space), where the model is trained and picks captions:
-  onepeace : ONE-PEACE text vectors (caption_emb_file, 1536-d)
-  iv2      : InternVideo2 text vectors (caption_emb_iv2_file, 512-d, tools/embed_captions.py),
-             aligned with the v512 video projection
-  omni     : OmniRetriever-7B text vectors from the teacher file (omni_emb_file)
-ONE-PEACE text vectors stay the space of the ret_sim metric and of the consensus pick whatever
-is chosen here, so every run is scored the same way.
+Captions: InternVideo2 text vectors (caption_emb_file, 512-d, tools/embed_captions.py), in the
+space of the v512 video projection. They are the space of the txt_sim metric and of the consensus
+pick, and by default (caption_space iv2) also the space the model is trained and picks captions in.
+caption_space omni trains in the OmniRetriever-7B text space instead (teacher file, omni_emb_file).
 """
 import os
 import json
@@ -31,7 +28,7 @@ from .loc_generators import PointGenerator
 NMAX = 16   # maximum number of captions in one YouCook2 video
 # config keys of the removed ONE-PEACE feature path; accepted and ignored so old run configs still load
 LEGACY_KEYS = {'feat_folder', 'feat_stride', 'num_frames', 'downsample_rate', 'class_aware', 'file_prefix',
-               'file_ext', 'multi_modal', 'require_iv2'}
+               'file_ext', 'multi_modal', 'require_iv2', 'caption_emb_iv2_file'}
 
 
 class YouCook2CaptionDataset(Dataset):
@@ -40,8 +37,7 @@ class YouCook2CaptionDataset(Dataset):
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
         crop_ratio, num_classes, force_upsampling=True, omni_emb_file=None, feat_source='iv2',
         iv2_folder='./data/youcookii/iv2_feats', iv2_video_keys=('v768',), iv2_l2norm=True,
-        iv2_rows_per_sec=1, caption_space='onepeace',
-        caption_emb_iv2_file='./data/youcookii/caption_emb_iv2.npz', **legacy,
+        iv2_rows_per_sec=1, caption_space='iv2', **legacy,
     ):
         unknown = set(legacy) - LEGACY_KEYS
         assert not unknown, 'unknown dataset options %s' % sorted(unknown)
@@ -62,7 +58,7 @@ class YouCook2CaptionDataset(Dataset):
         self.num_classes = num_classes
         self.crop_ratio = crop_ratio
 
-        # ONE-PEACE caption vectors, keyed "<video_id>#<segment index>"
+        # InternVideo2 caption vectors, keyed "<video_id>#<segment index>"
         z = np.load(caption_emb_file, allow_pickle=True)
         self.cap_emb = {k: v for k, v in zip(z['keys'], z['emb'])}
         self.cap_text = {k: s for k, s in zip(z['keys'], z['sentences'])}
@@ -73,15 +69,12 @@ class YouCook2CaptionDataset(Dataset):
         self.omni = bool(omni_emb_file) and is_training   # only the train split needs the teacher
         if self.omni:
             self._load_omni(omni_emb_file)
-        assert caption_space in ('onepeace', 'iv2', 'omni'), caption_space
+        assert caption_space in ('iv2', 'omni'), 'caption_space %s (ONE-PEACE was removed)' % caption_space
+        assert self.emb_dim == 512, '%s is not the InternVideo2 caption file' % caption_emb_file
         self.caption_space = caption_space
         if caption_space == 'omni' and is_training:
             assert self.omni and self.omni_text_ok.all(), 'caption_space omni needs teacher text for every caption'
             self.pool_train = self.omni_text_pool.astype(np.float32)
-        elif caption_space == 'iv2':
-            z = np.load(caption_emb_iv2_file, allow_pickle=True)
-            iv2 = {k: v for k, v in zip(z['keys'], z['emb'])}
-            self.pool_train = np.stack([iv2[k] for k in self.pool_keys]).astype(np.float32)
         else:
             self.pool_train = self.pool_emb
 

@@ -87,9 +87,9 @@ Lấy đoạn [83.2 s, 104 s], tương ứng các bước 118 đến 148 trên l
 - Kho có **8218 câu** lấy từ tập train, ví dụ "add the rice to the pan and stir", "cut the carrots into
   cubes"...
 - Mỗi câu được chấm điểm bằng cosine giữa q và vector của câu, trong không gian caption của model (vector
-  ONE-PEACE text qua `clip_proj`).
+  chữ InternVideo2 qua `clip_proj`; trước 2026-10-05 là vector chữ ONE-PEACE).
   - Có thể cộng thêm điểm trong không gian của thầy: q đi qua `omni_proj`, rồi so với vector text của thầy
-    (đã tính sẵn cho 8218 câu). Đo trên tập val, cách này không giúp được gì đo được: ret_sim chênh không
+    (đã tính sẵn cho 8218 câu). Đo trên tập val, cách này không giúp được gì đo được: độ giống câu chênh không
     quá 0.003, nằm trong mức nhiễu. Vì vậy `uniav_api` chỉ dùng điểm trong không gian caption.
   - Tác dụng chính của thầy là lúc train: dạy q qua `omni_proj` (xem phần cuối).
 - Lấy **20 câu điểm cao nhất**. Thay vì lấy câu đứng đầu, model chọn câu được **nhiều ứng viên khác đồng

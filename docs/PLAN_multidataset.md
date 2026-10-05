@@ -41,7 +41,7 @@ Sau khi tải:
 ## Cách đánh giá
 
 - Luôn chấm trên YouCook2 val (394 video), so với `iv2`, mỗi biến thể 2 seed.
-- Nhiễu giữa các seed: ±1.5 R@0.5, ±0.003 ret_sim, ±2 CIDEr.
+- Nhiễu giữa các seed: ±1.5 R@0.5, ±0.003 txt_sim, ±2 CIDEr.
 - Chỉ số chính cho caption: CIDEr và METEOR của câu sinh ra, trên các đoạn model tự tìm.
 
 ## Đã cân nhắc và bỏ

@@ -33,7 +33,7 @@ Step 4, measure the teacher zero-shot on GT val clips before training:
 
   python tools/omni_youcook2.py teacher --omni data/youcookii/omni_emb.npz
 
-  Compare with ret_sim[oracle] / CIDEr[oracle] from train_event.py --eval.
+  Compare with txt_sim[oracle] / CIDEr[oracle] from train_event.py --eval.
 """
 import argparse
 import json
@@ -45,7 +45,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-CAPTION_EMB = os.path.join(ROOT, 'data', 'youcookii', 'caption_emb.npz')
+CAPTION_EMB = os.path.join(ROOT, 'data', 'youcookii', 'caption_emb_iv2.npz')   # keys, sentences, InternVideo2 text vectors
 ANNOTATIONS = os.path.join(ROOT, 'data', 'youcookii', 'annotations',
                            'youcookii_annotations_trainval.json')
 
@@ -179,7 +179,7 @@ def teacher(a):
         sims.append(float(pool_n[i] @ gt))
         gts[len(gts)] = [text]; hyp[len(hyp)] = [pool_text[i]]
     print('OmniRetriever zero-shot, %d val clips, pool %d captions' % (len(sims), len(pool_text)))
-    print('ret_sim %.3f   CIDEr %.2f' % (np.mean(sims), Cider().compute_score(gts, hyp)[0] * 100))
+    print('txt_sim %.3f   CIDEr %.2f' % (np.mean(sims), Cider().compute_score(gts, hyp)[0] * 100))
 
 
 if __name__ == '__main__':

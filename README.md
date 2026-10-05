@@ -8,17 +8,21 @@ reduced to a single task:
   (`tools/extract_internvideo2.py`).
 - **Segmentation**: class-agnostic event head, boundary head with an IoU-quality branch, soft-NMS.
 - **Captioning**: each event's vector (span mean + video context) is matched against the 8218 train
-  captions in a text space (ONE-PEACE by default, or InternVideo2's own text space) and a caption is
-  picked by consensus; an optional GPT-2 generator writes captions instead (`tools/capgen/`).
+  captions in InternVideo2's own text space (the space of its v512 video projection) and a caption is
+  picked by consensus; a GPT-2 generator writes captions instead (`tools/capgen/`).
 - **Teacher**: OmniRetriever-7B embeddings of every GT clip and caption guide the event vectors
   during training (off at inference).
 
 Architecture: `docs/UniAV_new.drawio.svg`, walkthrough with an example: `docs/UniAV_new_walkthrough.md`.
 
-| YouCook2 val (394 videos) | R@0.5 | R@0.7 | ret_sim | CIDEr | METEOR |
-|---|---|---|---|---|---|
-| `iv2` (API model) | 54.3 | 31.2 | 0.754 | 87.9 | 15.56 |
-| + GPT-2 captions on the same events | | | | 95.1 | 15.42 |
+| YouCook2 val (394 videos) | R@0.5 | R@0.7 | CIDEr | METEOR |
+|---|---|---|---|---|
+| `iv2` (ONE-PEACE caption space, before 2026-10-05) | 54.3 | 31.2 | 87.9 | 15.56 |
+| + GPT-2 captions on the same events | | | 95.1 | 15.42 |
+| `civ2_v512` (InternVideo2 caption space, 1 seed, Kaggle) | 53.1 | | 90.2 | |
+
+Main metrics: R@0.5 / R@0.7 for segmentation, CIDEr / METEOR for captions. `txt_sim` (cosine of the
+chosen and the GT caption in InternVideo2 text space) replaces the ONE-PEACE `ret_sim` of older runs.
 
 All runs, configs and lessons: `experiments/RESULTS.md`, `experiments/NOTES.md`.
 
@@ -46,22 +50,22 @@ cd libs/utils && python setup.py install --user && cd ../..
 
 Data (private HF dataset `nguyenminh04/uniav-youcook2-data`, see `docs/HANDOFF_KAGGLE.md`):
 `iv2_feats/` -> `data/youcookii/iv2_feats/` (1500 `.npz`), `teacher/omni_emb_full.npz` ->
-`data/youcookii/`. Annotations and caption vectors (`caption_emb.npz`, `caption_emb_iv2.npz`) are in git.
+`data/youcookii/`. Annotations and caption vectors (`caption_emb_iv2.npz`) are in git.
 
 ## Train and evaluate
 
 ```bash
-python train_event.py configs/youcook2_event.yaml --output iv2 --note 'baseline'
-python train_event.py configs/youcook2_event.yaml --output iv2_txt --set dataset.caption_space=iv2
-python train_event.py configs/youcook2_event.yaml --eval ckpt/iv2/best_cap.pth.tar
+python train_event.py configs/youcook2_event.yaml --output civ2 --note 'baseline'
+python train_event.py configs/youcook2_event.yaml --output civ2_v512 --set 'dataset.iv2_video_keys=[v768,v512]'
+python train_event.py configs/youcook2_event.yaml --eval ckpt/civ2/best_cap.pth.tar
 python tools/summarize_runs.py && python tools/plot_runs.py
-python tools/export_api_ckpt.py iv2          # -> ckpt/api/uniav_iv2.pth for uniav_api
+python tools/export_api_ckpt.py civ2_v512    # -> ckpt/api/uniav_civ2_v512.pth for uniav_api
 ```
 
 About 20 minutes per run on an RTX 3060 (2 warm-up + 10 cosine epochs). Seed noise is about
-±1.5 R@0.5, ±0.003 ret_sim, ±2 CIDEr: compare variants over two seeds (`--set init_rand_seed=2024`).
+±1.5 R@0.5, ±2 CIDEr, ±0.003 txt_sim: compare variants over two seeds (`--set init_rand_seed=2024`).
 
 ## Credits
 
 UniAV (Geng et al., 2024, [code](https://github.com/ttgeng233/UniAV)), ActionFormer, UnAV,
-InternVideo2, BEATs, ONE-PEACE, OmniRetriever.
+InternVideo2, BEATs, OmniRetriever.
