@@ -44,6 +44,9 @@ class Captioner:
         if pool_train is not None:   # caption vectors of the model's own caption space, same order
             assert len(pool_train['emb']) == len(self.texts), 'caption_pool does not match %s' % pool_path
             train = torch.as_tensor(np.asarray(pool_train['emb'], np.float32), device=device)
+            if pool_train.get('mean') is not None:   # InternVideo2 text, centred differently (e.g. *_iv2j.npz)
+                raw = train
+                self.mean = torch.as_tensor(np.asarray(pool_train['mean'], np.float32))
         with torch.no_grad():
             self.pool_f = model.embed_head.embed_captions(train.to(next(model.parameters()).dtype)).float()
             self.pool_n = F.normalize(raw, dim=-1)

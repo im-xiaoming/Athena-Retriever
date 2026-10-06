@@ -49,12 +49,13 @@ class EventHead(nn.Module):
 
 
 class EmbedHead(nn.Module):
-    def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536):
+    def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536, text_proj='linear'):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
         self.vis_proj = MaskedConv1D(feat_dim, feat_dim, ks, stride=1, padding=ks // 2)
-        self.clip_proj = Linear(clip_dim, feat_dim)
+        # text_proj none: captions and queries stay frozen InternVideo2 text vectors (docs/PLAN_openvocab.md)
+        self.clip_proj = None if text_proj == 'none' else Linear(clip_dim, feat_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(self, fpn_feats, fpn_masks):
@@ -72,7 +73,7 @@ class EmbedHead(nn.Module):
 
     def embed_captions(self, cap):
         """InternVideo2 caption or query vectors (N, 512) -> event space (N, D), normalised."""
-        return F.normalize(self.clip_proj(cap), dim=-1)
+        return F.normalize(cap if self.clip_proj is None else self.clip_proj(cap), dim=-1)
 
 
 def span_mean(raw, length, segs):
@@ -154,7 +155,7 @@ class EventCaptionModel(nn.Module):
     def __init__(self, backbone_arch, scale_factor, input_dim_V, input_dim_A, n_head, embd_kernel_size,
                  embd_dim, embd_with_ln, head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, max_seq_len, test_cfg, train_cfg=None, clip_dim=1536, omni_dim=0,
-                 ground=None, **unused):
+                 ground=None, text_proj='linear', pyramid_attn='cross', **unused):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)]
         self.max_seq_len = max_seq_len
@@ -170,12 +171,12 @@ class EventCaptionModel(nn.Module):
             scale_factor=scale_factor, with_ln=embd_with_ln, attn_pdrop=0.0, proj_pdrop=0.0,
             # droppath > 0 builds AffineDropPath, whose learned per-channel scale is still applied
             # in eval mode; with 0 the blocks become Identity and those weights would be lost
-            path_pdrop=(train_cfg or {}).get('droppath', 0.1), use_abs_pe=use_abs_pe)
+            path_pdrop=(train_cfg or {}).get('droppath', 0.1), use_abs_pe=use_abs_pe, pyramid_attn=pyramid_attn)
         D = embd_dim * 2
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size, head_with_ln)
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides), head_num_layers,
                                        head_kernel_size, head_with_ln)
-        self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size, head_with_ln, clip_dim)
+        self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size, head_with_ln, clip_dim, text_proj)
         self.seg_ctx = SegmentContext(head_dim)
         if ground is None:
             ground = (train_cfg or {}).get('loss_weight_ground', 0) > 0

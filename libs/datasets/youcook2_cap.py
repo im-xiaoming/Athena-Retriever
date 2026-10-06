@@ -58,11 +58,9 @@ class YouCook2CaptionDataset(Dataset):
         self.num_classes = num_classes
         self.crop_ratio = crop_ratio
 
-        # InternVideo2 caption vectors, keyed "<video_id>#<segment index>"
-        z = np.load(caption_emb_file, allow_pickle=True)
-        self.cap_emb = {k: v for k, v in zip(z['keys'], z['emb'])}
-        self.cap_text = {k: s for k, s in zip(z['keys'], z['sentences'])}
-        self.emb_dim = z['emb'].shape[1]
+        self.source = 0          # dataset id: rows of the pool loss only see captions of their own dataset
+        self.pool_offset = 0     # where this dataset's captions start in a pool shared by several datasets
+        self._load_captions(caption_emb_file)
 
         self.data_list = self._load_json_db(json_file)
         self._build_pool()
@@ -85,6 +83,14 @@ class YouCook2CaptionDataset(Dataset):
             max_seq_len_ori=self.max_seq_len, max_buffer_len_factor=max_buffer_len_factor,
             fpn_levels=len(self.fpn_strides), scale_factor=scale_factor,
             regression_range=regression_range, max_div_factor=max(self.fpn_strides))
+
+    def _load_captions(self, path):
+        """InternVideo2 caption vectors keyed "<video_id>#<segment index>", plus the "other" text if stored."""
+        z = np.load(path, allow_pickle=True)
+        self.cap_emb = {k: v for k, v in zip(z['keys'], z['emb'])}
+        self.cap_text = {k: s for k, s in zip(z['keys'], z['sentences'])}
+        self.emb_dim = z['emb'].shape[1]
+        self.other = z['other'].astype(np.float32) if 'other' in z.files else None
 
     def _build_pool(self):
         """Unique caption pool of this split; identical captions share one index.
@@ -235,7 +241,7 @@ class YouCook2CaptionDataset(Dataset):
         for i in range(item['n_cap']):
             k = '%s#%d' % (vid, i)
             emb[i] = self.cap_emb[k]; cmask[i] = True; texts[i] = str(self.cap_text[k])
-            pidx[i] = self.cap_pool_idx[k]
+            pidx[i] = self.cap_pool_idx[k] + self.pool_offset
         data_dict['cap_emb'] = torch.from_numpy(emb)
         data_dict['cap_mask'] = torch.from_numpy(cmask)
         data_dict['cap_pool_idx'] = torch.from_numpy(pidx)
@@ -245,6 +251,7 @@ class YouCook2CaptionDataset(Dataset):
                 aidx[i] = self.cap_av_idx.get('%s#%d' % (vid, i), -1)
             data_dict['cap_av_idx'] = torch.from_numpy(aidx)
         data_dict['cap_text'] = texts
+        data_dict['source'] = self.source
         # original boundaries in seconds, used only for scoring
         data_dict['segments_sec'] = item['segments'].tolist()
         return data_dict

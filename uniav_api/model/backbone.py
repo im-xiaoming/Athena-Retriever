@@ -25,9 +25,13 @@ class ConvTransformerBackbone(nn.Module):
         proj_pdrop = 0.0,      # dropout rate for the projection / MLP
         path_pdrop = 0.0,      # droput rate for drop path
         use_abs_pe = False,    # use absolute position embedding
+        pyramid_attn = 'cross',  # 'cross': level-0 and pyramid blocks attend from one stream to the other;
+                                 # 'self': each stream attends to itself (intra-modal only, OV-AVEL Table A9)
     ):
         super().__init__()
         assert len(arch) == 3
+        assert pyramid_attn in ('cross', 'self'), pyramid_attn
+        self.cross = pyramid_attn == 'cross'
         self.arch = arch
         self.max_len = max_len
         self.relu = nn.ReLU(inplace=True)
@@ -176,8 +180,9 @@ class ConvTransformerBackbone(nn.Module):
             x_V, mask_V = self.self_att_V[idx](x_V, x_V, mask_V)
             x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A)
 
-        x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A, mask_V) 
-        x_Av, mask_V = self.ori_cross_att_Av(x_A, x_V, mask_A) 
+        # the same weights either way: with pyramid_attn 'self' the key/value stream is the query stream
+        x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A if self.cross else x_V, mask_V)
+        x_Av, mask_V = self.ori_cross_att_Av(x_A, x_V if self.cross else x_A, mask_A)
 
         # prep for outputs
         out_feats_V = tuple()
@@ -192,11 +197,11 @@ class ConvTransformerBackbone(nn.Module):
 
         # main branch with downsampling
         for idx in range(len(self.cross_att_Va)):
-            x_V, mask_V = self.cross_att_Va[idx](out_feats_V[idx], out_feats_A[idx], mask_V)
+            x_V, mask_V = self.cross_att_Va[idx](out_feats_V[idx], out_feats_A[idx] if self.cross else out_feats_V[idx], mask_V)
             out_feats_V += (x_V, )
             out_masks_V += (mask_V, )
 
-            x_A, mask_A = self.cross_att_Av[idx](out_feats_A[idx], out_feats_V[idx], mask_A)
+            x_A, mask_A = self.cross_att_Av[idx](out_feats_A[idx], out_feats_V[idx] if self.cross else out_feats_A[idx], mask_A)
             out_feats_A += (x_A, )
             out_masks_A += (mask_A, )
 

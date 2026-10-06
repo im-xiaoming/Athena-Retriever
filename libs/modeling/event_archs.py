@@ -30,6 +30,13 @@ idea of the OmniRetriever paper: the segment vector is projected into its
   - contrasted with the caption pool in that space, with the same soft targets
 At inference the scores of both spaces are added.
 
+Open vocabulary (docs/PLAN_openvocab.md, after OV-AVEL, CVPR 2025):
+  text_proj: 'none'       captions and queries stay frozen InternVideo2 text vectors; only the video side
+                          learns to land in that space ('linear', the old default, trains clip_proj on them)
+  loss_weight_other: w    steps outside every event are pulled to the text "other" (OV-AVEL's background
+                          text), which also takes part as a negative for every other step and span
+  several datasets        each row of the pool loss only sees the captions of its own dataset (pool_src)
+
 Options (train_cfg), all off by default:
   omni_target: 'tva'      the teacher target of a clip is its audio+video vector fused with the
                           vector of its caption (T+V+A), instead of audio+video alone
@@ -81,12 +88,17 @@ class EventHead(nn.Module):
 class EmbedHead(nn.Module):
     """One L2-normalised vector per time step, in the space of the projected captions."""
 
-    def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536):
+    def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536, text_proj='linear'):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
         self.vis_proj = MaskedConv1D(feat_dim, feat_dim, ks, stride=1, padding=ks // 2)
-        self.clip_proj = Linear(clip_dim, feat_dim)
+        assert text_proj in ('linear', 'none'), text_proj
+        if text_proj == 'none':   # frozen text space: the video side projects straight into it
+            assert clip_dim == feat_dim, 'text_proj none needs head_dim == caption dim (%d)' % clip_dim
+            self.clip_proj = None
+        else:
+            self.clip_proj = Linear(clip_dim, feat_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(self, fpn_feats, fpn_masks):
@@ -104,7 +116,7 @@ class EmbedHead(nn.Module):
         return res, raw0
 
     def embed_captions(self, cap):
-        return F.normalize(self.clip_proj(cap), dim=-1)
+        return F.normalize(cap if self.clip_proj is None else self.clip_proj(cap), dim=-1)
 
 
 def span_mean(raw, length, segs):
@@ -211,7 +223,7 @@ class EventCaptionTransformer(nn.Module):
                  input_dim_A, n_head, embd_kernel_size, embd_dim, embd_with_ln,
                  head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, train_cfg, test_cfg, max_seq_len,
-                 nmax=16, clip_dim=1536, omni_dim=0):
+                 nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross'):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)]
         assert len(self.fpn_strides) == len(regression_range)
@@ -245,7 +257,8 @@ class EventCaptionTransformer(nn.Module):
         self.w_ground = train_cfg.get('loss_weight_ground', 0.0)
         self.ground_neg = train_cfg.get('ground_neg_per_video', 2)
         self.ground_neg_max_cos = train_cfg.get('ground_neg_max_cos', 0.7)
-        self.pool_raw = None
+        self.w_other = train_cfg.get('loss_weight_other', 0.0)
+        self.pool_raw = self.pool_src = self.other_raw = None
         self.omni_dim = omni_dim
 
         assert backbone_type == 'convTransformer', backbone_type
@@ -253,14 +266,15 @@ class EventCaptionTransformer(nn.Module):
             n_in_V=input_dim_V, n_in_A=input_dim_A, n_embd=embd_dim, n_head=n_head,
             n_embd_ks=embd_kernel_size, max_len=max_seq_len, arch=backbone_arch,
             scale_factor=scale_factor, with_ln=embd_with_ln, attn_pdrop=0.0,
-            proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe)
+            proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe,
+            pyramid_attn=pyramid_attn)
         D = embd_dim * 2
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
                                        head_num_layers, head_kernel_size, head_with_ln)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
-                                    head_with_ln, clip_dim)
+                                    head_with_ln, clip_dim, text_proj)
         self.seg_ctx = SegmentContext(head_dim)
         if self.w_ground > 0:
             assert clip_dim == 512, 'the ground head takes InternVideo2 text queries (caption_space iv2)'
@@ -273,10 +287,15 @@ class EventCaptionTransformer(nn.Module):
                                            nn.Linear(head_dim * 2, omni_dim))
             self.omni_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-    def set_caption_pool(self, pool_raw):
-        """Train caption pool (N, clip_dim) in the caption space, the negative set during training."""
+    def set_caption_pool(self, pool_raw, pool_src=None, other=None):
+        """Train caption pool (N, clip_dim) in the caption space, the negative set during training.
+        pool_src (N,) dataset of every caption (rows only see their own dataset); other (clip_dim,)
+        the text "other" for background steps (loss_weight_other)."""
         self.pool_raw = pool_raw
         self.pool_n = F.normalize(pool_raw, dim=-1)
+        self.pool_src = pool_src
+        self.other_raw = other
+        assert self.w_other == 0 or other is not None, 'loss_weight_other needs the "other" text vector'
 
     def set_omni_pool(self, text_pool, text_ok, av_pool, av_text_idx=None):
         """Teacher pools: caption vectors (N, d) aligned with the caption pool, and the
@@ -328,22 +347,36 @@ class EventCaptionTransformer(nn.Module):
             return self.losses(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
         return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
 
-    def pool_loss(self, q, gt_idx, pool_f, log_scale=None, col_ok=None):
+    def pool_loss(self, q, gt_idx, pool_f, log_scale=None, col_ok=None, src=None, other_f=None):
         """Cross-entropy over the whole pool with soft targets.
 
-        q (M, D) normalised queries, gt_idx (M,) index of the true caption in the pool.
-        col_ok (N,) marks which pool captions are usable.
+        q (M, D) normalised queries, gt_idx (M,) index of the true caption in the pool, or -1 for a
+        background step whose target is the "other" text. col_ok (N,) marks which pool captions are
+        usable; src (M,) the dataset of every row, which then only sees captions of that dataset
+        (pool_src); other_f (D,) the "other" text, an extra last column every row sees.
         """
         log_scale = self.embed_head.logit_scale if log_scale is None else log_scale
-        logit = log_scale.exp().clamp(max=100) * (q @ pool_f.t())
+        cols = pool_f if other_f is None else torch.cat((pool_f, other_f[None]))
+        logit = log_scale.exp().clamp(max=100) * (q @ cols.t())
+        bg = gt_idx < 0
+        assert other_f is not None or not bg.any(), 'background rows need the "other" text'
+        g = gt_idx.clamp(min=0)
+        rows = torch.arange(len(g), device=q.device)
         with torch.no_grad():
-            sim = self.pool_n[gt_idx] @ self.pool_n.t() / self.soft_tau
+            ok = torch.ones(len(g), len(pool_f), dtype=torch.bool, device=q.device)
+            if src is not None and self.pool_src is not None:
+                ok = self.pool_src[None] == src[:, None]
             if col_ok is not None:
-                sim = sim.masked_fill(~col_ok[None], float('-inf'))
+                ok = ok & col_ok[None]
+            sim = (self.pool_n[g] @ self.pool_n.t() / self.soft_tau).masked_fill(~ok, float('-inf'))
             tgt = self.soft_alpha * F.softmax(sim, dim=-1)
-            tgt[torch.arange(len(gt_idx), device=q.device), gt_idx] += 1 - self.soft_alpha
-        if col_ok is not None:
-            logit = logit.masked_fill(~col_ok[None], -1e4)
+            tgt[rows, g] += 1 - self.soft_alpha
+            if other_f is not None:
+                tgt = torch.cat((tgt, tgt.new_zeros(len(g), 1)), 1)
+                tgt[bg] = 0
+                tgt[bg, -1] = 1
+                ok = torch.cat((ok, ok.new_ones(len(g), 1)), 1)
+        logit = logit.masked_fill(~ok, -1e4)
         return -(tgt * F.log_softmax(logit, dim=-1)).sum(-1).mean()
 
     def losses(self, video_list, valid, ev, bd, qu, em, raw0, len0):
@@ -378,7 +411,9 @@ class EventCaptionTransformer(nn.Module):
         # 3. per-step embedding: contrast against the whole caption pool
         assert self.pool_raw is not None, 'call set_caption_pool before training'
         cap_pool = torch.stack([x['cap_pool_idx'] for x in video_list]).to(dev)  # (B,NMAX)
+        vsrc = torch.as_tensor([x.get('source', 0) for x in video_list], device=dev)   # (B,)
         pool_f = self.embed_head.embed_captions(self.pool_raw)                  # (N, D)
+        other_f = self.embed_head.embed_captions(self.other_raw[None])[0] if self.w_other > 0 else None
         if n_pos == 0:
             em_loss = 0 * em.sum()
         else:
@@ -387,10 +422,18 @@ class EventCaptionTransformer(nn.Module):
                 sel = torch.randperm(bi.numel(), device=dev)[:self.max_pts]
                 bi, pi = bi[sel], pi[sel]
             gt = cap_pool[bi, gt_cls[bi, pi].argmax(-1)]
-            em_loss = self.pool_loss(em[bi, pi], gt, pool_f)
+            em_loss = self.pool_loss(em[bi, pi], gt, pool_f, src=vsrc[bi], other_f=other_f)
+        # 3b. background steps toward the text "other" (OV-AVEL)
+        if self.w_other > 0:
+            bi, pi = (valid & ~is_event).nonzero(as_tuple=True)
+            if bi.numel() > self.max_pts:
+                sel = torch.randperm(bi.numel(), device=dev)[:self.max_pts]
+                bi, pi = bi[sel], pi[sel]
+            other_loss = (self.pool_loss(em[bi, pi], torch.full_like(bi, -1), pool_f, src=vsrc[bi], other_f=other_f)
+                          if bi.numel() else 0 * em.sum())
         # 4. span embedding: mean over the GT span, plus a jittered copy so the model
         #    copes with predicted boundaries that are slightly off at inference
-        qs, gs, avs, zs = [], [], [], {'v': [], 'a': []}
+        qs, gs, avs, ss, zs = [], [], [], [], {'v': [], 'a': []}
         for b, x in enumerate(video_list):
             seg = x['segments'].to(dev).float()
             if seg.numel() == 0:
@@ -404,18 +447,23 @@ class EventCaptionTransformer(nn.Module):
                     for m, f in zip(('v', 'a'), self._streams0):
                         zs[m].append(F.normalize(self.modal_proj[m](span_mean(f[b], L, sg)), dim=-1))
                 gs.append(cap_pool[b, x['labels'].to(dev)])
+                ss.append(vsrc[b].expand(len(seg)))
                 if self.omni_dim > 0:
                     avs.append(x['cap_av_idx'].to(dev)[x['labels'].to(dev)])
         out = {'ev_loss': ev_loss, 'reg_loss': rg_loss, 'iou_loss': iou_loss,
                'emb_loss': em_loss}
+        if self.w_other > 0:
+            out['other_loss'] = other_loss
         if qs:
-            qs, gs = torch.cat(qs), torch.cat(gs)
-            span_loss = self.pool_loss(qs, gs, pool_f)
+            qs, gs, ss = torch.cat(qs), torch.cat(gs), torch.cat(ss)
+            span_loss = self.pool_loss(qs, gs, pool_f, src=ss, other_f=other_f)
         else:
             span_loss = 0 * raw0.sum()
         out['span_loss'] = span_loss
         total = (ev_loss + self.w_reg * rg_loss + self.w_iou * iou_loss
                  + self.w_emb * em_loss + self.w_span * span_loss)
+        if self.w_other > 0:
+            total = total + self.w_other * other_loss
         # fusion-as-teacher inside the model: each stream alone toward the fused vector and the caption
         if self.w_modal > 0 and len(gs):
             teacher = qs.detach()
@@ -424,7 +472,7 @@ class EventCaptionTransformer(nn.Module):
             for m in ('v', 'a'):
                 z = torch.cat(zs[m])
                 ml = ml + F.cross_entropy(scale * z @ teacher.t(), torch.arange(len(z), device=dev))
-                ml = ml + self.pool_loss(z, gs, pool_f)
+                ml = ml + self.pool_loss(z, gs, pool_f, src=ss)
             out['modal_loss'] = ml / 2
             total = total + self.w_modal * out['modal_loss']
         # 5. OmniRetriever teacher: captions in its space, and the GT clip as target

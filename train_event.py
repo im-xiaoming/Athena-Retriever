@@ -22,7 +22,7 @@ import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from libs.datasets import YouCook2CaptionDataset, trivial_batch_collator, worker_init_reset_seed
+from libs.datasets import CoinCaptionDataset, YouCook2CaptionDataset, trivial_batch_collator, worker_init_reset_seed
 from libs.modeling import EventCaptionTransformer, MaskedConv1D, upgrade_state_dict
 from libs.utils import make_scheduler, fix_random_seed
 
@@ -43,11 +43,12 @@ def build_optimizer(model, opt):
                 no_decay.add(fpn)
     pd = dict(model.named_parameters())
     assert not (pd.keys() - (decay | no_decay | clip))
-    return torch.optim.AdamW([
+    groups = [
         {'params': [pd[n] for n in sorted(decay)], 'weight_decay': opt['weight_decay']},
         {'params': [pd[n] for n in sorted(no_decay)], 'weight_decay': 0.0},
         {'params': [pd[n] for n in sorted(clip)], 'weight_decay': 0.0, 'lr': opt['clip_proj_lr']},
-    ], lr=opt['learning_rate'])
+    ]
+    return torch.optim.AdamW([g for g in groups if g['params']], lr=opt['learning_rate'])   # no clip_proj with text_proj none
 
 
 def load_ckpt(path):
@@ -136,15 +137,16 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     """
     from pycocoevalcap.cider.cider import Cider
     model.eval()
-    pool_f = F.normalize(model.embed_head.clip_proj(pool_raw), dim=-1)
+    pool_f = model.embed_head.embed_captions(pool_raw)
     # metrics and the consensus pick use the InternVideo2 caption vectors, whatever space the model is trained in
     pool_n = F.normalize(getattr(model, 'pool_metric', None) if getattr(model, 'pool_metric', None) is not None
                          else pool_raw, dim=-1)
-    same_space = pool_raw.shape[1] == model.embed_head.clip_proj.in_features and getattr(model, 'pool_metric', None) is None
+    same_space = getattr(model, 'pool_metric', None) is None
     scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
     omni = model.omni_dim > 0
     if omni:
-        o_txt = model.omni_text.masked_fill(~model.omni_text_ok[:, None], 0)
+        n = len(pool_raw)   # the teacher pool may be padded for COIN labels after the YouCook2 captions
+        o_txt = model.omni_text[:n].masked_fill(~model.omni_text_ok[:n, None], 0)
     cov = {t: 0 for t in ths}
     n_gt = n_pred = 0
     best_ious, cos_gt, cos_rand = [], [], []
@@ -167,7 +169,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
             emb_pt = r['embeds_pt'][:k].to(device).float()
             n_pred += k
             cap_raw = x['cap_emb'].to(device).float()
-            cap_proj = F.normalize(model.embed_head.clip_proj(cap_raw), dim=-1) if same_space else None
+            cap_proj = model.embed_head.embed_captions(cap_raw) if same_space else None
             cap_n = F.normalize(cap_raw, dim=-1)
             if full:
                 # caption the GT spans themselves: measures captioning alone
@@ -237,6 +239,61 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     return out
 
 
+@torch.no_grad()
+def evaluate_ov(model, loader, device, labels, label_emb, other=None):
+    """Open-vocabulary scores on COIN videos (docs/PLAN_openvocab.md), after OV-AVEL's metrics.
+
+    Acc    : the vector of each GT step span against every COIN label (and "other"); top-1 must be its label
+    F1     : the model's top-k events (k = number of GT steps), each named by its nearest label; a hit is
+             an unmatched GT step with the same label and IoU >= 0.5; an event named "other" is dropped
+    G R1@t : grounding (ground head): each step label as the query must find its own span, IoU >= t
+    """
+    model.eval()
+    bank = model.embed_head.embed_captions(torch.as_tensor(label_emb, device=device).float())
+    names = list(labels)
+    if other is not None:
+        bank = torch.cat((bank, model.embed_head.embed_captions(torch.as_tensor(other, device=device).float()[None])))
+        names.append('<other>')
+    acc, g_ious = [], []
+    tp = n_pred = n_gt = 0
+    for batch in loader:
+        for x in batch:
+            x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
+        for r in model(batch):
+            gts, texts = r['gt_segments'], r['gt_text'][:len(r['gt_segments'])]
+            pred = (r['embeds_gt'].to(device).float() @ bank.t()).argmax(-1).tolist()
+            acc += [names[i] == t for i, t in zip(pred, texts)]
+            k = min(len(gts), r['segments'].shape[0])
+            named = (r['embeds'][:k].to(device).float() @ bank.t()).argmax(-1).tolist()
+            used = set()
+            for seg, li in zip(r['segments'][:k].tolist(), named):
+                if names[li] == '<other>':
+                    continue
+                n_pred += 1
+                best = max(((iou(seg, g), j) for j, g in enumerate(gts) if j not in used and texts[j] == names[li]),
+                           default=(0.0, -1))
+                if best[0] >= 0.5:
+                    tp += 1; used.add(best[1])
+            n_gt += len(gts)
+            if r.get('ground_segments') is not None:
+                g_ious += [iou(p, g) for p, g in zip(r['ground_segments'].tolist(), gts)]
+    model.train()
+    out = {'Acc': 100.0 * float(np.mean(acc)) if acc else 0.0, 'F1': 100.0 * 2 * tp / max(n_pred + n_gt, 1)}
+    if g_ious:
+        for t in (0.5, 0.7):
+            out['G R1@%.1f' % t] = 100.0 * float(np.mean([i >= t for i in g_ious]))
+    return out
+
+
+def ov_scores(model, ov, dev):
+    """evaluate_ov on every COIN test set: {'seen/Acc': ..., 'unseen/G R1@0.5': ...}."""
+    out = {}
+    for name, (loader, ds) in ov.items():
+        for k, v in evaluate_ov(model, loader, dev, ds.labels, ds.label_emb, ds.other).items():
+            out['%s/%s' % (name, k)] = v
+    return out
+
+
 # One log row per epoch. Each column: (header, metric key, width, format)
 GROUPS = [
     ('train loss', [('event', 'ev_loss', 6, '.3f'), ('reg', 'reg_loss', 6, '.3f'), ('iou', 'iou_loss', 6, '.3f'),
@@ -277,6 +334,23 @@ def use_ground_columns():
     RULE = '-' * (len(HEAD) + 4)
 
 
+def use_ov_columns():
+    """Add the open-vocabulary COIN scores (unseen tasks first) to the table."""
+    global HEAD, RULE
+    GROUPS.append(('COIN unseen | seen', [('Acc', 'unseen/Acc', 5, '.1f'), ('F1', 'unseen/F1', 5, '.1f'),
+                                          ('GR1.5', 'unseen/G R1@0.5', 5, '.1f'), ('Acc', 'seen/Acc', 5, '.1f'),
+                                          ('F1', 'seen/F1', 5, '.1f'), ('GR1.5', 'seen/G R1@0.5', 5, '.1f')]))
+    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+    RULE = '-' * (len(HEAD) + 4)
+
+
+def use_other_column():
+    global HEAD, RULE
+    GROUPS[0][1][-1:-1] = [('other', 'other_loss', 6, '.3f')]
+    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+    RULE = '-' * (len(HEAD) + 4)
+
+
 def print_header():
     print('Legend       : S = new best R@0.5, C = new best CIDEr (each saves its checkpoint)')
     print('               cos_rand = cosine to a random caption (floor), txt_sim = similarity of')
@@ -296,18 +370,44 @@ def print_row(ep, t, lr, vals, mark):
 
 
 def build_loaders(cfg, rng):
+    """YouCook2 train / val, plus COIN (cfg['coin']): its seen-task training videos joined to the train set
+    when coin.train, and its test sets for the open-vocabulary scores when coin.eval.
+
+    Returns ds (YouCook2 train), dv, dl (train loader), dlv, dc (COIN train or None), ov {name: (loader, ds)}.
+    With COIN, every batch draws coin.batch_ratio of its videos from COIN on average, and an epoch has
+    as many batches as YouCook2 alone would have / (1 - batch_ratio).
+    """
     ds = YouCook2CaptionDataset(True, cfg['train_split'], **cfg['dataset'])
     dv = YouCook2CaptionDataset(False, cfg['val_split'], **cfg['dataset'])
-    dl = DataLoader(ds, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                    sampler=RandomSampler(ds), collate_fn=trivial_batch_collator,
+    cc = cfg.get('coin') or {}
+    have_coin = bool(cc) and os.path.exists(cc['anno_file']) and os.path.isdir(cc['iv2_folder'])
+    common = dict(cfg['dataset'], anno_file=cc.get('anno_file'), label_emb_file=cc.get('label_emb_file'),
+                  iv2_folder=cc.get('iv2_folder'))
+    dc, train_set, sampler = None, ds, RandomSampler(ds)
+    if cc.get('train'):
+        assert have_coin, 'coin.train needs %s and %s (tools/coin_data.py)' % (cc.get('anno_file'), cc.get('iv2_folder'))
+        dc = CoinCaptionDataset(True, ['train'], pad_omni=ds.omni, **common)
+        dc.pool_offset = len(ds.pool_text)
+        train_set = torch.utils.data.ConcatDataset([ds, dc])
+        r = cc.get('batch_ratio', 0.5)
+        w = torch.cat((torch.full((len(ds),), (1 - r) / len(ds)), torch.full((len(dc),), r / len(dc))))
+        sampler = torch.utils.data.WeightedRandomSampler(w.double(), int(round(len(ds) / (1 - r))), generator=rng)
+    dl = DataLoader(train_set, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
+                    sampler=sampler, collate_fn=trivial_batch_collator,
                     worker_init_fn=worker_init_reset_seed, drop_last=True, generator=rng,
                     persistent_workers=cfg['num_workers'] > 0)
     dlv = DataLoader(dv, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
                      sampler=SequentialSampler(dv), collate_fn=trivial_batch_collator)
-    return ds, dv, dl, dlv
+    ov = {}
+    if cc.get('eval', True) and have_coin:
+        for name, role in (('unseen', 'test_unseen'), ('seen', 'test_seen')):
+            d = CoinCaptionDataset(False, [role], **common)
+            ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
+                                   sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
+    return ds, dv, dl, dlv, dc, ov
 
 
-def eval_only(a, model, dlv, dev, pool_raw, pool_text):
+def eval_only(a, model, dlv, dev, pool_raw, pool_text, ov=None):
     """Score one checkpoint under several NMS / ranking settings, with all variants."""
     ck = load_weights(model, a.eval)
     print('Checkpoint   : %s (epoch %d)' % (a.eval, ck['epoch'] + 1), flush=True)
@@ -319,6 +419,7 @@ def eval_only(a, model, dlv, dev, pool_raw, pool_text):
             model.nms_cfg = {'soft': kind == 'soft', 'iou': float(rest[0]),
                              'sigma': float(rest[1]) if len(rest) > 1 else 0.5}
             m = evaluate(model, dlv, dev, pool_raw, pool_text, full=not a.fast)
+            m.update(ov_scores(model, ov or {}, dev))
             print('\niou_power %s  NMS %-14s' % (power, spec)
                   + '  '.join('%s %.3f' % (k, v) for k, v in m.items()), flush=True)
 
@@ -388,8 +489,14 @@ def main(a):
     rng = fix_random_seed(cfg.get('init_rand_seed', 1234567891), include_cuda=True)
     out_dir = os.path.join(cfg['output_folder'], a.output)
 
-    ds, dv, dl, dlv = build_loaders(cfg, rng)
+    ds, dv, dl, dlv, dc, ov = build_loaders(cfg, rng)
     print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
+    if dc is not None:
+        print('COIN train   : %d videos of seen tasks, %d labels; %.0f%% of every batch, %d batches per epoch'
+              % (len(dc), len(dc.pool_text), 100 * cfg['coin'].get('batch_ratio', 0.5), len(dl)), flush=True)
+    for name, (_, d) in ov.items():
+        print('COIN %-7s : %d videos (open-vocabulary scores, %d labels in the bank)' % (name, len(d), len(d.labels)),
+              flush=True)
     # the input width follows the feature source; stored in the run record's config
     cfg['model']['input_dim_V'], cfg['model']['input_dim_A'] = ds.feat_dims
     print('Features     : InternVideo2 %s + BEATs a768, %d row(s)/s, visual %d + audio %d channels' % (
@@ -399,29 +506,43 @@ def main(a):
         cfg['model']['omni_dim'] = ds.omni_dim
         use_omni_columns()
     cfg['model']['clip_dim'] = ds.pool_train.shape[1]   # caption space (dataset.caption_space)
+    if cfg['model']['train_cfg'].get('loss_weight_other', 0) > 0:
+        use_other_column()
     if cfg['model']['train_cfg'].get('loss_weight_ground', 0) > 0:
         use_ground_columns()
     model = EventCaptionTransformer(**cfg['model']).to(dev)
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
-    # the caption pool comes from the TRAIN split only; val captions are never used
+    # the caption pool comes from the TRAIN split only; val captions are never used. With COIN it also
+    # holds the labels of the seen-task training videos (pool_src 1); YouCook2 captioning is still scored
+    # against the YouCook2 captions only (pool_raw)
     pool_raw = torch.from_numpy(ds.pool_train).to(dev)
-    model.set_caption_pool(pool_raw)
+    joint, src = pool_raw, torch.zeros(len(pool_raw), dtype=torch.long, device=dev)
+    if dc is not None:
+        assert ds.caption_space == 'iv2', 'COIN joins the InternVideo2 caption space only'
+        joint = torch.cat((pool_raw, torch.from_numpy(dc.pool_emb).to(dev)))
+        src = torch.cat((src, torch.ones(len(dc.pool_emb), dtype=torch.long, device=dev)))
+    other = ds.other if ds.other is not None else (dc.other if dc is not None else None)
+    model.set_caption_pool(joint, src, None if other is None else torch.from_numpy(other).to(dev))
     if ds.caption_space != 'iv2':
         model.pool_metric = torch.from_numpy(ds.pool_emb).to(dev)
         print('Captions     : trained and picked in %s space (%d-d); metrics in InternVideo2 text space'
               % (ds.caption_space, pool_raw.shape[1]), flush=True)
     if ds.omni:
-        model.set_omni_pool(torch.from_numpy(ds.omni_text_pool).to(dev),
-                            torch.from_numpy(ds.omni_text_ok).to(dev),
+        pad = len(joint) - len(ds.omni_text_pool)   # COIN labels have no teacher vector
+        model.set_omni_pool(torch.from_numpy(np.concatenate((ds.omni_text_pool, np.zeros((pad, ds.omni_dim), np.float16)))).to(dev),
+                            torch.from_numpy(np.concatenate((ds.omni_text_ok, np.zeros(pad, bool)))).to(dev),
                             torch.from_numpy(ds.omni_av_pool).to(dev),
                             torch.as_tensor(ds.av_text_idx, dtype=torch.long, device=dev))
-    print('Caption pool : %d unique train captions' % len(ds.pool_text), flush=True)
+    print('Caption pool : %d unique train captions%s' % (
+        len(ds.pool_text), ' + %d COIN labels' % len(dc.pool_text) if dc is not None else ''), flush=True)
+    if ov:
+        use_ov_columns()
     if a.eval:
-        return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text)
+        return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text, ov)
     if a.finalize:   # redo the final evaluation of a finished run, e.g. after a crash in it
         rec = RunRecord.load(a.output)
-        return finalize(rec, model, dlv, dev, pool_raw, ds.pool_text)
+        return finalize(rec, model, dlv, dev, pool_raw, ds.pool_text, ov)
     os.makedirs(out_dir, exist_ok=True)
     rec = RunRecord(a, cfg, out_dir)
     print('Output       : %s' % out_dir)
@@ -444,6 +565,7 @@ def main(a):
             opt.step(); sch.step()
             for k, v in L.items(): acc[k] = acc.get(k, 0.0) + v.detach().item()
         m = evaluate(model, dlv, dev, pool_raw, ds.pool_text)
+        m.update(ov_scores(model, ov, dev))
         mark = ''
         for key, (val, _, name) in best.items():
             if m[key] > val:
@@ -460,13 +582,14 @@ def main(a):
         print('Best %-6s = %6.2f at epoch %d -> %s' % (
             key, val, ep + 1, os.path.join(out_dir, name + '.pth.tar')), flush=True)
 
-    finalize(rec, model, dlv, dev, pool_raw, ds.pool_text)
+    finalize(rec, model, dlv, dev, pool_raw, ds.pool_text, ov)
 
 
-def finalize(rec, model, dlv, dev, pool_raw, pool_text):
+def finalize(rec, model, dlv, dev, pool_raw, pool_text, ov=None):
     """Full evaluation of the run's best captioning checkpoint, stored in the run record."""
     load_weights(model, os.path.join(rec.data['out_dir'], 'best_cap.pth.tar'))
     final = evaluate(model, dlv, dev, pool_raw, pool_text, full=True)
+    final.update(ov_scores(model, ov or {}, dev))
     rec.data['final_eval'] = dict(final, ckpt='best_cap')
     rec.data['finished'] = rec.data.get('finished') or time.strftime('%Y-%m-%d %H:%M:%S')
     rec.save()

@@ -13,7 +13,7 @@ Ghi lại các quyết định đã thống nhất với người dùng. Khi nà
 
 | Dataset | Trạng thái | Ghi chú |
 |---|---|---|
-| COIN | đang tải về PC (`datasets/annotations/download_videos.py`, yt-dlp trong `uniav-api-env`, ≤480p) | 11,827 video, 468 giờ, 46,354 đoạn, 749 nhãn khác nhau (TB 4.9 từ, lặp ~60 lần), 180 việc |
+| COIN | **xong 2026-10-06**: 5.180 video có đặc trưng trên HF `nguyenminh04/coin-data` (`feats/`), 3 video trùng YouCook2 val ghi trong `data/coin_exclude.txt` | 11,827 video, 468 giờ, 46,354 đoạn, 749 nhãn khác nhau (TB 4.9 từ, lặp ~60 lần), 180 việc |
 | CrossTask | chưa | video gỡ khỏi YouTube từ 2022, repo có link tải thay thế |
 | HT-Step, VidChapters (phần nấu ăn) | để sau | chỉ làm nếu COIN giúp rõ |
 
@@ -52,3 +52,11 @@ Sau khi tải:
 ## Đầu vào production (2026-10-05, nhánh `multimodal-query`)
 
 Ba kiểu đầu vào: chỉ video, video + câu mô tả, chỉ câu mô tả (`uv.query`). Đã thêm **ground head** (câu điều khiển việc chấm điểm từng thời điểm, biên lấy từ boundary head, +2.9M tham số, `loss_weight_ground: 1.0`). Đã chạy thử pipeline trên PC, **chưa train**. Lần train tới cần xem thêm `G R1@0.5`, `G R1@0.7`, `G mIoU` bên cạnh R@0.5 và CIDEr, và kiểm tra ground head không làm tụt hai chỉ số kia. Với COIN: nhãn bước COIN cũng dùng làm câu truy vấn được.
+
+## Nối với kế hoạch open-vocabulary (2026-10-06)
+
+Người dùng chọn câu truy vấn thuộc **mọi chủ đề**. Kế hoạch chi tiết nằm ở `docs/PLAN_openvocab.md` (lấy ý tưởng từ bài OV-AVEL). Kế hoạch đó giữ nguyên mọi điểm của file này, cộng thêm:
+
+- Chia việc COIN thành **đã thấy** và **chưa thấy**. Việc chưa thấy không dùng khi train và chỉ để đo khả năng hiểu câu mới.
+- Phía chữ giữ nguyên, không train `clip_proj`. Căn tâm vector chữ bằng trung bình chung YouCook2 + COIN.
+- Bộ sinh câu (mục 4 ở trên) càng cần thiết: chọn câu từ kho caption nấu ăn không mô tả được việc ngoài nấu ăn. Khi train bộ sinh câu, đo thêm trên COIN việc chưa thấy, và thử cả hai thẻ `youcook2:` và `coin:` lúc suy luận.

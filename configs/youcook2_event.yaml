@@ -10,7 +10,8 @@ dataset:
   json_file: ./data/youcookii/annotations/youcookii_annotations_trainval.json
   # InternVideo2 text vectors of the captions (tools/embed_captions.py): the space of the txt_sim
   # metric and of the consensus pick, and the caption space unless caption_space is omni
-  caption_emb_file: ./data/youcookii/caption_emb_iv2.npz
+  # *_iv2j.npz: centred on the joint YouCook2 + COIN mean, with the "other" text (embed_captions.py --joint)
+  caption_emb_file: ./data/youcookii/caption_emb_iv2j.npz
   default_fps: 16
   max_seq_len: 256
   max_buffer_len_factor: 1.0
@@ -50,6 +51,15 @@ dataset:
   # OmniRetriever-7B teacher vectors (tools/omni_youcook2.py, HF teacher/omni_emb_full.npz).
   # Every run since omni100 uses it; set to null to train without the teacher
   omni_emb_file: ./data/youcookii/omni_emb_full.npz
+# COIN (docs/PLAN_openvocab.md, tools/coin_data.py fetch + anno): seen-task training videos join the train
+# set when train is true; the test sets give the open-vocabulary scores whenever the files are there
+coin:
+  train: false
+  eval: true
+  batch_ratio: 0.5       # share of every batch drawn from COIN
+  anno_file: ./data/coin/coin_anno.json
+  label_emb_file: ./data/coin/label_emb_iv2j.npz
+  iv2_folder: ./data/coin/iv2_feats
 model:
   backbone_type: convTransformer
   backbone_arch:
@@ -84,6 +94,8 @@ model:
   max_seq_len: 256
   nmax: 16
   clip_dim: 512        # set by train_event.py from the caption space
+  text_proj: linear    # none: caption / query vectors stay frozen InternVideo2 text vectors (OV-AVEL)
+  pyramid_attn: cross  # self: every backbone block attends within its own stream (OV-AVEL Table A9)
   train_cfg:
     loss_weight_reg: 1.0
     loss_weight_emb: 0.2
@@ -92,6 +104,8 @@ model:
     loss_weight_span: 0.2
     # ground head: a sentence finds its own span (video + text queries); 0 = no head
     loss_weight_ground: 1.0
+    # steps outside every event pulled to the text "other" (OV-AVEL); 0 = off
+    loss_weight_other: 0.0
     dropout: 0.0
     droppath: 0.1
   test_cfg:

@@ -31,6 +31,17 @@ def caption_pool(cfg):
     """
     space = cfg['dataset'].get('caption_space', 'onepeace')
     assert space != 'onepeace', 'ONE-PEACE caption-space models are no longer supported by uniav_api'
+    cap_file = cfg['dataset'].get('caption_emb_file', '')
+    if space == 'iv2' and os.path.basename(cap_file) != 'caption_emb_iv2.npz':
+        # InternVideo2 text centred on another mean (caption_emb_iv2j.npz: joint YouCook2 + COIN): the
+        # API's captions and new sentences must use the same vectors and the same mean
+        texts = [str(t) for t in np.load(os.path.join(ROOT, 'uniav_api', 'assets', 'caption_pool.npz'))['texts']]
+        e = np.load(os.path.join(ROOT, cap_file), allow_pickle=True)
+        vec = {}
+        for t, v in zip(e['sentences'], e['emb']):
+            vec.setdefault(str(t), v)
+        return {'emb': np.stack([vec[t] for t in texts]).astype(np.float16), 'mean': e['mean'].astype(np.float32),
+                'file': os.path.basename(cap_file)}
     if space == 'iv2':
         return None
     texts = [str(t) for t in np.load(os.path.join(ROOT, 'uniav_api', 'assets', 'caption_pool.npz'))['texts']]
