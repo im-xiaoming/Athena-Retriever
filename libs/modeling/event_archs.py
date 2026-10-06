@@ -159,6 +159,11 @@ class BoundaryHead(nn.Module):
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
         self.scale = nn.ModuleList([Scale() for _ in range(fpn_levels)])
         self.out = MaskedConv1D(feat_dim, 2, ks, stride=1, padding=ks // 2)
+        # offsets go through a ReLU: with a zero bias, an unlucky init can make one side negative at
+        # nearly every step, so it gets no gradient for epochs (seed 1234567891 after the 2026-10-05
+        # cleanup: left side > 0 at 1% of positive steps, reg loss flat for 5 epochs). A positive bias
+        # starts every step inside the ReLU's active range (offsets are in stride units, targets ~1-4)
+        torch.nn.init.constant_(self.out.conv.bias, 1.0)
         # predicts the IoU between the segment from this step and the GT, used for ranking
         self.iou_out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
 
