@@ -98,6 +98,13 @@ class UniAVPipeline:
         self.model = EventCaptionModel(**model_cfg)
         self.model.load_state_dict(sd, strict=True)
         self.model = self.model.to(self.device).eval()   # small (68M): fp32 everywhere
+        # segmentation + grounding weights (best_seg) when the checkpoint has them; captions use self.model
+        self.seg_model = self.model
+        if self.cfg.use_seg_weights and 'state_dict_seg' in ck:
+            self.seg_model = EventCaptionModel(**model_cfg)
+            self.seg_model.load_state_dict(upgrade_state_dict({k: v.float() for k, v in ck['state_dict_seg'].items()}),
+                                           strict=True)
+            self.seg_model = self.seg_model.to(self.device).eval()
         self.captioner = Captioner(self.cfg.caption_pool, self.model, self.device, self.pool_train)
         self._encoder = self._text = self._pool_query = self._generator = None
         # one index per model: event vectors of different checkpoints are not comparable
@@ -153,7 +160,10 @@ class UniAVPipeline:
     def process_features(self, visual, audio, duration):
         """Features (T, C) in the checkpoint's format (see features.py) -> events, times in seconds."""
         fv, fa, n = self.spec.prepare(visual, audio)
-        segs, scores, vecs = self.model(fv.to(self.device), fa.to(self.device))
+        segs, scores, vecs = self.seg_model(fv.to(self.device), fa.to(self.device))
+        if self.seg_model is not self.model:   # the caption weights describe the segments found
+            self.model(fv.to(self.device), fa.to(self.device))
+            vecs = self.model.span_vectors(segs)
         secs = self.spec.to_seconds(segs, n, duration)
         keep = select_events(secs, scores, self.cfg.min_score, self.cfg.max_overlap, self.cfg.max_events)
         caps = self.captioner.caption(vecs[keep], alternatives=self.cfg.alternatives) if keep else []
@@ -258,7 +268,7 @@ class UniAVPipeline:
 
     @property
     def can_ground(self):
-        return self.model.ground_head is not None
+        return self.seg_model.ground_head is not None
 
     def _video_features(self, video):
         """A video given as a stored or sample id, or a file path -> (video_id, visual, audio, duration).
@@ -287,9 +297,13 @@ class UniAVPipeline:
     def _ground_features(self, visual, audio, duration, q_raw, top_k):
         """Features of one video, query vectors (Q, 512) -> per query a list of {start, end, score, ...}."""
         fv, fa, n = self.spec.prepare(visual, audio)
-        self.model(fv.to(self.device), fa.to(self.device))
+        self.seg_model(fv.to(self.device), fa.to(self.device))
+        if self.seg_model is not self.model:
+            self.model(fv.to(self.device), fa.to(self.device))
         out = []
-        for segs, scores, vecs in self.model.ground(q_raw.to(self.device), top_k):
+        for segs, scores, vecs in self.seg_model.ground(q_raw.to(self.device), top_k):
+            if self.seg_model is not self.model:   # caption the matches with the caption weights
+                vecs = self.model.span_vectors(segs)
             secs = self.spec.to_seconds(segs, n, duration)
             caps = self.captioner.caption(vecs, alternatives=0) if len(segs) else []
             out.append([dict(start=round(float(a), 2), end=round(float(b), 2), score=round(float(sc), 4),

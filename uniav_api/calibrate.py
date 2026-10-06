@@ -38,7 +38,9 @@ def match(preds, gts, thr=0.5):
 
 def main():
     pipe = UniAVPipeline(Config.from_env())
-    print('checkpoint %s (InternVideo2 %s, caption space %s)' % (pipe.cfg.checkpoint, '+'.join(pipe.spec.video_keys), pipe.caption_space))
+    print('checkpoint %s (InternVideo2 %s, caption space %s, %s segmentation weights)' % (
+        pipe.cfg.checkpoint, '+'.join(pipe.spec.video_keys), pipe.caption_space,
+        'separate' if pipe.seg_model is not pipe.model else 'the same'))
     with open(os.path.join(ROOT, 'data', 'youcookii', 'annotations', 'youcookii_annotations_trainval.json')) as f:
         db = json.load(f)['database']
     F = os.path.join(ROOT, 'data', 'youcookii', 'iv2_feats' if pipe.spec.stride == pipe.spec.fps else 'iv2_dense')
@@ -48,7 +50,7 @@ def main():
         if x['subset'] != 'validation' or vid not in have:
             continue
         fv, fa, n = pipe.spec.prepare(*pipe.spec.from_store(vid, F))
-        segs, scores, _ = pipe.model(fv.to(pipe.device), fa.to(pipe.device))
+        segs, scores, _ = pipe.seg_model(fv.to(pipe.device), fa.to(pipe.device))
         secs = pipe.spec.to_seconds(segs, n, x['duration'])
         gts = [a['segment'] for a in x['annotations'][:16]]
         cands.append((secs, scores, gts)); n_gt_total += len(gts)

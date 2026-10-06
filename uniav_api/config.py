@@ -34,6 +34,9 @@ class Config:
     # caption source: 'retrieve' picks a train caption (default); 'generate' writes one with GPT-2
     # (uniav_api/generator.py); the retrieved caption is then kept as 'retrieved_caption'
     caption_mode: str = 'retrieve'
+    # checkpoints with state_dict_seg (export_api_ckpt.py): segment and ground with those weights (the
+    # best segmentation epoch) and caption with the main ones; False uses the main weights for everything
+    use_seg_weights: bool = True
     generator: str = os.path.join(ROOT, 'ckpt', 'api', 'capgen_prefix.pth')
 
     @classmethod

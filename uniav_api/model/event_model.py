@@ -244,6 +244,14 @@ class EventCaptionModel(nn.Module):
         return segs_np, sc_np
 
     @torch.no_grad()
+    def span_vectors(self, segs):
+        """Segment vectors (N, D) of the video of the last forward pass for segments (grid units) found
+        elsewhere, e.g. by the segmentation weights of a two-checkpoint API model."""
+        raw0, len0 = self.last_level0
+        segs = torch.as_tensor(segs, dtype=torch.float32, device=raw0.device).reshape(-1, 2)
+        return self.seg_ctx(raw0, len0, segs) if len(segs) else torch.zeros(0, raw0.shape[0], device=raw0.device)
+
+    @torch.no_grad()
     def ground(self, query, top_k=5):
         """Sentences (Q, clip_dim raw InternVideo2 caption vectors) -> for each, up to top_k segments of
         the video of the last forward pass: [(segments (k, 2) grid units, scores (k,), vectors (k, D))].
