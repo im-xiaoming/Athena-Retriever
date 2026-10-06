@@ -9,6 +9,7 @@ the resolved config, the overrides, per-epoch metrics and a full evaluation of t
 best captioning checkpoint. tools/summarize_runs.py turns those files into a table.
 """
 import argparse
+import copy
 import json
 import os
 import socket
@@ -49,6 +50,25 @@ def build_optimizer(model, opt):
         {'params': [pd[n] for n in sorted(clip)], 'weight_decay': 0.0, 'lr': opt['clip_proj_lr']},
     ]
     return torch.optim.AdamW([g for g in groups if g['params']], lr=opt['learning_rate'])   # no clip_proj with text_proj none
+
+
+class ModelEma:
+    """Exponential moving average of the weights, as ActionFormer does (train_cfg.ema_decay, e.g. 0.999):
+    with it on, every evaluation and saved checkpoint uses the averaged weights."""
+
+    def __init__(self, model, decay):
+        self.module = copy.deepcopy(model)
+        self.decay = decay
+        for p in self.module.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        for e, m in zip(self.module.state_dict().values(), model.state_dict().values()):
+            if e.dtype.is_floating_point:
+                e.mul_(self.decay).add_(m.detach(), alpha=1 - self.decay)
+            else:
+                e.copy_(m)
 
 
 def load_ckpt(path):
@@ -551,6 +571,10 @@ def main(a):
 
     opt = build_optimizer(model, cfg['opt'])
     sch = make_scheduler(opt, cfg['opt'], len(dl), a.epochs)
+    ema = ModelEma(model, cfg['train_cfg']['ema_decay']) if cfg['train_cfg'].get('ema_decay', 0) > 0 else None
+    if ema is not None:
+        print('EMA         : decay %g, evaluated and saved instead of the raw weights' % ema.decay, flush=True)
+    net = ema.module if ema is not None else model   # the weights that are evaluated and saved
     n_ep = a.epochs + cfg['opt']['warmup_epochs']
     best = {'R@0.5': (-1.0, 0, 'best_seg'), 'CIDEr': (-1.0, 0, 'best_cap')}
     print_header()
@@ -563,14 +587,16 @@ def main(a):
             opt.zero_grad(set_to_none=True); L['final_loss'].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train_cfg']['clip_grad_l2norm'])
             opt.step(); sch.step()
+            if ema is not None:
+                ema.update(model)
             for k, v in L.items(): acc[k] = acc.get(k, 0.0) + v.detach().item()
-        m = evaluate(model, dlv, dev, pool_raw, ds.pool_text)
-        m.update(ov_scores(model, ov, dev))
+        m = evaluate(net, dlv, dev, pool_raw, ds.pool_text)
+        m.update(ov_scores(net, ov, dev))
         mark = ''
         for key, (val, _, name) in best.items():
             if m[key] > val:
                 best[key] = (m[key], ep, name); mark += 'S' if key == 'R@0.5' else 'C'
-                torch.save({'epoch': ep, 'state_dict': model.state_dict(), 'metrics': m},
+                torch.save({'epoch': ep, 'state_dict': net.state_dict(), 'metrics': m},
                            os.path.join(out_dir, name + '.pth.tar'))
         vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})
         print_row('%d/%d' % (ep + 1, n_ep), time.time() - t0, sch.get_last_lr()[0], vals, mark)

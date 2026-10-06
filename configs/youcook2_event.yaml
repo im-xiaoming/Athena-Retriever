@@ -46,6 +46,7 @@ dataset:
   iv2_video_keys: [v768]   # v768 = pooled vision, v512 = its projection into InternVideo2's text space
   iv2_l2norm: true
   iv2_rows_per_sec: 1      # 2 with iv2_folder ./data/youcookii/iv2_dense (tools/make_iv2_dense.py)
+  center_sample_radius: 0.0  # > 0 (ActionFormer: 1.5): only points within this many strides of a step's centre are positive
   # caption space: iv2 (InternVideo2 text) | omni (teacher text)
   caption_space: iv2
   # OmniRetriever-7B teacher vectors (tools/omni_youcook2.py, HF teacher/omni_emb_full.npz).
@@ -115,6 +116,7 @@ model:
     iou_power: 0.3
 train_cfg:
   clip_grad_l2norm: 1.0
+  ema_decay: 0.0       # > 0 (e.g. 0.999): evaluate and save an exponential moving average of the weights
 opt:
   type: AdamW
   momentum: 0.9

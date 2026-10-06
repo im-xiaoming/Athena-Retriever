@@ -118,21 +118,26 @@ def label_points(points,
                  gt_segments, 
                  gt_labels, 
                  num_classes, 
-                 class_aware
+                 class_aware,
+                 center_radius=0.0
                  ):
         # concat points on all pyramid levels List[T x 4] -> F T x 4
         # This is shared for all samples in the mini-batch
         concat_points = torch.cat(points, dim=0)
         cls_targets, reg_targets = label_points_single_video(
-            concat_points, gt_segments, gt_labels, num_classes, class_aware)
+            concat_points, gt_segments, gt_labels, num_classes, class_aware, center_radius)
         return cls_targets, reg_targets
 
 def label_points_single_video(concat_points, 
                               gt_segment, 
                               gt_label, 
                               num_classes, 
-                              class_aware
+                              class_aware,
+                              center_radius=0.0
                               ):
+        # center_radius > 0: ActionFormer's center sampling. Only points within center_radius strides
+        # of a segment's centre (and inside it) are positive, so points next to a boundary, whose
+        # offsets are the hardest to regress, are left out. 0 = every point inside the segment
         # concat_points : F T x 4 (t, regressoin range, stride)
         # gt_segment : N (#Events) x 2
         # gt_label : N (#Events) x 1
@@ -156,8 +161,16 @@ def label_points_single_video(concat_points,
         right = gt_segs[:, :, 1] - concat_points[:, 0, None]
         reg_targets = torch.stack((left, right), dim=-1)
 
-        # inside an gt action
-        inside_gt_seg_mask = reg_targets.min(-1)[0] > 0 
+        # inside an gt action (or near its centre, with center sampling)
+        if center_radius > 0:
+            center = 0.5 * (gt_segs[:, :, 0] + gt_segs[:, :, 1])
+            t_min = center - concat_points[:, 3, None] * center_radius
+            t_max = center + concat_points[:, 3, None] * center_radius
+            cb_left = concat_points[:, 0, None] - torch.maximum(t_min, gt_segs[:, :, 0])
+            cb_right = torch.minimum(t_max, gt_segs[:, :, 1]) - concat_points[:, 0, None]
+            inside_gt_seg_mask = torch.stack((cb_left, cb_right), -1).min(-1)[0] > 0
+        else:
+            inside_gt_seg_mask = reg_targets.min(-1)[0] > 0 
 
         # limit the regression range for each location
         max_regress_distance = reg_targets.max(-1)[0]

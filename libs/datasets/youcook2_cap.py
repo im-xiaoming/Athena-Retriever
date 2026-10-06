@@ -37,7 +37,7 @@ class YouCook2CaptionDataset(Dataset):
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
         crop_ratio, num_classes, force_upsampling=True, omni_emb_file=None, feat_source='iv2',
         iv2_folder='./data/youcookii/iv2_feats', iv2_video_keys=('v768',), iv2_l2norm=True,
-        iv2_rows_per_sec=1, caption_space='iv2', **legacy,
+        iv2_rows_per_sec=1, caption_space='iv2', center_sample_radius=0.0, **legacy,
     ):
         unknown = set(legacy) - LEGACY_KEYS
         assert not unknown, 'unknown dataset options %s' % sorted(unknown)
@@ -57,6 +57,7 @@ class YouCook2CaptionDataset(Dataset):
         self.trunc_thresh = trunc_thresh
         self.num_classes = num_classes
         self.crop_ratio = crop_ratio
+        self.center_radius = center_sample_radius   # ActionFormer center sampling (training targets only)
 
         self.source = 0          # dataset id: rows of the pool loss only see captions of their own dataset
         self.pool_offset = 0     # where this dataset's captions start in a pool shared by several datasets
@@ -230,7 +231,8 @@ class YouCook2CaptionDataset(Dataset):
 
         points = self.point_generator(self.fpn_strides, data_dict['feats']['visual'], self.is_training)
         data_dict['gt_cls_labels'], data_dict['gt_offsets'] = label_points(
-            points, data_dict['segments'], data_dict['labels'], self.num_classes, False)
+            points, data_dict['segments'], data_dict['labels'], self.num_classes, False,
+            self.center_radius if self.is_training else 0.0)
         data_dict['points'] = points
 
         # caption matrix of the video, padded to NMAX
