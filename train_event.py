@@ -59,14 +59,19 @@ class ModelEma:
     def __init__(self, model, decay):
         self.module = copy.deepcopy(model)
         self.decay = decay
+        self.updates = 0
         for p in self.module.parameters():
             p.requires_grad_(False)
 
     @torch.no_grad()
     def update(self, model):
+        # decay warm-up (as timm / TensorFlow): a fixed 0.999 would still hold 76% of the random init after
+        # the first epoch (276 steps) and 4% at the end, so early evaluations would score an untrained model
+        self.updates += 1
+        d = min(self.decay, (1 + self.updates) / (10 + self.updates))
         for e, m in zip(self.module.state_dict().values(), model.state_dict().values()):
             if e.dtype.is_floating_point:
-                e.mul_(self.decay).add_(m.detach(), alpha=1 - self.decay)
+                e.mul_(d).add_(m.detach(), alpha=1 - d)
             else:
                 e.copy_(m)
 
