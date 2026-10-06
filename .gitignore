@@ -22,7 +22,9 @@ ckpt/internvideo2/
 !uniav_api/demo_colab.ipynb
 ckpt/api/
 data/youcookii/iv2_*/
-datasets
+/datasets/
 libs/utils/build/
 libs/utils/dist/
 libs/utils/*.egg-info/
+data/coin/iv2_feats/
+OV-AVEL/
