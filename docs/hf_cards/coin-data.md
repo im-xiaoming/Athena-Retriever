@@ -20,8 +20,7 @@ The features are extracted **exactly like our YouCook2 features**
 
 Code: [`tools/coin_hub.py`](https://github.com/im-xiaoming/UniAV-fixed/blob/coin-extract/tools/coin_hub.py)
 and `tools/extract_internvideo2.py` on branch `coin-extract` of `im-xiaoming/UniAV-fixed`.
-Status: the videos are downloaded and the features are extracted shard by shard by several
-GPUs (a Colab T4 and 2 Kaggle T4). See `videos/manifest.json` and the `feats/` folder.
+Status (2026-10-06): downloading is stopped and **5,180 videos have features** (63 shards: 0000-0015 from the PC's first downloads, 1000-1099 from the distributed download, 2000-2001 from a retry with login cookies; 3,947 from the COIN training split, 1,233 from the testing split; about 20,000 step segments, 743 distinct labels). Not downloaded: about 4,400 videos of chunks 1031-1085 and 38 videos that need an age-verified or member account. See `videos/manifest.json`, `dl/done/` and the `feats/` folder.
 
 ## Layout
 
@@ -30,12 +29,14 @@ GPUs (a Colab T4 and 2 Kaggle T4). See `videos/manifest.json` and the `feats/` f
 | `feats/coin_feats_NNNN.tar` | **features**: one `<youtube_id>.npz` per video of shard NNNN, plus `failed.txt` (videos the extractor could not read; usually empty) |
 | `videos/coin_videos_NNNN.tar` | 100 source videos per shard, `<youtube_id>.mp4`, at most 480p, video + audio (yt-dlp) |
 | `videos/manifest.json` | `{"NNNN": [youtube_id, ...]}`: which videos are in which shard |
-| `videos/DONE` | written once the download is complete |
+| `videos/DONE` | written when downloading stopped (2026-10-06) |
+| `exclude.txt` | **COIN video ids not to train on**: 3 of them are YouCook2 validation videos too (`jT75QMjRkD0`, `e1gtgMczUwE`, `LWuuCndtJr0`); training on them would inflate YouCook2 val scores |
+| `dl/` | bookkeeping of the distributed download: `plan.json`, `plan_retry.json`, `done/CCCC.json` (ids downloaded, failed, to retry), `claims/` |
 | `claims/NNNN__<worker>` | bookkeeping: which GPU worker took which shard |
 | `text_feats/coin_label_emb_iv2.npz` | InternVideo2 text vectors (512-d) of the 749 step labels: `labels`, `emb` (centred on the COIN label mean, pairwise cosine 0.01), `raw` (normalised, uncentred), `mean`, `mean_youcook2`. Same text tower as YouCook2's `caption_emb_iv2.npz`; made by `tools/embed_captions.py --coin` |
 | `parity/6uHoTJSLoL8.mp4` | a YouCook2 video used to check that every worker reproduces the YouCook2 features (cosine 1.00000) |
 
-About 18% of COIN videos are no longer available on YouTube (deleted or private), so roughly 9,700 videos are expected.
+About 18% of COIN videos are no longer available on YouTube (deleted or private), so roughly 9,700 videos can be downloaded at all. Shard numbers are not contiguous (0000-0015, 1000-1099 where chunks 1031-1085 were never downloaded, 2000-2001).
 The annotations are not copied here. They come from [coin-dataset/annotations](https://github.com/coin-dataset/annotations) (`COIN.json`), keyed by the same YouTube id.
 
 ## Feature format
