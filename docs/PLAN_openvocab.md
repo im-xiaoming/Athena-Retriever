@@ -13,7 +13,7 @@ Bài báo tham khảo: `OV-AVEL/2411.11278v3.pdf` (Zhou và cộng sự, CVPR 20
 
 ## Bài báo nói gì (những điểm áp dụng được)
 
-1. Giữ nguyên phía chữ. Train phía chữ, hoặc thêm khối trộn phức tạp, làm tăng điểm trên nhãn đã thấy nhưng tụt mạnh trên nhãn mới (Bảng 2 và 5: lớp linear đạt 65.8 trên nhãn đã thấy nhưng chỉ 28.3 trên nhãn mới).
+1. Khối trộn phức tạp, hoặc lớp linear thay cho lớp temporal **ở phía hình và tiếng**, làm tăng điểm trên nhãn đã thấy nhưng tụt mạnh trên nhãn mới (Bảng 2 và 5: lớp linear đạt 65.8 trên nhãn đã thấy nhưng chỉ 28.3 trên nhãn mới). **Đính chính 2026-10-07:** việc giữ nguyên phía chữ chỉ thấy trong cấu hình tốt nhất của code họ (`woTextTune`), bài báo không có thí nghiệm riêng cho điểm này. Trước đây tôi ghi nhầm là Bảng 2 và 5 chứng minh điều đó.
 2. Lớp temporal chỉ xử lý trong từng luồng tốt hơn trộn hai luồng (Bảng A9: 57.8 nếu chỉ trong luồng, 46.5 nếu chỉ trộn, 55.0 nếu cả hai). Một lớp tốt hơn nhiều lớp (Bảng A7).
 3. Thêm một vector chữ `other` cho nền giúp tăng 10.8 điểm trung bình (Bảng 3).
 4. Đánh giá tách nhãn **đã thấy** và **chưa thấy**: 46 lớp dùng khi train, 21 lớp chỉ có lúc test. Chỉ số: Acc theo từng giây, F1 theo đoạn, F1 theo sự kiện (IoU ≥ 0.5).
@@ -56,3 +56,19 @@ Bài báo tham khảo: `OV-AVEL/2411.11278v3.pdf` (Zhou và cộng sự, CVPR 20
 | R2 | R1 + `text_proj: none` |
 | R3 | R2 + `loss_weight_other` |
 | R4 | R3 + `pyramid_attn: self` |
+
+## Kết quả (Colab A100, 1 seed, YouCook2 val + COIN test), cập nhật 2026-10-07
+
+Lỗi khởi tạo phát hiện khi chạy R0: kênh biên trái bị ReLU chặn ở 99% điểm (có từ commit dọn code ecbc84f), làm reg loss đứng yên 5 epoch. Đã sửa bằng cách khởi tạo bias bằng 1 (commit 245b6ac). Mọi lượt dưới đây đều đã có bản sửa.
+
+| Lượt | R@0.5 tốt nhất | CIDEr tốt nhất | G R1@0.5 YouCook2 (cuối) | COIN chưa thấy Acc / F1 / G R1@0.5 (cuối) |
+|---|---|---|---|---|
+| R0: chỉ YouCook2 | 55.0 (ep7) | 90.3 (ep12) | 46.2 | 7.5 / 2.8 / 12.2 |
+| R1: + COIN | 53.6 (ep5) | 87.2 (ep9) | 45.2 | 9.5 / 4.1 / 17.1 |
+| R2: + giữ nguyên phía chữ | 54.2 (ep6) | 88.9 (ep10) | 37.6 | 6.8 / 2.5 / 16.1 (ep11) |
+| E1: R0 + EMA 0.999 | 55.5 (ep7) | 89.5 (ep10) | 46.4 | 7.5 / 2.8 / 12.4 |
+
+- COIN không tăng tách bước trên YouCook2 (trong mức nhiễu), nhưng giúp rõ khả năng hiểu việc chưa thấy: grounding 17.1 so với 12.2.
+- Giữ nguyên phía chữ (R2) **không giúp** hiểu câu mới trên model này. Lý do: model không có sẵn sự khớp hình-chữ để bảo vệ (backbone 70M train từ đầu trên v768), và `clip_proj` học được một phép biến đổi chung giãn các câu ra. Đo trên 207 nhãn chỉ có ở việc chưa thấy: cos trung bình giữa các cặp 0.37 → 0.07 sau `clip_proj` của R1. Caption YouCook2 thì cuối cùng vẫn tốt (CIDEr 88.9), chỉ học chậm hơn. Grounding thì kém rõ (−7).
+- EMA: mức tốt nhất của từng chỉ số không đổi, nhưng một checkpoint giữ được cả hai mặt (ep7: R@0.5 55.5 và CIDEr 87.1). Nên bật mặc định.
+- Dùng hai bộ trọng số trong API (`best_seg` để tách bước, `best_cap` để caption): F1 khi chạy thật 0.516 → 0.535.
