@@ -45,7 +45,9 @@ class Config:
         for f in fields(cls):
             v = os.environ.get('UNIAV_' + f.name.upper())
             if v is not None:
-                setattr(cfg, f.name, type(getattr(cfg, f.name))(v))
+                t = type(getattr(cfg, f.name))
+                # bool('False') is True: parse booleans by their text
+                setattr(cfg, f.name, v.strip().lower() in ('1', 'true', 'yes') if t is bool else t(v))
         return cfg
 
 
