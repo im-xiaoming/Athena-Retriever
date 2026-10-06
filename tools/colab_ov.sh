@@ -3,7 +3,8 @@
 #   bash tools/colab_ov.sh setup      # clone, install, build NMS, fetch YouCook2 + COIN features (HF token in /content/hf_token)
 #   bash tools/colab_ov.sh queue R0 R1 R2 R3 R4
 # Logs: /content/ov_logs/<run>.log (one table row per epoch). touch /content/ov_stop to stop after the current run;
-# a run is stopped at once by killing its train_event.py.
+# a run is stopped at once by killing its train_event.py. Two queues can run at once (the A100 is
+# CPU-bound at ~27% GPU with one run): bash tools/colab_ov.sh queue E1 E2
 set -e
 REPO=/content/UniAV
 case "$1" in
@@ -42,6 +43,8 @@ queue)
       R2) ARGS="coin.train=true model.text_proj=none" ;;
       R3) ARGS="coin.train=true model.text_proj=none model.train_cfg.loss_weight_other=1.0" ;;
       R4) ARGS="coin.train=true model.text_proj=none model.train_cfg.loss_weight_other=1.0 model.pyramid_attn=self" ;;
+      E1) ARGS="train_cfg.ema_decay=0.999" ;;                               # localization options on R0
+      E2) ARGS="dataset.center_sample_radius=1.5" ;;
       *) echo "unknown run $run"; continue ;;
     esac
     echo "$(date +%H:%M:%S) start $run: $ARGS"
