@@ -10,8 +10,11 @@ visual: 2 fps, 224x224, one 4-frame window per second -> InternVideo2-1B pooled 
 audio : 16 kHz mono, 3 s window centred on each second -> BEATs mean -> a768
 Rows are L2-normalised when the training used iv2_l2norm, exactly as the dataset does.
 """
+import contextlib
 import importlib.util
+import logging
 import os
+import warnings
 
 import numpy as np
 
@@ -26,6 +29,28 @@ def _extract_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+class _DropFlashNotice(logging.Filter):
+    """The upstream code logs "... of flash_attn is not installed!!!" (flash_attn is optional)."""
+    def filter(self, record):
+        return 'flash_attn is not installed' not in record.getMessage()
+
+
+@contextlib.contextmanager
+def _quiet_upstream():
+    """The upstream InternVideo2 code is not ours to edit: hide its deprecation warnings and flash_attn notices."""
+    flt = _DropFlashNotice()
+    handlers = logging.getLogger().handlers + [logging.lastResort]
+    for h in handlers:
+        h.addFilter(flt)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', FutureWarning)
+            yield
+    finally:
+        for h in handlers:
+            h.removeFilter(flt)
 
 
 def _l2(x):
@@ -43,7 +68,8 @@ class InternVideo2AVEncoder:
         self.device, self.keep_loaded = device, keep_loaded
         self.video_keys, self.l2norm = list(video_keys), l2norm
         self.dim_visual = sum(512 if k == 'v512' else 768 for k in self.video_keys)
-        self.x = _extract_module()
+        with _quiet_upstream():
+            self.x = _extract_module()
         self.ffmpeg = find_ffmpeg()
         self._video = self._audio = None
 
@@ -56,6 +82,10 @@ class InternVideo2AVEncoder:
 
     def encode_raw(self, path):
         """The arrays tools/extract_internvideo2.py stores: v768, v512, a768 (float32)."""
+        with _quiet_upstream():
+            return self._encode_raw(path)
+
+    def _encode_raw(self, path):
         frames, wav = self.x.decode(path, ffmpeg=self.ffmpeg)
         if len(frames) == 0:
             raise RuntimeError('no video frames decoded from %s' % path)
