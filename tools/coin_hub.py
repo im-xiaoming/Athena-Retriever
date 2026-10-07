@@ -41,9 +41,24 @@ import tarfile
 import time
 from datetime import datetime, timezone
 
-REPO = os.environ.get('COIN_HUB_REPO', 'nguyenminh04/coin-data')   # override only for tests
+REPO = os.environ.get('COIN_HUB_REPO', 'nguyenminh04/coin-data')   # features, claims, plans (and COIN videos)
+VREPO = REPO                                                        # video shards (own repo for anet / htstep)
+PFX = 'coin'                                                        # shard file prefix: <PFX>_videos_NNNN.tar
 SHARD = 100
 FORMAT = 'bv*[height<=480][ext=mp4]+ba[ext=m4a]/b[height<=480]/bv*+ba/b'   # as datasets/annotations/download_videos.py
+# --dataset anet|htstep: videos in one HF repo, features (+ claims, plan, annotations) in another. 360p keeps shards small.
+DATASETS = {
+    'anet': dict(feats='nguyenminh04/anet-feats', videos='nguyenminh04/anet-videos', pfx='anet'),
+    'htstep': dict(feats='nguyenminh04/htstep-feats', videos='nguyenminh04/htstep-videos', pfx='htstep'),
+}
+FORMAT360 = 'bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360]/bv*+ba/b'
+
+
+def configure(a):
+    global REPO, VREPO, PFX, FORMAT
+    if a.dataset != 'coin':
+        d = DATASETS[a.dataset]
+        REPO, VREPO, PFX, FORMAT = d['feats'], d['videos'], d['pfx'], FORMAT360
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COIN = os.path.join(ROOT, 'datasets', 'annotations')
 
@@ -66,8 +81,9 @@ def log(*a):
 def state(api):
     """Shards uploaded, shards finished, claims {shard: [(worker, age_h), ...] oldest first}, DONE flag."""
     files = set(api.list_repo_files(REPO, repo_type='dataset'))
-    shards = sorted(int(m.group(1)) for f in files for m in [re.match(r'videos/coin_videos_(\d+)\.tar$', f)] if m)
-    done = {int(m.group(1)) for f in files for m in [re.match(r'feats/coin_feats_(\d+)\.tar$', f)] if m}
+    vfiles = files if VREPO == REPO else set(api.list_repo_files(VREPO, repo_type='dataset'))
+    shards = sorted(int(m.group(1)) for f in vfiles for m in [re.match(r'videos/%s_videos_(\d+)\.tar$' % PFX, f)] if m)
+    done = {int(m.group(1)) for f in files for m in [re.match(r'feats/%s_feats_(\d+)\.tar$' % PFX, f)] if m}
     claims = {}
     if any(f.startswith('claims/') for f in files):
         now = datetime.now(timezone.utc)
@@ -151,6 +167,8 @@ def plan(a):
                         repo_type='dataset', commit_message='retry plan: %d videos' % len(todo))
         log('dl/plan_retry.json: %d videos from %d fetched chunks, %d chunks' % (len(todo), len(done), len(chunks)))
         return
+    if PFX != 'coin':
+        return plan_other(api, a)
     db = json.load(open(os.path.join(COIN, 'COIN.json')))['database']
     skip = set()
     for f in ('downloaded.txt', 'failed.txt'):
@@ -161,6 +179,42 @@ def plan(a):
     api.upload_file(path_or_fileobj=json.dumps(chunks).encode(), path_in_repo='dl/plan.json', repo_id=REPO,
                     repo_type='dataset', commit_message='download plan: %d videos in %d chunks' % (len(todo), len(chunks)))
     log('dl/plan.json: %d videos in %d chunks (%s..%s)' % (len(todo), len(chunks), min(chunks), max(chunks)))
+
+
+def plan_other(api, a):
+    """anet: --n random train ids (+ --n-val from val_1) of ActivityNet Captions; htstep: all val_seen (the only labelled val split) + --n train.
+    Writes dl/plan.json and anno/<dataset>.json (the annotations of the planned videos only) to the features repo."""
+    import random
+    for r in (REPO, VREPO):
+        api.create_repo(r, repo_type='dataset', private=not a.public, exist_ok=True)
+    if PFX == 'anet':
+        d = os.path.join(ROOT, 'datasets', 'Anet')
+        tr, va = json.load(open(os.path.join(d, 'train.json'))), json.load(open(os.path.join(d, 'val_1.json')))
+        ok = lambda v: len(v['sentences']) == len(v['timestamps']) > 0 and all(0 <= t[0] < t[1] for t in v['timestamps'])
+        rng = random.Random(2026)
+        pick = lambda db, n, role: [(k[2:], role, db[k]) for k in rng.sample(sorted(k for k in db if ok(db[k])), n)]
+        sel = pick(tr, a.n, 'train') + pick(va, a.n_val, 'val')
+        anno = {i: dict(role=r, duration=v['duration'], segments=v['timestamps'], captions=v['sentences'])
+                for i, r, v in sel}
+    else:
+        d = os.path.join(ROOT, 'datasets', 'htstep', 'data')
+        ann, spl = json.load(open(os.path.join(d, 'annotations.json'))), json.load(open(os.path.join(d, 'video_splits.json')))
+        import csv
+        head = {int(r['global_step_index']): r['headline'] for r in csv.DictReader(open(os.path.join(d, 'taxonomy.csv')))}
+        anno = {}
+        rng = random.Random(2026)
+        for role, i in [('val_seen', i) for i in spl['val_seen']] + [('train', i) for i in rng.sample(sorted(spl['train']), a.n)]:
+            v = ann.get(i)
+            segs = [x for x in (v or {}).get('annotations', []) if x['partial'] == 'Full Match' and x['id'] in head]
+            if segs:
+                anno[i] = dict(role=role, duration=v['duration'], activity=v['activity'],
+                               segments=[x['segment'] for x in segs], captions=[head[x['id']] for x in segs])
+    ids = list(anno)
+    chunks = {'%04d' % (a.first + i): ids[i * SHARD:(i + 1) * SHARD] for i in range(-(-len(ids) // SHARD))}
+    for path, obj in (('dl/plan.json', chunks), ('anno/%s.json' % PFX, anno)):
+        api.upload_file(path_or_fileobj=json.dumps(obj).encode(), path_in_repo=path, repo_id=REPO,
+                        repo_type='dataset', commit_message='%s: %d videos' % (path, len(ids)))
+    log('%s: %d videos in %d chunks -> %s (videos: %s)' % (PFX, len(ids), len(chunks), REPO, VREPO))
 
 
 def dl_state(api):
@@ -263,17 +317,18 @@ def fetch(a):
             api.delete_file(claim, repo_id=REPO, repo_type='dataset', commit_message='dl release %04d' % k)
             time.sleep(a.block_wait * 60); continue   # downloaded files stay in out_dir for the next try
         ok = [v for v in ids if res.get(v, ('?',))[0] == 'ok']
-        tar = os.path.join(tmp, 'coin_videos_%04d.tar' % k)
+        tar = os.path.join(tmp, '%s_videos_%04d.tar' % (PFX, k))
         with tarfile.open(tar, 'w') as t:
             for v in ok:
                 t.add(os.path.join(out_dir, v + '.mp4'), arcname=v + '.mp4')
         report = {'by': a.name, 'ok': ok,
                   'failed': {v: r for v, (s, r) in res.items() if s == 'failed'},
                   'retry': {v: r for v, (s, r) in res.items() if s == 'retry'}}
-        ops = [CommitOperationAdd('dl/done/%04d.json' % k, json.dumps(report, indent=0).encode())]
-        if ok:
-            ops.append(CommitOperationAdd('videos/coin_videos_%04d.tar' % k, tar))
-        api.create_commit(REPO, ops, repo_type='dataset', commit_message='videos chunk %04d (%s)' % (k, a.name))
+        if ok:   # videos first: dl/done is the proof that the shard is there
+            api.create_commit(VREPO, [CommitOperationAdd('videos/%s_videos_%04d.tar' % (PFX, k), tar)],
+                              repo_type='dataset', commit_message='videos chunk %04d (%s)' % (k, a.name))
+        api.create_commit(REPO, [CommitOperationAdd('dl/done/%04d.json' % k, json.dumps(report, indent=0).encode())],
+                          repo_type='dataset', commit_message='dl done %04d (%s)' % (k, a.name))
         mb = os.path.getsize(tar) / 1e6
         log('chunk %04d done by %s: %d ok, %d failed, %d retry, %.0f MB, %.1f min' % (
             k, a.name, len(ok), len(report['failed']), len(report['retry']), mb, (time.time() - t0) / 60))
@@ -302,7 +357,7 @@ def work(a):
         if k in done or owner(claims, k, a.stale) != a.name:
             log('shard %04d taken by %s, next' % (k, owner(claims, k, a.stale))); continue
         log('shard %04d: downloading' % k)
-        src = hf_hub_download(REPO, 'videos/coin_videos_%04d.tar' % k, repo_type='dataset', local_dir=tmp,
+        src = hf_hub_download(VREPO, 'videos/%s_videos_%04d.tar' % (PFX, k), repo_type='dataset', local_dir=tmp,
                               token=api.token)
         vids, out = os.path.join(tmp, 'v%04d' % k), os.path.join(tmp, 'f%04d' % k)
         with tarfile.open(src) as t:
@@ -320,13 +375,13 @@ def work(a):
         if p.returncode != 0:
             log('shard %04d: extractor exited with %d; retrying later' % (k, p.returncode)); time.sleep(60); continue
         npz = sorted(f for f in os.listdir(out) if f.endswith('.npz'))
-        tar = os.path.join(tmp, 'coin_feats_%04d.tar' % k)
+        tar = os.path.join(tmp, '%s_feats_%04d.tar' % (PFX, k))
         with tarfile.open(tar, 'w') as t:
             for f in npz:
                 t.add(os.path.join(out, f), arcname=f)
             info = tarfile.TarInfo('failed.txt'); data = '\n'.join(failed).encode(); info.size = len(data)
             t.addfile(info, io.BytesIO(data))
-        api.upload_file(path_or_fileobj=tar, path_in_repo='feats/coin_feats_%04d.tar' % k, repo_id=REPO,
+        api.upload_file(path_or_fileobj=tar, path_in_repo='feats/%s_feats_%04d.tar' % (PFX, k), repo_id=REPO,
                         repo_type='dataset', commit_message='feats %04d (%s)' % (k, a.name))
         log('shard %04d done by %s: %d videos, %d failed, %.0f min' % (k, a.name, len(npz), len(failed),
                                                                        (time.time() - t0) / 60))
@@ -345,6 +400,9 @@ def status(a):
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('cmd', choices=('upload', 'work', 'status', 'plan', 'fetch'))
+    p.add_argument('--dataset', default='coin', choices=('coin', 'anet', 'htstep'))
+    p.add_argument('--n', type=int, default=3000, help='plan: train videos (anet 3000, htstep use 900)'); p.add_argument('--n-val', type=int, default=500)
+    p.add_argument('--public', action='store_true', help='plan: create the repos public')
     p.add_argument('--name', default='worker'); p.add_argument('--tmp', default='')
     p.add_argument('--every', type=int, default=10, help='upload: minutes between checks')
     p.add_argument('--final', action='store_true', help='upload: download finished, write the last shard and DONE')
@@ -363,6 +421,7 @@ if __name__ == '__main__':
     p.add_argument('--reverse', action='store_true', help='fetch: take chunks from the end (fewer claim races)')
     p.add_argument('--no-done', dest='write_done', action='store_false', help='fetch: never write videos/DONE')
     a = p.parse_args()
+    configure(a)
     if a.cmd == 'fetch' and a.stale == 6.0:
         a.stale = 2.0   # a download chunk takes minutes to an hour
     {'upload': upload, 'work': work, 'status': status, 'plan': plan, 'fetch': fetch}[a.cmd](a)
