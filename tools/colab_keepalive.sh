@@ -6,7 +6,7 @@ SESSION=${1:-omni}
 DIR=$(cd "$(dirname "$0")/.." && pwd)/logs
 mkdir -p "$DIR"
 exec 9>"$DIR/keepalive.lock"; flock -n 9 || { echo "already running"; exit 0; }
-C=~/.local/bin/colab
+C=${COLAB_BIN:-$(getent passwd "$(id -u)" | cut -d: -f6)/.local/bin/colab}   # not ~: HOME may point at a second account (HOME=~/colab2)
 rm -f "$DIR/keepalive.stop"
 while [ ! -f "$DIR/keepalive.stop" ]; do
   if echo "print('alive')" | timeout 120 $C exec -s "$SESSION" 2>/dev/null | grep -q alive; then
