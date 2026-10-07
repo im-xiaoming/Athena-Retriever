@@ -16,7 +16,7 @@ Tốc độ đo được: 5.9 giây video mỗi giây trên RTX 3060. COIN có k
 ## Dựng một máy GPU (Colab T4 hoặc Kaggle)
 
 ```bash
-git clone -b coin-extract https://github.com/im-xiaoming/UniAV-fixed.git UniAV && cd UniAV
+git clone -b ov-refine https://github.com/im-xiaoming/Athena-Retriever.git Athena-Retriever && cd Athena-Retriever
 git clone --depth 1 https://github.com/OpenGVLab/InternVideo /content/InternVideo   # Kaggle: /kaggle/working/InternVideo
 pip install -q timm einops torchaudio huggingface_hub
 export HF_TOKEN=...   # token của nguyenminh04 (đã chấp nhận điều khoản của các model gated)

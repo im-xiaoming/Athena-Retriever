@@ -1,6 +1,6 @@
 """Compare predicted events with the YouCook2 ground truth, one row per pair, in time order.
 
-    import uniav_api as uv
+    import athena as uv
     r = uv.describe_features(v, a, duration, video_id='-Ju39A-G0Dk')
     uv.show(r)              # text: timeline bars + one table, GT step next to the prediction for it
     uv.compare_table(r)     # the same table as a pandas DataFrame (renders as HTML in notebooks)

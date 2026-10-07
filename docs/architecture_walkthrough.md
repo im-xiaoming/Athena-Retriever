@@ -1,7 +1,7 @@
-# UniAV mới: luồng hoạt động qua một ví dụ
+# Athena mới: luồng hoạt động qua một ví dụ
 
-Tài liệu đi kèm sơ đồ [UniAV_new.drawio.svg](UniAV_new.drawio.svg). Mô tả đi từ trên xuống theo khung
-"New UniAV: overview". Kích thước và thời gian lấy đúng theo cấu hình hiện tại
+Tài liệu đi kèm sơ đồ [architecture.drawio.svg](architecture.drawio.svg). Mô tả đi từ trên xuống theo khung
+"Athena: overview". Kích thước và thời gian lấy đúng theo cấu hình hiện tại
 (`configs/youcook2_event.yaml`, `feat_source: iv2`). Các điểm số trong ví dụ là số minh hoạ.
 
 ---
@@ -65,7 +65,7 @@ Lấy ví dụ điểm quan sát ở **giây thứ 95, mức 3**. Lúc này tron
   - Thành phần IoU giúp một đoạn "chắc là có sự kiện nhưng biên đoán ẩu" bị xếp thấp hơn đoạn có biên chuẩn.
 - Có tới 504 đề xuất, nhiều đề xuất gần như trùng nhau, vì các điểm từ giây 90 đến 100 đều đoán ra khoảng
   [83, 104]. **Soft-NMS** giữ lại đề xuất tốt nhất và hạ điểm những đề xuất trùng nó.
-- API lọc thêm: chỉ giữ đoạn có điểm từ 0.40 trở lên và chồng lấn không quá 30% (`uniav_api/config.py`).
+- API lọc thêm: chỉ giữ đoạn có điểm từ 0.40 trở lên và chồng lấn không quá 30% (`athena/config.py`).
 - Kết quả, ví dụ: **7 đoạn**, trong đó có [83.2 s, 104 s].
 
 ### Bước 5: SegmentContext, biến mỗi đoạn thành một vector q
@@ -90,7 +90,7 @@ Lấy đoạn [83.2 s, 104 s], tương ứng các bước 118 đến 148 trên l
   chữ InternVideo2 qua `clip_proj`; trước 2026-10-05 là vector chữ ONE-PEACE).
   - Có thể cộng thêm điểm trong không gian của thầy: q đi qua `omni_proj`, rồi so với vector text của thầy
     (đã tính sẵn cho 8218 câu). Đo trên tập val, cách này không giúp được gì đo được: độ giống câu chênh không
-    quá 0.003, nằm trong mức nhiễu. Vì vậy `uniav_api` chỉ dùng điểm trong không gian caption.
+    quá 0.003, nằm trong mức nhiễu. Vì vậy `athena` chỉ dùng điểm trong không gian caption.
   - Tác dụng chính của thầy là lúc train: dạy q qua `omni_proj` (xem phần cuối).
 - Lấy **20 câu điểm cao nhất**. Thay vì lấy câu đứng đầu, model chọn câu được **nhiều ứng viên khác đồng
   thuận** nhất (MBR).

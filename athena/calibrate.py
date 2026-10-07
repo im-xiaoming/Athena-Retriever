@@ -1,10 +1,10 @@
 """Check the inference copy against training-time evaluation and pick the event threshold.
 
-  python -m uniav_api.calibrate
+  python -m athena.calibrate
 
 Uses the stored validation features (data/youcookii/iv2_feats, or iv2_dense for a 2 rows/s model),
 so no video encoding.
-1. Parity: with k = number of GT events per video, R@IoU must match train_event.py --eval.
+1. Parity: with k = number of GT events per video, R@IoU must match train.py --eval.
 2. Threshold: in production the number of events is unknown, so events are kept by score.
    For each min_score, precision / recall / F1 at IoU 0.5 (one-to-one greedy matching);
    prints the best F1 setting to put in config.py.
@@ -15,7 +15,7 @@ import os
 import numpy as np
 
 from .config import ROOT, Config
-from .pipeline import UniAVPipeline, select_events
+from .pipeline import AthenaPipeline, select_events
 
 
 def iou(a, b):
@@ -37,7 +37,7 @@ def match(preds, gts, thr=0.5):
 
 
 def main():
-    pipe = UniAVPipeline(Config.from_env())
+    pipe = AthenaPipeline(Config.from_env())
     print('checkpoint %s (InternVideo2 %s, caption space %s, %s segmentation weights)' % (
         pipe.cfg.checkpoint, '+'.join(pipe.spec.video_keys), pipe.caption_space,
         'separate' if pipe.seg_model is not pipe.model else 'the same'))

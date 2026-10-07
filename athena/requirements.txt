@@ -3,8 +3,8 @@
 #   Apple Silicon / CPU    : pip install torch
 torch>=2.1
 numpy<2.1
-pandas          # only for uniav_api.compare_table()
-matplotlib      # only for uniav_api.plot()
+pandas          # only for athena.compare_table()
+matplotlib      # only for athena.plot()
 huggingface_hub # to download the checkpoint
 einops
 timm            # InternVideo2 encoder (describe_video)

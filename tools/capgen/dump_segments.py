@@ -9,7 +9,7 @@ gives, per segment:
   cand (10)      the 10 best train captions for q (pool indices), and mbr: the caption picked
 Segments: train = GT steps + 2 copies with boundaries moved by up to 20% of the length (the
 predicted boundaries are never exact); val = GT steps ('gt') and the model's own segments
-matched to a GT step with IoU >= 0.3 ('pred', as in train_event.py: top #GT by score).
+matched to a GT step with IoU >= 0.3 ('pred', as in train.py: top #GT by score).
 """
 import json
 import os
@@ -20,7 +20,7 @@ import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
-import uniav_api as uv  # noqa: E402
+import athena as uv  # noqa: E402
 
 K = 8
 OUT = os.path.join(ROOT, 'data', 'youcookii', 'capgen', 'segments.npz')
@@ -34,7 +34,7 @@ def iou(a, b):
 
 @torch.no_grad()
 def main():
-    pipe = uv.load(index_dir=os.path.join(ROOT, 'uniav_api', 'index'))
+    pipe = uv.load(index_dir=os.path.join(ROOT, 'athena', 'index'))
     m, spec, dev = pipe.model, pipe.spec, pipe.device
     db = json.load(open(os.path.join(ROOT, 'data', 'youcookii', 'annotations',
                                      'youcookii_annotations_trainval.json')))['database']

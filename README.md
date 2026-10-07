@@ -1,4 +1,4 @@
-# UniAV for YouCook2: event segmentation + captioning
+# Athena Retriever for YouCook2: event segmentation + captioning
 
 Finds the steps of a cooking video and describes each one. Built on the backbone of
 [UniAV](https://arxiv.org/abs/2404.03179) (audio-visual ConvTransformer, itself based on ActionFormer),
@@ -12,12 +12,12 @@ reduced to a single task:
   picked by consensus; a GPT-2 generator writes captions instead (`tools/capgen/`).
 - **Grounding**: a ground head finds the span a sentence describes (FiLM-conditioned on the sentence's
   InternVideo2 text vector, boundaries from the boundary head). Production takes a video, a video and
-  a sentence, or a sentence alone (`uniav_api`, `uv.query`). Val metric: `G R1@0.5` / `G R1@0.7`
+  a sentence, or a sentence alone (`athena`, `uv.query`). Val metric: `G R1@0.5` / `G R1@0.7`
   (each GT caption must find its own span), `G mIoU`.
 - **Teacher**: OmniRetriever-7B embeddings of every GT clip and caption guide the event vectors
   during training (off at inference).
 
-Architecture: `docs/UniAV_new.drawio.svg`, walkthrough with an example: `docs/UniAV_new_walkthrough.md`.
+Architecture: `docs/architecture.drawio.svg`, walkthrough with an example: `docs/architecture_walkthrough.md`.
 
 | YouCook2 val (394 videos) | R@0.5 | R@0.7 | CIDEr | METEOR |
 |---|---|---|---|---|
@@ -34,12 +34,12 @@ All runs, configs and lessons: `experiments/RESULTS.md`, `experiments/NOTES.md`.
 
 | Path | What |
 |---|---|
-| `train_event.py` | training and evaluation; writes `experiments/runs/<host>-<run>.json` per run |
+| `train.py` | training and evaluation; writes `experiments/runs/<host>-<run>.json` per run |
 | `configs/youcook2_event.yaml` | the config; every option can be overridden with `--set key=value` |
 | `libs/datasets/youcook2_cap.py` | dataset: features, caption pool, teacher vectors |
 | `libs/modeling/event_archs.py` | the model and its losses (event, boundary, embedding and ground heads) |
 | `libs/modeling/multimodal_backbones.py`, `blocks.py` | audio-visual ConvTransformer backbone |
-| `uniav_api/` | inference API (video or stored features -> events with captions, search); see its README |
+| `athena/` | inference API (video or stored features -> events with captions, search); see its README |
 | `tools/` | feature extraction, caption vectors, teacher vectors, API export, plots, caption generator |
 | `docs/` | architecture, handoffs between sessions, data locations |
 
@@ -59,11 +59,11 @@ Data (private HF dataset `nguyenminh04/uniav-youcook2-data`, see `docs/HANDOFF_K
 ## Train and evaluate
 
 ```bash
-python train_event.py configs/youcook2_event.yaml --output civ2 --note 'baseline'
-python train_event.py configs/youcook2_event.yaml --output civ2_v512 --set 'dataset.iv2_video_keys=[v768,v512]'
-python train_event.py configs/youcook2_event.yaml --eval ckpt/civ2/best_cap.pth.tar
+python train.py configs/youcook2_event.yaml --output civ2 --note 'baseline'
+python train.py configs/youcook2_event.yaml --output civ2_v512 --set 'dataset.iv2_video_keys=[v768,v512]'
+python train.py configs/youcook2_event.yaml --eval ckpt/civ2/best_cap.pth.tar
 python tools/summarize_runs.py && python tools/plot_runs.py
-python tools/export_api_ckpt.py civ2_v512    # -> ckpt/api/uniav_civ2_v512.pth for uniav_api
+python tools/export_api_ckpt.py civ2_v512    # -> ckpt/api/athena_civ2_v512.pth for athena
 ```
 
 About 20 minutes per run on an RTX 3060 (2 warm-up + 10 cosine epochs). Seed noise is about

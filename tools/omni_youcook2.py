@@ -1,4 +1,4 @@
-"""Prepare YouCook2 event clips for OmniRetriever-7B, the teacher of train_event.py.
+"""Prepare YouCook2 event clips for OmniRetriever-7B, the teacher of train.py.
 
 Step 1, on a machine with the original YouCook2 videos (Windows works, needs python and ffmpeg):
 
@@ -33,7 +33,7 @@ Step 4, measure the teacher zero-shot on GT val clips before training:
 
   python tools/omni_youcook2.py teacher --omni data/youcookii/omni_emb.npz
 
-  Compare with txt_sim[oracle] / CIDEr[oracle] from train_event.py --eval.
+  Compare with txt_sim[oracle] / CIDEr[oracle] from train.py --eval.
 """
 import argparse
 import json
@@ -51,7 +51,7 @@ ANNOTATIONS = os.path.join(ROOT, 'data', 'youcookii', 'annotations',
 
 
 def events():
-    """Every GT segment used by train_event.py, keyed "<video>#<i>" like caption_emb.npz."""
+    """Every GT segment used by train.py, keyed "<video>#<i>" like caption_emb.npz."""
     z = np.load(CAPTION_EMB, allow_pickle=True)
     with open(ANNOTATIONS) as f:
         db = json.load(f)['database']
@@ -144,13 +144,13 @@ def manifest(a):
 
 def teacher(a):
     """OmniRetriever captions the GT val clips on its own: the clip's av vector against
-    the text vectors of the train caption pool, consensus pick as in train_event.py."""
+    the text vectors of the train caption pool, consensus pick as in train.py."""
     import sys
     import torch
     import torch.nn.functional as F
     sys.path.insert(0, ROOT)
     from pycocoevalcap.cider.cider import Cider
-    from train_event import mbr_pick
+    from train import mbr_pick
 
     om = np.load(a.omni)
     have = set(om.files)

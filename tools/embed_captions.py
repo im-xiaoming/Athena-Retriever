@@ -13,7 +13,7 @@ Raw InternVideo2 text vectors are strongly anisotropic: any two captions have co
 soft targets of the embedding loss (softmax of caption-caption cosine / 0.02) would spread over
 ~7000 captions. The stored vectors are therefore centred on the mean of the unique train captions
 and re-normalised (pairwise cosine 0.38, soft targets over ~50 captions); `mean` is stored so a new
-sentence (uniav_api search) is mapped the same way: normalize(encode(s) - mean).
+sentence (athena search) is mapped the same way: normalize(encode(s) - mean).
 """
 import json
 import os
@@ -24,7 +24,7 @@ import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from uniav_api.encoders.internvideo2_text import InternVideo2TextEncoder  # noqa: E402
+from athena.encoders.internvideo2_text import InternVideo2TextEncoder  # noqa: E402
 
 DATA = os.path.join(ROOT, 'data', 'youcookii')
 CKPT = os.path.join(ROOT, 'ckpt', 'internvideo2', 'InternVideo2-stage2_1b-224p-f4.pt')

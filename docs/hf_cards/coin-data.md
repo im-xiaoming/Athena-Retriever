@@ -18,8 +18,8 @@ This repo holds the videos we could still download in 2026 and one feature vecto
 The features are extracted **exactly like our YouCook2 features**
 (`nguyenminh04/uniav-youcook2-data`, `iv2_feats/`), so the two datasets can be trained together.
 
-Code: [`tools/coin_hub.py`](https://github.com/im-xiaoming/UniAV-fixed/blob/coin-extract/tools/coin_hub.py)
-and `tools/extract_internvideo2.py` on branch `coin-extract` of `im-xiaoming/UniAV-fixed`.
+Code: [`tools/coin_hub.py`](https://github.com/im-xiaoming/Athena-Retriever/blob/ov-refine/tools/coin_hub.py)
+and `tools/extract_internvideo2.py` on branch `ov-refine` of `im-xiaoming/Athena-Retriever`.
 Status (2026-10-06): downloading is stopped and **5,180 videos have features** (63 shards: 0000-0015 from the PC's first downloads, 1000-1099 from the distributed download, 2000-2001 from a retry with login cookies; 3,947 from the COIN training split, 1,233 from the testing split; about 20,000 step segments, 743 distinct labels). Not downloaded: about 4,400 videos of chunks 1031-1085 and 38 videos that need an age-verified or member account. See `videos/manifest.json`, `dl/done/` and the `feats/` folder.
 
 ## Layout

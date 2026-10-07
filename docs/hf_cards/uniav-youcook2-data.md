@@ -12,7 +12,7 @@ tags:
 # UniAV on YouCook2: features, teacher vectors and checkpoints (private)
 
 This repo holds everything needed to train and run the YouCook2 event segmentation + captioning
-model in [`im-xiaoming/UniAV-fixed`](https://github.com/im-xiaoming/UniAV-fixed). The model finds
+model in [`im-xiaoming/Athena-Retriever`](https://github.com/im-xiaoming/Athena-Retriever). The model finds
 the steps of an uncut cooking video and writes one caption per step.
 
 YouCook2 (Zhou et al., AAAI 2018) has 2,000 cooking videos of 89 recipes, with step segments and
@@ -74,7 +74,7 @@ ONE-PEACE (features, text encoder, caption vectors) was removed on 2026-10-05.
 ## Legacy checkpoint `api/uniav_iv2.pth`
 
 `{'state_dict', 'config', 'run': 'iv2', 'commit', 'epoch': 7, 'final_eval'}`. It is loaded by
-`uniav_api` (`UniAVPipeline`), which also reads checkpoints saved before the 2026-10-05 cleanup.
+`athena` (`AthenaPipeline`), which also reads checkpoints saved before the 2026-10-05 cleanup.
 YouCook2 validation, 394 videos:
 
 | R@0.5 | R@0.7 | ret_sim (ONE-PEACE) | CIDEr (retrieved) | METEOR | CIDEr (generated, `capgen_prefix`) |

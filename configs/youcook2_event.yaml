@@ -40,7 +40,7 @@ dataset:
   num_classes: 16
   force_upsampling: true
   # input features: InternVideo2 + BEATs from tools/extract_internvideo2.py, one row per second.
-  # The model input width is set from iv2_video_keys by train_event.py
+  # The model input width is set from iv2_video_keys by train.py
   feat_source: iv2
   iv2_folder: ./data/youcookii/iv2_feats
   iv2_video_keys: [v768]   # v768 = pooled vision, v512 = its projection into InternVideo2's text space
@@ -68,7 +68,7 @@ model:
   - 3
   - 5
   scale_factor: 2
-  input_dim_V: 768     # set by train_event.py from the features
+  input_dim_V: 768     # set by train.py from the features
   input_dim_A: 768
   n_head: 4
   embd_kernel_size: 3
@@ -94,7 +94,7 @@ model:
   use_abs_pe: true
   max_seq_len: 256
   nmax: 16
-  clip_dim: 512        # set by train_event.py from the caption space
+  clip_dim: 512        # set by train.py from the caption space
   text_proj: linear    # none: caption / query vectors stay frozen InternVideo2 text vectors (OV-AVEL)
   pyramid_attn: cross  # self: every backbone block attends within its own stream (OV-AVEL Table A9)
   train_cfg:

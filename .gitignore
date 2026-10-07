@@ -1,30 +1,51 @@
-*.txt
-*.tar
+# secrets and local settings
+.env
+cookies/
+.claude/
+.vscode/
+*.pth
+*.pt
+*.pth.tar
+*.zip
+*.mp4
+
+# generated
 *.log
-*.ipynb
+*.tar
+*.pyc
+__pycache__/
+*.Zone.Identifier
 *.ipynb_checkpoints
 temp
-__pycache__/
-*.pyc
-OmniRetreiver
-data/youcook2_cut/
-data/youcookii/omni_emb*.npz
-data/youcookii/iv2_feats/
-.env
-data/youcookii/.cache/
-InternVideo/
-data/demo_videos/
-data/demo_cache/
-uniav_api/index/
-!uniav_api/encoders/bpe/dict.txt
-!uniav_api/requirements.txt
-ckpt/internvideo2/
-!uniav_api/demo_colab.ipynb
-ckpt/api/
-data/youcookii/iv2_*/
-/datasets/
+logs/
 libs/utils/build/
 libs/utils/dist/
 libs/utils/*.egg-info/
+
+# text files are ignored except the ones the code needs
+*.txt
+!athena/requirements.txt
+!athena/encoders/bpe/dict.txt
+!data/coin_exclude.txt
+
+# notebooks (the Colab demo is kept)
+*.ipynb
+!athena/demo_colab.ipynb
+
+# models, features and data (on HF, see docs/locations.md)
+ckpt/api/
+ckpt/internvideo2/
+/datasets/
+data/youcook2_cut/
+data/youcookii/omni_emb*.npz
+data/youcookii/iv2_*/
+data/youcookii/.cache/
 data/coin/iv2_feats/
+data/demo_videos/
+data/demo_cache/
+athena/index/
+
+# third-party code and papers cloned next to the repo
+InternVideo/
+OmniRetreiver
 OV-AVEL/

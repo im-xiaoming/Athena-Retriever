@@ -6,7 +6,7 @@ Captions are projected once into the event space with the model's clip_proj: the
 vectors, or, for a model trained in the teacher's text space, the vectors stored in the API
 checkpoint (caption_pool). An event vector is matched against them by cosine and the caption is
 picked by consensus (minimum Bayes risk over the top 20) in InternVideo2 text space, exactly as
-train_event.py scores it.
+train.py scores it.
 """
 import json
 import os

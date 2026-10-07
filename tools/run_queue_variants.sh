@@ -12,21 +12,21 @@ exec 7>logs/variants_queue.lock; flock -n 7 || { echo "already running"; exit 0;
 say() { echo "$(date '+%m-%d %H:%M:%S')  $*" >> "$Q"; }
 final() { grep '^Final eval' "logs/$1.log" | grep -oE '(R@0.5|R@0.7|ret_sim|ret_sim\[top1\]|CIDEr|METEOR) [0-9.]+' | tr '\n' ' '; }
 
-run() {   # run <name> <note> <train_event.py arguments...>
+run() {   # run <name> <note> <train.py arguments...>
   local name=$1 note=$2; shift 2
   if grep -qs '"final_eval": {' "experiments/runs/$(hostname)-$name.json"; then
     say "$name already finished, skipped"; return
   fi
   while pgrep -f "[t]rain_event.py" > /dev/null; do sleep 60; done   # one training at a time (RAM)
   say "start $name: $*"
-  $PY train_event.py configs/youcook2_event.yaml --output "$name" --note "$note" "$@" > "logs/$name.log" 2>&1
+  $PY train.py configs/youcook2_event.yaml --output "$name" --note "$note" "$@" > "logs/$name.log" 2>&1
   say "end   $name (exit $?): $(final "$name")"
 }
 
 # 0. inference settings on the API checkpoint: no training
 if [ ! -s logs/iv2_infer_sweep.log ]; then
   say "inference sweep on ckpt/iv2/best_cap (iou_power x soft-NMS sigma)"
-  $PY train_event.py configs/youcook2_event.yaml --output iv2 --eval ckpt/iv2/best_cap.pth.tar --fast \
+  $PY train.py configs/youcook2_event.yaml --output iv2 --eval ckpt/iv2/best_cap.pth.tar --fast \
     --set "$TEACHER" "$IV2" --iou-power 0.2,0.3,0.5 --nms soft:0.7:0.5,soft:0.7:0.9 > logs/iv2_infer_sweep.log 2>&1
   grep '^iou_power' logs/iv2_infer_sweep.log | while read -r l; do
     say "  $(echo "$l" | grep -oE '^iou_power [0-9.]+ +NMS [^ ]+|(R@0.5|R@0.7|ret_sim|CIDEr) [0-9.]+' | tr '\n' ' ')"

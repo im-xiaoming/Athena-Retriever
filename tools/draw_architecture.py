@@ -1,6 +1,6 @@
-"""Draw the architecture of the new UniAV (event segmentation + caption retrieval).
+"""Draw the architecture of the Athena (event segmentation + caption retrieval).
 
-  python tools/draw_architecture.py   ->  docs/UniAV_new.drawio.svg  and  docs/UniAV_new.drawio
+  python tools/draw_architecture.py   ->  docs/architecture.drawio.svg  and  docs/architecture.drawio
 
 The .drawio.svg is a plain SVG for viewing with the same diagram embedded as draw.io XML (like
 docs/Model Ar.drawio.svg); the .drawio file holds that XML alone. In draw.io, arrows are attached
@@ -13,8 +13,8 @@ import html
 import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, 'docs', 'UniAV_new.drawio.svg')
-OUT_DRAWIO = os.path.join(ROOT, 'docs', 'UniAV_new.drawio')
+OUT = os.path.join(ROOT, 'docs', 'architecture.drawio.svg')
+OUT_DRAWIO = os.path.join(ROOT, 'docs', 'architecture.drawio')
 
 BG = '#1b1b1f'
 TEXT = '#f2f2f2'
@@ -24,7 +24,7 @@ WHITE = '#e6e6e6'
 GREEN = '#7ddc7a'
 KIND = {   # border colour per kind of block
     'same': WHITE,         # as in the original UniAV
-    'new': '#ff9f1c',      # added in the new UniAV
+    'new': '#ff9f1c',      # added in the Athena
     'changed': '#3ec5ff',  # kept, with different inputs or settings
     'frozen': '#b09cff',   # pretrained, frozen
     'train': GREEN,        # exists only during training
@@ -207,7 +207,7 @@ W, H = 3330, 1600
 PANELS = [(0, 570, 'ConvTransformerBackbone', '#1f2a36', 'giữ nguyên như UniAV'),
           (580, 640, 'Prediction Heads', '#33240f', 'chạy trên mọi mức FPN, dùng chung trọng số'),
           (1230, 830, 'Segment vector & caption choice', '#2a2338', 'SegmentContext + chọn câu trong kho caption'),
-          (2070, 1260, 'New UniAV: overview', '#2b1f1f', 'nét liền = suy luận (và cả lúc train);  '
+          (2070, 1260, 'Athena: overview', '#2b1f1f', 'nét liền = suy luận (và cả lúc train);  '
                                                        'nét đứt xanh lá = chỉ lúc train')]
 for x, w, t, c, s in PANELS:
     panel(x, 0, w, H, t, c, s)
@@ -358,7 +358,7 @@ note(x0 + 20, 1410, [
     'Lớp Linear cuối bắt đầu bằng 0, nên ban đầu q chính là trung bình đoạn.',
     '',
     'omni_proj chủ yếu để thầy dạy q lúc train. Cộng thêm điểm thầy lúc chọn câu không giúp',
-    'đo được (chênh <= 0.003), nên uniav_api chỉ dùng điểm trong không gian caption.'],
+    'đo được (chênh <= 0.003), nên athena chỉ dùng điểm trong không gian caption.'],
     size=14, color=TEXT, w=800)
 
 # ------------------------------------------------------------------ heads
@@ -453,7 +453,7 @@ note(x0 + 20, 1040, [
     "Các mức FPN: T' = 256, 128, 64, 32, 16, 8;  C = 512."], size=14, color=TEXT, w=540)
 
 # ============================================================================== write
-mx_xml = ('<mxfile host="tools/draw_architecture.py"><diagram name="UniAV new" id="uniav-new"><mxGraphModel dx="%d" '
+mx_xml = ('<mxfile host="tools/draw_architecture.py"><diagram name="Athena" id="athena"><mxGraphModel dx="%d" '
           'dy="%d" grid="0" gridSize="10" page="0" background="%s"><root><mxCell id="0"/><mxCell id="1" parent="0"/>%s'
           '</root></mxGraphModel></diagram></mxfile>' % (W, H, BG, ''.join(cells)))
 doc = ('<?xml version="1.0" encoding="UTF-8"?>\n'

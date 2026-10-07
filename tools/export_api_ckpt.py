@@ -1,4 +1,4 @@
-"""Pack a training run into one self-describing checkpoint for uniav_api.
+"""Pack a training run into one self-describing checkpoint for athena.
 
   python tools/export_api_ckpt.py iv2                # -> ckpt/api/uniav_iv2.pth
 
@@ -8,7 +8,7 @@ epoch: segmentation peaks early and captions late (run ov_R0: R@0.5 55.0 at epoc
 where CIDEr peaks), so the API segments and grounds with best_seg and captions with best_cap, plus the run's dataset / model config and its final evaluation, so the API
 knows which features the model expects without configs/youcook2_event.yaml. A model trained in
 the teacher's text space (caption_space omni) also gets those caption vectors (caption_pool, in
-the order of uniav_api/assets/caption_pool.npz).
+the order of athena/assets/caption_pool.npz).
 """
 import argparse
 import glob
@@ -29,15 +29,15 @@ DATASET_KEYS = ('feat_source', 'default_fps', 'max_seq_len', 'force_upsampling',
 def caption_pool(cfg):
     """Teacher-space caption vectors in the order of the API caption pool (caption_space omni), else None.
 
-    A model in the default InternVideo2 caption space uses uniav_api/assets/caption_pool.npz as is.
+    A model in the default InternVideo2 caption space uses athena/assets/caption_pool.npz as is.
     """
     space = cfg['dataset'].get('caption_space', 'onepeace')
-    assert space != 'onepeace', 'ONE-PEACE caption-space models are no longer supported by uniav_api'
+    assert space != 'onepeace', 'ONE-PEACE caption-space models are no longer supported by athena'
     cap_file = cfg['dataset'].get('caption_emb_file', '')
     if space == 'iv2' and os.path.basename(cap_file) != 'caption_emb_iv2.npz':
         # InternVideo2 text centred on another mean (caption_emb_iv2j.npz: joint YouCook2 + COIN): the
         # API's captions and new sentences must use the same vectors and the same mean
-        texts = [str(t) for t in np.load(os.path.join(ROOT, 'uniav_api', 'assets', 'caption_pool.npz'))['texts']]
+        texts = [str(t) for t in np.load(os.path.join(ROOT, 'athena', 'assets', 'caption_pool.npz'))['texts']]
         e = np.load(os.path.join(ROOT, cap_file), allow_pickle=True)
         vec = {}
         for t, v in zip(e['sentences'], e['emb']):
@@ -46,7 +46,7 @@ def caption_pool(cfg):
                 'file': os.path.basename(cap_file)}
     if space == 'iv2':
         return None
-    texts = [str(t) for t in np.load(os.path.join(ROOT, 'uniav_api', 'assets', 'caption_pool.npz'))['texts']]
+    texts = [str(t) for t in np.load(os.path.join(ROOT, 'athena', 'assets', 'caption_pool.npz'))['texts']]
     z = np.load(os.path.join(ROOT, cfg['dataset']['omni_emb_file']))
     e = np.load(os.path.join(ROOT, 'data', 'youcookii', 'caption_emb_iv2.npz'), allow_pickle=True)
     key = {}
@@ -75,7 +75,7 @@ def main():
             extra = {'state_dict_seg': half(cs), 'epoch_seg': cs['epoch'] + 1}
     dataset = {k: cfg['dataset'][k] for k in DATASET_KEYS if k in cfg['dataset']}
     dataset.setdefault('feat_source', 'onepeace')
-    out = a.out or os.path.join(ROOT, 'ckpt', 'api', 'uniav_%s.pth' % a.run)
+    out = a.out or os.path.join(ROOT, 'ckpt', 'api', 'athena_%s.pth' % a.run)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     torch.save({'state_dict': sd, 'config': {'dataset': dataset, 'model': cfg['model']},
                 'caption_pool': caption_pool(cfg),

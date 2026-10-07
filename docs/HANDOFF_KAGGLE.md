@@ -7,13 +7,13 @@ trong `docs/HANDOFF.md`; file này chỉ gồm những gì cần để làm ti�
 ## 0. Quy tắc làm việc với người dùng
 
 - **Chat bằng tiếng Việt.** Code, chú thích, log đều bằng tiếng Anh.
-- **Git:** repo `https://github.com/im-xiaoming/UniAV-fixed` (public).
+- **Git:** repo `https://github.com/im-xiaoming/Athena-Retriever` (public).
   - Nhánh mới nhất là `exp-dense-capgen`.
   - Mỗi hướng việc mới phải nằm trên **một nhánh mới**, tạo từ nhánh đó, và chỉ push lên nhánh mới ấy.
-  - **Không bao giờ push lên `test`:** demo Colab của `uniav_api` clone từ nhánh này.
-  - Commit trước khi train. `train_event.py` ghi commit vào hồ sơ lượt chạy, và đánh dấu `dirty` nếu còn thay đổi chưa commit.
+  - **Không bao giờ push lên `test`:** demo Colab của `athena` clone từ nhánh này.
+  - Commit trước khi train. `train.py` ghi commit vào hồ sơ lượt chạy, và đánh dấu `dirty` nếu còn thay đổi chưa commit.
 - **Mọi lượt chạy phải có hồ sơ.**
-  - `train_event.py` tự ghi `experiments/runs/<hostname>-<run>.json`, gồm config, lịch sử, kết quả chấm cuối.
+  - `train.py` tự ghi `experiments/runs/<hostname>-<run>.json`, gồm config, lịch sử, kết quả chấm cuối.
   - Sau đó chạy `tools/summarize_runs.py` để cập nhật `experiments/RESULTS.md`, `tools/plot_runs.py` để vẽ biểu đồ, và ghi bài học vào `experiments/NOTES.md`.
   - Trên Kaggle, hostname sẽ khác `DESKTOP-8PSQBN9`, nên tên file hồ sơ cũng khác. Không sao.
 - **Log và kết quả in ra phải dễ đọc:** gom thành một bảng, không bắt người dùng đối chiếu nhiều chỗ.
@@ -40,7 +40,7 @@ Môi trường train trên PC: Python 3.8, torch 1.11 cu113, numpy 1.23, pyyaml,
 pycocoevalcap; METEOR cần `java`. Trên Kaggle dùng bản torch có sẵn là được, code không phụ thuộc torch 1.11.
 
 ```bash
-git clone -b exp-dense-capgen https://github.com/im-xiaoming/UniAV-fixed.git UniAV && cd UniAV
+git clone -b ov-refine https://github.com/im-xiaoming/Athena-Retriever.git Athena-Retriever && cd Athena-Retriever
 git checkout -b <nhánh-mới>
 pip install pyyaml pandas h5py tensorboard pycocoevalcap huggingface_hub
 cd libs/utils && python setup.py install --user && cd ../..   # NMS bằng C++, build lại khi đổi torch
@@ -59,7 +59,7 @@ HF dataset `nguyenminh04/uniav-youcook2-data` là **private**: cần token, ngư
 | Vector thầy OmniRetriever-7B (cho mọi lượt có thầy) | HF `teacher/omni_emb_full.npz` (132 MB) | `data/youcookii/omni_emb_full.npz` |
 | Checkpoint của API (model `iv2`) | HF `api/uniav_iv2.pth` | `ckpt/api/uniav_iv2.pth` |
 | Đặc trưng lệch nửa giây (để ghép thành 2 dòng/giây) | HF `iv2_feats_shift/iv2_feats_shift_00..07.tar` + `manifest.json` (1500 file, đã kiểm tra) | giải nén vào `data/youcookii/iv2_feats_shift/` |
-| Encoder ONE-PEACE text (để tính ret_sim) | HF `encoders/one-peace-text.pt` (6.4 GB) | đặt biến `UNIAV_TEXT_ENCODER` trỏ tới file |
+| Encoder ONE-PEACE text (để tính ret_sim) | HF `encoders/one-peace-text.pt` (6.4 GB) | đặt biến `ATHENA_TEXT_ENCODER` trỏ tới file |
 | Bộ sinh câu GPT-2 (prefix) cho API | HF `api/capgen_prefix.pth` (251 MB) | `ckpt/api/capgen_prefix.pth`; code ở nhánh `api-capgen` |
 | Đặc trưng ONE-PEACE (chỉ để so sánh, đã bỏ) | HF `av_features/` (11 GB) | không cần nữa |
 
@@ -77,7 +77,7 @@ Kiểm tra sau khi tải: có đúng 1500 file trong `data/youcookii/iv2_feats/`
 Lệnh của mọi lượt có thầy, ví dụ `iv2` (model của API):
 
 ```bash
-python train_event.py configs/youcook2_event.yaml --output <run> --note '<mô tả>' \
+python train.py configs/youcook2_event.yaml --output <run> --note '<mô tả>' \
   --set dataset.omni_emb_file=./data/youcookii/omni_emb_full.npz dataset.feat_source=iv2 [k=v ...]
 ```
 
@@ -141,12 +141,12 @@ Tách đoạn đã chững quanh 52–54 R@0.5. Phần chọn câu tăng nhẹ v
 2. **Các biến thể chưa kịp chạy:** `modal_aux` (`loss_weight_modal=0.1`) và `wide` (`model.embd_dim=768 model.head_dim=768`, 141M tham số).
 3. **Đặc trưng dày 2 dòng/giây:** khi có `iv2_feats_shift` trên HF, chạy `tools/make_iv2_dense.py`, rồi train với `iv2_rows_per_sec=2` và `max_seq_len 512`. Kỳ vọng nhỏ: nhãn GT chỉ chính xác tới từng giây, và 512 bước với đặc trưng nội suy cũng không giúp tách đoạn.
 4. **Sinh câu:**
-   - Tạo lại `segments.npz` bằng `python tools/capgen/dump_segments.py`. Script dùng `uniav_api` và `ckpt/api/uniav_iv2.pth`, cần `transformers<4.50`.
+   - Tạo lại `segments.npz` bằng `python tools/capgen/dump_segments.py`. Script dùng `athena` và `ckpt/api/uniav_iv2.pth`, cần `transformers<4.50`.
    - Thử GPT-2 medium.
    - Train trên vector đoạn của model tốt nhất mới.
-   - Đưa bộ sinh câu vào `uniav_api` dưới dạng tuỳ chọn, trên nhánh mới.
+   - Đưa bộ sinh câu vào `athena` dưới dạng tuỳ chọn, trên nhánh mới.
    - Lưu ý: chế độ RAG mất khoảng 30 phút mỗi epoch trên RTX 3060, vì chuỗi đầu vào dài.
-5. **Suy luận:** `iou_power 0.5` thêm khoảng +0.7 R@0.5 trên cùng checkpoint. Muốn áp dụng cho API thì phải chạy lại `python -m uniav_api.calibrate` để chọn lại `min_score`.
+5. **Suy luận:** `iou_power 0.5` thêm khoảng +0.7 R@0.5 trên cùng checkpoint. Muốn áp dụng cho API thì phải chạy lại `python -m athena.calibrate` để chọn lại `min_score`.
 
 ## 6. Những gì còn chạy trên PC lúc bàn giao
 

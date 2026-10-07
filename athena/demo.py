@@ -1,8 +1,8 @@
 """Run the function API on YouCook2 validation videos and compare with the annotations.
 
-  python -m uniav_api.demo                        # every sample in uniav_api/samples (features shipped)
-  python -m uniav_api.demo --ids 6uHoTJSLoL8 ...  # chosen samples
-  python -m uniav_api.demo --videos data/demo_videos [--cache data/demo_cache]   # raw videos, full encoders
+  python -m athena.demo                        # every sample in athena/samples (features shipped)
+  python -m athena.demo --ids 6uHoTJSLoL8 ...  # chosen samples
+  python -m athena.demo --videos data/demo_videos [--cache data/demo_cache]   # raw videos, full encoders
 
 For each video: the events the model found, each next to the real step it matches (uv.show),
 then a few text searches over the processed videos.
@@ -11,7 +11,7 @@ import argparse
 import os
 import time
 
-import uniav_api as uv
+import athena as uv
 
 
 def main():

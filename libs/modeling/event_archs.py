@@ -9,7 +9,7 @@ Outputs:
                                describes (built when loss_weight_ground > 0). Its segments come
                                from the boundary head too, so a query only changes which steps win.
 
-The three production inputs map onto these heads (uniav_api): a video alone -> events from the
+The three production inputs map onto these heads (athena): a video alone -> events from the
 event head, each captioned; a video and a sentence -> segments from the ground head; a sentence
 alone -> the ground head over every stored video.
 

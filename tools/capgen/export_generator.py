@@ -1,4 +1,4 @@
-"""Pack a trained caption generator for uniav_api: fp16 GPT-2 + prefix + its training arguments.
+"""Pack a trained caption generator for athena: fp16 GPT-2 + prefix + its training arguments.
 
   python tools/capgen/export_generator.py prefix     # data/youcookii/capgen/prefix/model.pt -> ckpt/api/capgen_prefix.pth
 """

@@ -2,9 +2,9 @@
 
   python tools/capgen/score_txtsim.py prefix rag5      # uses data/youcookii/capgen/<name>/val_*.json
 
-InternVideo2's text tower (from the video checkpoint, uniav_api.encoders.internvideo2_text) embeds
+InternVideo2's text tower (from the video checkpoint, athena.encoders.internvideo2_text) embeds
 the GT, generated and retrieved captions, centred on the train-caption mean exactly like
-data/youcookii/caption_emb_iv2.npz, so both columns are measured the same way as train_event.py's
+data/youcookii/caption_emb_iv2.npz, so both columns are measured the same way as train.py's
 txt_sim. Results are added to result.json.
 """
 import json
@@ -16,8 +16,8 @@ import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
-from uniav_api.config import Config, pick_device  # noqa: E402
-from uniav_api.encoders.internvideo2_text import InternVideo2TextEncoder  # noqa: E402
+from athena.config import Config, pick_device  # noqa: E402
+from athena.encoders.internvideo2_text import InternVideo2TextEncoder  # noqa: E402
 
 DATA = os.path.join(ROOT, 'data', 'youcookii', 'capgen')
 

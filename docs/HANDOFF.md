@@ -4,15 +4,15 @@ Repo: `/home/minh/projects/UniAV`. Máy: WSL2, RTX 3060 12 GB, RAM 15.9 GB.
 Bản bàn giao sáng nay: `docs/HANDOFF_2026-10-04_am.md`. Bản trước nữa: `docs/HANDOFF_2026-10-03.md`.
 
 **Hai nhánh git:**
-- `test` (commit `2bdbfa8`, đã push): trạng thái dùng cho demo Colab của `uniav_api`. **Không push gì thêm lên nhánh này.**
+- `test` (commit `2bdbfa8`, đã push): trạng thái dùng cho demo Colab của `athena`. **Không push gì thêm lên nhánh này.**
 - `exp-iv2-variants` (đã push): mọi việc từ 13:40 trở đi. Người dùng muốn: mỗi hướng việc mới là một nhánh mới, chỉ push lên nhánh đó.
 
 Đọc thêm khi cần chi tiết:
 - `experiments/NOTES.md`: bài học từ từng thử nghiệm
 - `experiments/RESULTS.md`: bảng kết quả, sinh bằng `tools/summarize_runs.py`
 - `experiments/plots/`: biểu đồ, sinh bằng `tools/plot_runs.py`
-- `uniav_api/README.md`: tài liệu API
-- `docs/UniAV_new.drawio` (+ `.drawio.svg`), `docs/UniAV_new_walkthrough.md`: kiến trúc mới và luồng chạy qua một ví dụ
+- `athena/README.md`: tài liệu API
+- `docs/architecture.drawio` (+ `.drawio.svg`), `docs/architecture_walkthrough.md`: kiến trúc mới và luồng chạy qua một ví dụ
 
 ---
 
@@ -30,7 +30,7 @@ Không có phiên Colab nào mở. Không có tiến trình nền nào khác.
    - Đặc trưng có ở ba nơi: trên máy `data/youcookii/iv2_feats/`, trên Drive `MyDrive/uniav_omni/iv2_feats/`, trên HF `nguyenminh04/uniav-youcook2-data/iv2_feats/` (8 tar + `manifest.json`).
    - Video `wii9jNiNl9Y` có audio ngắn hơn video, từng làm script trích chết, kéo theo 72 video sau nó không được trích. Đã sửa trong `tools/extract_internvideo2.py` (bù 0 cho audio) và thêm bảo vệ: một video lỗi không còn làm dừng cả lượt. 73 video còn thiếu được trích lại trên một phiên A100 riêng.
    - `tools/iv2_finish.sh`: script nền tự kết thúc một lượt trích trên Colab. Nó kiểm tra từng file, đồng bộ lên Drive, đẩy lên HF, rồi mới tắt phiên.
-2. **Dataset nhận nhiều loại đặc trưng:** `dataset.feat_source: onepeace | iv2 | iv2+onepeace`. Với `onepeace`, đầu ra giống hệt code cũ. Đặc trưng InternVideo2 có 1 dòng mỗi giây, được chuẩn hoá L2 rồi co về 256 bước. `train_event.py` tự đặt số kênh đầu vào của model.
+2. **Dataset nhận nhiều loại đặc trưng:** `dataset.feat_source: onepeace | iv2 | iv2+onepeace`. Với `onepeace`, đầu ra giống hệt code cũ. Đặc trưng InternVideo2 có 1 dòng mỗi giây, được chuẩn hoá L2 rồi co về 256 bước. `train.py` tự đặt số kênh đầu vào của model.
 3. **So sánh đặc trưng** (cùng thầy, đủ dữ liệu, 394 video val):
 
 | Lượt | R@0.5 | R@0.7 | ret_sim | top-1 | CIDEr | METEOR |
@@ -47,11 +47,11 @@ Không có phiên Colab nào mở. Không có tiến trình nền nào khác.
    - **Chọn câu ngang bằng.**
    - **Ghép thêm ONE-PEACE làm hỏng tách đoạn.** ONE-PEACE đã được bỏ, như người dùng muốn.
 
-4. **`uniav_api` chuyển sang model `iv2`:**
+4. **`athena` chuyển sang model `iv2`:**
    - Checkpoint `ckpt/api/uniav_iv2.pth`: fp16, chứa luôn cấu hình train, sinh bằng `tools/export_api_ckpt.py`. Bản trên HF: `nguyenminh04/uniav-youcook2-data/api/uniav_iv2.pth`.
    - 8 samples đã trích sẵn, hàm `uv.describe_sample`, `uv.plot`.
    - Tìm kiếm chạy được mà không cần encoder text 6 GB.
-   - Notebook `uniav_api/demo_colab.ipynb`. Đã chạy thử đúng luồng của notebook trên một bản clone mới.
+   - Notebook `athena/demo_colab.ipynb`. Đã chạy thử đúng luồng của notebook trên một bản clone mới.
    - Model qua API khớp lúc train: R@0.5 54.27 bằng đúng số khi chấm lúc train. `min_score` chọn lại là 0.36.
 5. **Sơ đồ kiến trúc, walkthrough, biểu đồ** (`features_*.png` so riêng các loại đặc trưng).
 
@@ -89,8 +89,8 @@ Biểu đồ: `experiments/plots/variants_{curves,final,losses}.png`.
 
 Theo thứ tự nên làm:
 
-1. ~~Kiểm tra encoder InternVideo2 của API~~: **đã xong lúc 15:40**, cosine 1.00000 so với đặc trưng Colab; một video 182 giây mất 42 giây trên RTX 3060 (mục "Checks done" trong `uniav_api/README.md`).
-2. **Có thể áp dụng `iou_power 0.5`** cho API: sửa `test_cfg.iou_power` trong config của checkpoint export, chạy lại `python -m uniav_api.calibrate`, đặt lại `min_score`. Làm trên nhánh mới, không đụng `test`.
+1. ~~Kiểm tra encoder InternVideo2 của API~~: **đã xong lúc 15:40**, cosine 1.00000 so với đặc trưng Colab; một video 182 giây mất 42 giây trên RTX 3060 (mục "Checks done" trong `athena/README.md`).
+2. **Có thể áp dụng `iou_power 0.5`** cho API: sửa `test_cfg.iou_power` trong config của checkpoint export, chạy lại `python -m athena.calibrate`, đặt lại `min_score`. Làm trên nhánh mới, không đụng `test`.
 3. **Muốn tiến thêm cần thay đổi lớn hơn siêu tham số:**
    - **Phần chọn câu:** "trần" hiện tại là chọn câu trong kho với đoạn GT (ret_sim oracle khoảng 0.753). Cao hơn nữa cần sinh câu thay vì chọn: dùng InternVideo3-8B hoặc model ngôn ngữ để viết caption cho từng đoạn. Hoặc thêm vector text của InternVideo2 (đã căn chỉnh với v512) làm không gian chọn câu thứ hai.
    - **Phần tách đoạn:** thử `max_seq_len 512`, vì đặc trưng 1 dòng/giây nên video dài bị nén nhiều. Hoặc trích InternVideo2 dày hơn (2 dòng/giây).

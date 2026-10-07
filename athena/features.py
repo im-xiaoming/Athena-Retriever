@@ -1,7 +1,7 @@
 """Input features of the event model: which ones, their time grid, and how they become model input.
 
 InternVideo2 vision (v768 and/or v512, the checkpoint's iv2_video_keys) + BEATs audio (a768), one
-row per second. Stored as <video_id>.npz (keys v768, v512, a768), e.g. uniav_api/samples/ or
+row per second. Stored as <video_id>.npz (keys v768, v512, a768), e.g. athena/samples/ or
 data/youcookii/iv2_feats/. Rows are L2-normalised when training did (iv2_l2norm), and resampled
 to max_seq_len steps exactly as libs/datasets/youcook2_cap.py does.
 """
@@ -21,7 +21,7 @@ class FeatureSpec:
         d = dataset_cfg
         self.source = d.get('feat_source')
         if self.source != 'iv2':
-            raise ValueError('uniav_api takes InternVideo2-feature checkpoints only (this one: feat_source %r)'
+            raise ValueError('athena takes InternVideo2-feature checkpoints only (this one: feat_source %r)'
                              % self.source)
         self.max_seq_len = d['max_seq_len']
         self.fps = d['default_fps']

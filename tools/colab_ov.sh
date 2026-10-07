@@ -3,15 +3,15 @@
 #   bash tools/colab_ov.sh setup      # clone, install, build NMS, fetch YouCook2 + COIN features (HF token in /content/hf_token)
 #   bash tools/colab_ov.sh queue R0 R1 R2 R3 R4
 # Logs: /content/ov_logs/<run>.log (one table row per epoch). touch /content/ov_stop to stop after the current run;
-# a run is stopped at once by killing its train_event.py. Two queues can run at once (the A100 is
+# a run is stopped at once by killing its train.py. Two queues can run at once (the A100 is
 # CPU-bound at ~27% GPU with one run): bash tools/colab_ov.sh queue E1 E2
 set -e
-REPO=/content/UniAV
+REPO=/content/Athena-Retriever
 case "$1" in
 setup)
   cd /content
-  [ -d UniAV ] || git clone -q -b ov-refine https://github.com/im-xiaoming/UniAV-fixed.git UniAV
-  cd UniAV && git pull -q && git log --oneline -1
+  [ -d Athena-Retriever ] || git clone -q -b ov-refine https://github.com/im-xiaoming/Athena-Retriever.git Athena-Retriever
+  cd Athena-Retriever && git pull -q && git log --oneline -1
   pip install -q pycocoevalcap h5py tensorboard 2>&1 | tail -1
   java -version 2>&1 | head -1 || echo "no java: METEOR will be skipped"
   (cd libs/utils && python setup.py install --user > /content/nms_build.log 2>&1) && python -c "import nms_1d_cpu" && echo "nms ok"
@@ -48,7 +48,7 @@ queue)
       *) echo "unknown run $run"; continue ;;
     esac
     echo "$(date +%H:%M:%S) start $run: $ARGS"
-    python -u train_event.py configs/youcook2_event.yaml --output ov_$run --note "PLAN_openvocab $run" \
+    python -u train.py configs/youcook2_event.yaml --output ov_$run --note "PLAN_openvocab $run" \
       --set num_workers=4 $ARGS > /content/ov_logs/$run.log 2>&1 || echo "$(date +%H:%M:%S) $run exited with $?"
     echo "$(date +%H:%M:%S) end $run"
   done

@@ -1,8 +1,8 @@
 """Train the event segmentation + captioning model on YouCook2.
 
-  python train_event.py configs/youcook2_event.yaml --output run1
-  python train_event.py configs/youcook2_event.yaml --output run2 --set init_rand_seed=2
-  python train_event.py configs/youcook2_event.yaml --eval ckpt/run1/best_cap.pth.tar
+  python train.py configs/youcook2_event.yaml --output run1
+  python train.py configs/youcook2_event.yaml --output run2 --set init_rand_seed=2
+  python train.py configs/youcook2_event.yaml --eval ckpt/run1/best_cap.pth.tar
 
 Every training run writes experiments/runs/<host>-<output>.json with the git commit,
 the resolved config, the overrides, per-epoch metrics and a full evaluation of the

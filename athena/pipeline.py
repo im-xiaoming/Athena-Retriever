@@ -1,13 +1,13 @@
 """The three production inputs: a video, a video and a sentence, or a sentence alone.
 
-    from uniav_api.pipeline import UniAVPipeline
-    pipe = UniAVPipeline()
+    from athena.pipeline import AthenaPipeline
+    pipe = AthenaPipeline()
     pipe.query(video='cooking.mp4')                       # video: its events, each with a caption
     pipe.query(video='cooking.mp4', text='cut the onion') # video + sentence: where it happens in that video
     pipe.query(text='cut the onion')                      # sentence: where it happens in every stored video
 
     result = pipe.process('cooking.mp4')           # events: start, end, score, caption, embedding
-    result = pipe.process_sample('6uHoTJSLoL8')    # the same from features shipped in uniav_api/samples
+    result = pipe.process_sample('6uHoTJSLoL8')    # the same from features shipped in athena/samples
     hits = pipe.ground('6uHoTJSLoL8', 'add soy sauce')    # segments of one video matching a sentence
     hits = pipe.search('cut the onion', top_k=5)   # segments of processed videos matching a sentence
 
@@ -66,12 +66,12 @@ def select_events(segs, scores, min_score, max_overlap, max_events):
     return sorted(kept, key=lambda i: segs[i][0])
 
 
-class UniAVPipeline:
+class AthenaPipeline:
     def __init__(self, cfg=None):
         self.cfg = cfg or Config.from_env()
         self.device, self.dtype = pick_device(self.cfg.device)
         if not os.path.exists(self.cfg.checkpoint):
-            raise FileNotFoundError('checkpoint %s not found; see uniav_api/README.md, "Files needed"'
+            raise FileNotFoundError('checkpoint %s not found; see athena/README.md, "Files needed"'
                                     % self.cfg.checkpoint)
         ck = _load_ckpt(self.cfg.checkpoint)
         if 'config' in ck:   # API checkpoint: its own training config
@@ -126,7 +126,7 @@ class UniAVPipeline:
             for p in (self.cfg.iv2_video_encoder, self.cfg.iv2_audio_encoder, self.cfg.iv2_repo):
                 if not os.path.exists(p):
                     raise FileNotFoundError('%s not found: describe_video needs the InternVideo2 encoders, '
-                                            'see uniav_api/README.md' % p)
+                                            'see athena/README.md' % p)
             self._encoder = InternVideo2AVEncoder(self.cfg.iv2_video_encoder, self.cfg.iv2_audio_encoder,
                                                   self.cfg.iv2_repo, self.device, self.spec.video_keys,
                                                   self.spec.l2norm, keep_loaded=keep)

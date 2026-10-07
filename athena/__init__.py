@@ -1,6 +1,6 @@
 """UniAV event captioning as Python functions.
 
-    import uniav_api as uv
+    import athena as uv
 
     uv.query(video='cooking.mp4')                       # video: events with captions
     uv.query(video='cooking.mp4', text='cut the onion') # video + sentence: where it happens in it
@@ -18,13 +18,13 @@
     vec = uv.embed_text('add salt to the pot')         # 512-d query vector, same space as events
 
 The model and encoders load on first use (GPU if available: CUDA or Apple MPS; else CPU).
-Use uv.load(...) to pick a device or checkpoint explicitly, or UniAVPipeline for full control.
+Use uv.load(...) to pick a device or checkpoint explicitly, or AthenaPipeline for full control.
 """
 from .config import Config
-from .pipeline import UniAVPipeline
+from .pipeline import AthenaPipeline
 from .report import compare_table, format_events, load_gt, plot, show
 
-__all__ = ['Config', 'UniAVPipeline', 'load', 'query', 'ground', 'describe_video', 'describe_features', 'describe_sample', 'samples',
+__all__ = ['Config', 'AthenaPipeline', 'load', 'query', 'ground', 'describe_video', 'describe_features', 'describe_sample', 'samples',
            'search', 'embed_text', 'show', 'plot', 'compare_table', 'format_events', 'load_gt']
 
 _pipeline = None
@@ -33,7 +33,7 @@ _pipeline = None
 def load(**config):
     """(Re)load the pipeline. Keyword arguments override Config fields, e.g. device='cpu'."""
     global _pipeline
-    _pipeline = UniAVPipeline(Config.from_env(**config))
+    _pipeline = AthenaPipeline(Config.from_env(**config))
     return _pipeline
 
 
@@ -57,7 +57,7 @@ def describe_features(visual, audio, duration, video_id=None, store=True):
 
 
 def samples():
-    """Ids of the sample videos shipped with features in uniav_api/samples (YouCook2 validation)."""
+    """Ids of the sample videos shipped with features in athena/samples (YouCook2 validation)."""
     return _get().samples()
 
 
@@ -68,7 +68,7 @@ def describe_sample(video_id, store=True):
 
 def query(video=None, text=None, top_k=5):
     """The production entry point: a video, a video and a sentence, or a sentence alone.
-    See UniAVPipeline.query."""
+    See AthenaPipeline.query."""
     return _get().query(video=video, text=text, top_k=top_k)
 
 

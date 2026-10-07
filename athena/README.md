@@ -1,14 +1,14 @@
-# uniav_api
+# athena
 
 Python functions that turn a cooking video into timed steps, each with a caption chosen from
 the 8218 YouCook2 training sentences and a 512-d vector for text search. It is a self-contained
 inference copy of the event model in `libs/modeling/event_archs.py` (architecture:
-`docs/UniAV_new.drawio.svg`, walkthrough: `docs/UniAV_new_walkthrough.md`).
+`docs/architecture.drawio.svg`, walkthrough: `docs/architecture_walkthrough.md`).
 
-Colab demo: `uniav_api/demo_colab.ipynb` (samples need no GPU and no encoder).
+Colab demo: `athena/demo_colab.ipynb` (samples need no GPU and no encoder).
 
 ```python
-import uniav_api as uv
+import athena as uv
 
 uv.samples()                                   # YouCook2 val videos shipped with their features
 r = uv.describe_sample('6uHoTJSLoL8')          # ~1 s, no encoder needed
@@ -48,7 +48,7 @@ A video file given with a sentence right after it was described is not encoded a
 
 Each event holds `start`, `end` (seconds), `score`, `caption`, `similarity`, `consensus`,
 `alternatives` (3 other candidate captions) and `embedding` (numpy, 512). Results are kept in
-`uniav_api/index/<model>/<video_id>.json` so `search()` covers earlier videos.
+`athena/index/<model>/<video_id>.json` so `search()` covers earlier videos.
 
 ## Model
 
@@ -70,7 +70,7 @@ many events as there are real steps. In the API, events are kept by score instea
 
 ## Samples
 
-`uniav_api/samples/<id>.npz`: InternVideo2 v768 / v512, BEATs a768 (one row per second, fp16) and
+`athena/samples/<id>.npz`: InternVideo2 v768 / v512, BEATs a768 (one row per second, fp16) and
 the duration. All are validation videos, never seen in training.
 
 | id | dish | length | F1 at IoU 0.5 |
@@ -103,7 +103,7 @@ The last five were picked among the better videos (median F1 over the validation
 
 ## Generated captions (`caption_mode='generate'`)
 
-`uniav_api/generator.py`: GPT-2 small fine-tuned to write a caption from the event's vector q and
+`athena/generator.py`: GPT-2 small fine-tuned to write a caption from the event's vector q and
 8 level-0 feature tokens sampled across the event (a ClipCap-style prefix), trained on the YouCook2
 train steps of this model (`tools/capgen/`). The retrieved train caption stays in
 `retrieved_caption`. Checkpoint `ckpt/api/capgen_prefix.pth` (251 MB, fp16); GPT-2's tokenizer and
@@ -124,26 +124,26 @@ the API writes exactly the training script's captions (6/6), CPU and fp16 checkp
 
 | Check | Result |
 |---|---|
-| Model parity, val set, k = #GT (`python -m uniav_api.calibrate`) | R@0.5 54.27 (training eval 54.27), fp16 checkpoint |
+| Model parity, val set, k = #GT (`python -m athena.calibrate`) | R@0.5 54.27 (training eval 54.27), fp16 checkpoint |
 | Event selection at min_score 0.36, val set | F1@IoU0.5 0.534, 8.4 events per video |
 | numpy soft-NMS vs the C++ extension, 200 random cases | identical |
 | `describe_video` encoder vs the Colab features, `6uHoTJSLoL8` (182 s) | cosine 1.00000 (mean and min) for v768, v512, a768; 42 s on an RTX 3060 including model loading, peak GPU 4.3 GB |
 
-`python -m uniav_api.demo` prints every sample next to its annotations and runs a few searches.
+`python -m athena.demo` prints every sample next to its annotations and runs a few searches.
 
 ## Files needed
 
 | Path | What | For |
 |---|---|---|
 | `ckpt/api/uniav_iv2.pth` | event model; HF dataset `nguyenminh04/uniav-youcook2-data`, file `api/uniav_iv2.pth` (private) | everything |
-| `uniav_api/assets/caption_pool.npz` | train captions + InternVideo2 text vectors + centring mean (in git) | everything |
+| `athena/assets/caption_pool.npz` | train captions + InternVideo2 text vectors + centring mean (in git) | everything |
 | `data/youcookii/annotations/youcookii_annotations_trainval.json` | GT steps (in git) | show / plot |
 | `InternVideo/` | `git clone --depth 1 https://github.com/OpenGVLab/InternVideo` (unmodified) | describe_video |
 | `ckpt/internvideo2/InternVideo2-stage2_1b-224p-f4.pt` | HF `OpenGVLab/InternVideo2-Stage2_1B-224p-f4` (gated) | describe_video |
 | `ckpt/internvideo2/audio_6b.pth` | HF `OpenGVLab/InternVideo2-Stage2-6B-Audio` | describe_video |
 | `ckpt/api/capgen_prefix.pth` | caption generator, `tools/capgen/export_generator.py prefix` | caption_mode='generate' |
 
-`describe_video` also needs `timm`, `einops`, `torchaudio` (`pip install -r uniav_api/requirements.txt`).
+`describe_video` also needs `timm`, `einops`, `torchaudio` (`pip install -r athena/requirements.txt`).
 Only models with InternVideo2 features and the InternVideo2 caption space (or the teacher's) are
 supported; ONE-PEACE models need the code before 2026-10-05. Checkpoints saved before the cleanup
 of that day (with unused AVEL / SED feed-forward layers, 135M parameters instead of 68M) load unchanged.
@@ -151,6 +151,6 @@ of that day (with unused AVEL / SED feed-forward layers, 135M parameters instead
 ## Devices and memory
 
 `Config.device='auto'` picks CUDA, then Apple MPS, then CPU; override with `uv.load(device='cpu')`
-or an environment variable `UNIAV_<FIELD>`. The event model (131M parameters) runs fp32 anywhere
+or an environment variable `ATHENA_<FIELD>`. The event model (131M parameters) runs fp32 anywhere
 in under a second per video. The InternVideo2 encoders run fp16 on a GPU (about 3 GB of weights);
 extraction ran at about 30 seconds of video per second on an A100.
