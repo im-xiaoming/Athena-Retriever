@@ -41,8 +41,8 @@ import tarfile
 import time
 from datetime import datetime, timezone
 
-REPO = os.environ.get('COIN_HUB_REPO', 'nguyenminh04/coin-data')   # features, claims, plans (and COIN videos)
-VREPO = REPO                                                        # video shards (own repo for anet / htstep)
+REPO = os.environ.get('COIN_HUB_REPO', 'nguyenminh04/coin-data')   # features, claims, plans
+VREPO = os.environ.get('COIN_HUB_VREPO', 'nguyenminh04/coin-videos')   # video shards (separate repo for every dataset)
 PFX = 'coin'                                                        # shard file prefix: <PFX>_videos_NNNN.tar
 SHARD = 100
 FORMAT = 'bv*[height<=480][ext=mp4]+ba[ext=m4a]/b[height<=480]/bv*+ba/b'   # as datasets/annotations/download_videos.py
@@ -106,7 +106,8 @@ def owner(claims, k, stale):
 # ---------------------------------------------------------------------------------------- PC side
 def upload(a):
     api = hub()
-    api.create_repo(REPO, repo_type='dataset', private=True, exist_ok=True)
+    for r in (REPO, VREPO):
+        api.create_repo(r, repo_type='dataset', private=True, exist_ok=True)
     tmp = a.tmp or os.path.join(ROOT, 'logs', 'coin_tmp')
     os.makedirs(tmp, exist_ok=True)
     while True:
@@ -132,11 +133,11 @@ def upload(a):
                     t.add(paths[i], arcname=i + '.mp4')
             t0, mb = time.time(), os.path.getsize(tar) / 1e6
             api.upload_file(path_or_fileobj=tar, path_in_repo='videos/coin_videos_%04d.tar' % k,
-                            repo_id=REPO, repo_type='dataset', commit_message='videos shard %04d' % k)
+                            repo_id=VREPO, repo_type='dataset', commit_message='videos shard %04d' % k)
             log('uploaded shard %04d: %d videos, %.0f MB, %.1f MB/s' % (k, len(part), mb, mb / (time.time() - t0)))
             os.remove(tar)
         api.upload_file(path_or_fileobj=json.dumps(manifest).encode(), path_in_repo='videos/manifest.json',
-                        repo_id=REPO, repo_type='dataset', commit_message='manifest')
+                        repo_id=VREPO, repo_type='dataset', commit_message='manifest')
         if a.flush:
             log('flushed: %d videos in %d shards, no DONE (the fetchers write it)' % (len(ids), n_shards))
             return
@@ -287,7 +288,7 @@ def fetch(a):
             log('no free chunk (%d left, all claimed); waiting' % len(todo)); time.sleep(300); continue
         k = free[0] if not a.reverse else free[-1]
         claim = 'dl/claims/%04d__%s' % (k, a.name)
-        api.upload_file(path_or_fileobj=a.name.encode(), path_in_repo=claim, repo_id=REPO, repo_type='dataset',
+        api.upload_file(path_or_fileobj=('%s %d' % (a.name, time.time())).encode(), path_in_repo=claim, repo_id=REPO, repo_type='dataset',
                         commit_message='dl claim %04d %s' % (k, a.name))
         time.sleep(5)
         done, claims, _ = dl_state(api)
@@ -350,7 +351,7 @@ def work(a):
             log('nothing free (%d uploaded, %d done, %d claimed); waiting' % (len(shards), len(done), len(claims)))
             time.sleep(300); continue
         k = free[0]
-        api.upload_file(path_or_fileobj=a.name.encode(), path_in_repo='claims/%04d__%s' % (k, a.name),
+        api.upload_file(path_or_fileobj=('%s %d' % (a.name, time.time())).encode(), path_in_repo='claims/%04d__%s' % (k, a.name),
                         repo_id=REPO, repo_type='dataset', commit_message='claim %04d %s' % (k, a.name))
         time.sleep(5)   # two workers claiming the same shard at once: the older claim wins
         _, done, claims, _ = state(api)

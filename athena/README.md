@@ -2,8 +2,8 @@
 
 Python functions that turn a cooking video into timed steps, each with a caption chosen from
 the 8218 YouCook2 training sentences and a 512-d vector for text search. It is a self-contained
-inference copy of the event model in `libs/modeling/event_archs.py` (architecture:
-`docs/architecture.drawio.svg`, walkthrough: `docs/architecture_walkthrough.md`).
+inference copy of the event model in `libs/modeling/event_archs.py` (architecture: see the
+"Architecture" section of the top-level `README.md` and `docs/ARCHITECTURE.md`).
 
 Colab demo: `athena/demo_colab.ipynb` (samples need no GPU and no encoder).
 
@@ -52,21 +52,23 @@ Each event holds `start`, `end` (seconds), `score`, `caption`, `similarity`, `co
 
 ## Model
 
-**Being replaced (2026-10-05): ONE-PEACE was removed from the project.** Captions are now matched in
-InternVideo2's own text space, so the API needs a model trained with `caption_space: iv2` (run
-`civ2_v512` on Kaggle: R@0.5 53.1, CIDEr 90.2, one seed), exported by `tools/export_api_ckpt.py`.
-`ckpt/api/uniav_iv2.pth` below was trained in ONE-PEACE caption space and no longer loads; its
-numbers stay here for reference. YouCook2 validation, 394 videos (ret_sim: ONE-PEACE text space):
+`ckpt/api/athena.pth` is training run `ov_E1`, exported by `tools/export_api_ckpt.py`: InternVideo2
+text space (`caption_space: iv2`) with the ground head. It carries two weight sets: the main weights
+(epoch 10, best captions) and `state_dict_seg` (epoch 7, best segmentation); `use_seg_weights` picks
+segmentation and grounding from the second and captions from the first. YouCook2 validation,
+394 videos, main weights, as stored in the checkpoint (`final_eval`):
 
-| | R@0.5 | R@0.7 | ret_sim | CIDEr | METEOR |
-|---|---|---|---|---|---|
-| this model (InternVideo2 + BEATs) | 54.3 | 31.2 | 0.754 | 87.9 | 15.6 |
-| same setup, second seed | 52.8 | 29.6 | 0.758 | 89.9 | 15.5 |
-| previous API model `omni65` (ONE-PEACE) | 48.7 | 25.3 | 0.758 | 86.5 | 15.4 |
+| Measure | Value |
+|---|---|
+| R@0.3 / R@0.5 / R@0.7 | 72.6 / 53.6 / 30.9 |
+| mIoU | 49.9 |
+| CIDEr (consensus pick, `mbr_student`) | 88.2 |
+| Ground R1@0.5 / R1@0.7 | 47.3 / 29.2 |
 
-R@0.5 counts the real steps covered by a predicted event with IoU >= 0.5 when the model keeps as
-many events as there are real steps. In the API, events are kept by score instead (`min_score`
-0.36, at most 0.3 IoU between kept events): F1 at IoU 0.5 is 0.534, 8.4 events per video (real 7.7).
+R@k counts the real steps covered by a predicted event with IoU >= k when the model keeps as many
+events as there are real steps (7.7 per video). In the API, events are kept by score instead
+(`min_score` 0.40, at most 0.3 IoU between kept events). `ckpt/api/athena_coin.pth` (run `ov_R1`,
+trained with COIN) is not used by the API yet.
 
 ## Samples
 
@@ -82,7 +84,7 @@ the duration. All are validation videos, never seen in training.
 | `SOMsxGGSTUk` | Thai noodles | 5:20 | 0.89 |
 | `cMzyB4m3VHY` | pizza | 3:41 | 0.83 |
 
-The last five were picked among the better videos (median F1 over the validation videos of
+F1 values are from the earlier checkpoint. The last five were picked among the better videos (median F1 over the validation videos of
 2.5 to 5.5 minutes is 0.57); the first three were chosen before the model existed.
 
 ## How it works
@@ -120,7 +122,7 @@ Generated captions read naturally and score higher on average, but can invent de
 for pork); retrieved captions are always real sentences. Check: on the GT steps of `6uHoTJSLoL8`
 the API writes exactly the training script's captions (6/6), CPU and fp16 checkpoint.
 
-## Checks done (2026-10-04)
+## Checks done (2026-10-04, earlier checkpoint)
 
 | Check | Result |
 |---|---|
@@ -135,7 +137,7 @@ the API writes exactly the training script's captions (6/6), CPU and fp16 checkp
 
 | Path | What | For |
 |---|---|---|
-| `ckpt/api/uniav_iv2.pth` | event model; HF dataset `nguyenminh04/uniav-youcook2-data`, file `api/uniav_iv2.pth` (private) | everything |
+| `ckpt/api/athena.pth` | event model; HF dataset `nguyenminh04/uniav-youcook2-data`, file `api/athena.pth` | everything |
 | `athena/assets/caption_pool.npz` | train captions + InternVideo2 text vectors + centring mean (in git) | everything |
 | `data/youcookii/annotations/youcookii_annotations_trainval.json` | GT steps (in git) | show / plot |
 | `InternVideo/` | `git clone --depth 1 https://github.com/OpenGVLab/InternVideo` (unmodified) | describe_video |

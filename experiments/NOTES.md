@@ -53,7 +53,7 @@ Lessons from each change and what to combine next. The results table is in
 
 Conclusion of the variants (2026-10-04 afternoon): the InternVideo2 model is on a plateau for
 these hyper-parameters; every change lands inside the seed noise. Further gains need a bigger
-change (see docs/HANDOFF.md, next steps).
+change (see docs/PLAN_openvocab.md).
 | Original UniAV checkpoint (`--pretrain`) | worse twice: R@0.5 −3.7, CIDEr −17 | no |
 | `max_seq_len: 512` | same as 256 | no |
 | Hard NMS / lower NMS IoU | worse than soft-NMS 0.7 | no |

@@ -83,7 +83,7 @@ class AthenaPipeline:
         self.spec = FeatureSpec(mcfg['dataset'])
         self.max_seq_len = self.spec.max_seq_len
         sd = upgrade_state_dict({k: v.float() for k, v in ck['state_dict'].items()})
-        self.caption_space = mcfg['dataset'].get('caption_space', 'onepeace')
+        self.caption_space = mcfg['dataset'].get('caption_space', 'onepeace')  # checkpoints from before 2026-10-05 have no key
         if self.caption_space == 'onepeace':
             raise ValueError('checkpoint %s was trained in the ONE-PEACE caption space, which was removed; '
                              'use a model trained with caption_space iv2' % self.cfg.checkpoint)

@@ -30,7 +30,7 @@ Bài báo tham khảo: `OV-AVEL/2411.11278v3.pdf` (Zhou và cộng sự, CVPR 20
 
 ## Dữ liệu và cách đánh giá
 
-- Train: YouCook2 train (1.106 video) cộng **COIN của các việc đã thấy**, phần `training`, trộn batch 1:1 theo nguồn. Mỗi nguồn có kho câu riêng trong loss (đúng `PLAN_multidataset.md`).
+- Train: YouCook2 train (1.106 video) cộng **COIN của các việc đã thấy**, phần `training`, trộn batch 1:1 theo nguồn. Mỗi nguồn có kho câu riêng trong loss (một expert chung, kho câu tách theo dataset).
 - Chia việc COIN: trong mỗi lĩnh vực (12 lĩnh vực, `taxonomy.xlsx`), khoảng 30% số việc thành **việc chưa thấy**. Video của các việc này không bao giờ dùng để train (tỉ lệ giống 21/67 của OV-AVEBench).
 - Đánh giá:
   - YouCook2 val như cũ: R@0.5, CIDEr, METEOR, G R1@0.5.
@@ -40,7 +40,7 @@ Bài báo tham khảo: `OV-AVEL/2411.11278v3.pdf` (Zhou và cộng sự, CVPR 20
     - F1 theo sự kiện: đoạn model tìm được và nhãn của nó phải khớp GT (IoU ≥ 0.5).
 - Bỏ 3 video COIN trùng YouCook2 val (`data/coin_exclude.txt`).
 
-## Bộ sinh câu (theo `PLAN_multidataset.md`, mục 4)
+## Bộ sinh câu (thẻ nguồn `youcook2:` / `coin:` trong đầu vào GPT-2)
 
 Đầu ra cuối cùng phải là caption do model sinh ra. Kho caption nấu ăn chỉ còn là tín hiệu phụ khi train, vì nó không mô tả được việc ngoài nấu ăn. Sau khi chọn được model sự kiện tốt nhất (các lượt R0 đến R4 bên dưới):
 

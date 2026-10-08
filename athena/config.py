@@ -27,7 +27,7 @@ class Config:
     device: str = 'auto'            # auto | cuda | mps | cpu
     keep_encoders_loaded: str = 'auto'   # auto: keep on GPUs with >= 10 GB, otherwise load per use
     # event selection, calibrated on the validation set (see athena/calibrate.py)
-    min_score: float = 0.40          # ov model (best_seg), val: F1@IoU0.5 0.535
+    min_score: float = 0.40          # athena.pth (best_seg weights), val: F1@IoU0.5 0.535
     max_overlap: float = 0.3        # drop an event overlapping a better one by more than this IoU
     max_events: int = 30
     alternatives: int = 3           # extra caption candidates returned per event

@@ -17,18 +17,12 @@ reduced to a single task:
 - **Teacher**: OmniRetriever-7B embeddings of every GT clip and caption guide the event vectors
   during training (off at inference).
 
-Architecture: `docs/architecture.drawio.svg`, walkthrough with an example: `docs/architecture_walkthrough.md`.
+## Architecture
 
-| YouCook2 val (394 videos) | R@0.5 | R@0.7 | CIDEr | METEOR |
-|---|---|---|---|---|
-| `iv2` (ONE-PEACE caption space, before 2026-10-05) | 54.3 | 31.2 | 87.9 | 15.56 |
-| + GPT-2 captions on the same events | | | 95.1 | 15.42 |
-| `civ2_v512` (InternVideo2 caption space, 1 seed, Kaggle) | 53.1 | | 90.2 | |
-
-Main metrics: R@0.5 / R@0.7 for segmentation, CIDEr / METEOR for captions. `txt_sim` (cosine of the
-chosen and the GT caption in InternVideo2 text space) replaces the ONE-PEACE `ret_sim` of older runs.
-
-All runs, configs and lessons: `experiments/RESULTS.md`, `experiments/NOTES.md`.
+Frozen InternVideo2 + BEATs features -> audio-visual ConvTransformer backbone (6 pyramid levels) -> event, boundary,
+embed and (optional) ground heads -> segment vector `q` -> caption picked from the train caption pool or written by GPT-2.
+Input can be a video, a video and a sentence, or a sentence alone. Full description, sizes and losses:
+`docs/ARCHITECTURE.md`.
 
 ## Layout
 
@@ -41,7 +35,7 @@ All runs, configs and lessons: `experiments/RESULTS.md`, `experiments/NOTES.md`.
 | `libs/modeling/multimodal_backbones.py`, `blocks.py` | audio-visual ConvTransformer backbone |
 | `athena/` | inference API (video or stored features -> events with captions, search); see its README |
 | `tools/` | feature extraction, caption vectors, teacher vectors, API export, plots, caption generator |
-| `docs/` | architecture, handoffs between sessions, data locations |
+| `docs/` | architecture, data pipeline (`docs/README.md`), open-vocabulary plan, HF dataset cards |
 
 ## Setup
 
@@ -52,7 +46,7 @@ pycocoevalcap (METEOR needs `java`). The 1-D NMS is a C++ extension; build it af
 cd libs/utils && python setup.py install --user && cd ../..
 ```
 
-Data (private HF dataset `nguyenminh04/uniav-youcook2-data`, see `docs/HANDOFF_KAGGLE.md`):
+Data (private HF dataset `nguyenminh04/uniav-youcook2-data`, see `docs/README.md`):
 `iv2_feats/` -> `data/youcookii/iv2_feats/` (1500 `.npz`), `teacher/omni_emb_full.npz` ->
 `data/youcookii/`. Annotations and caption vectors (`caption_emb_iv2.npz`) are in git.
 

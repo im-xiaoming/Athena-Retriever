@@ -32,7 +32,7 @@ libs/utils/*.egg-info/
 *.ipynb
 !athena/demo_colab.ipynb
 
-# models, features and data (on HF, see docs/locations.md)
+# models, features and data (on HF, see docs/README.md)
 ckpt/api/
 ckpt/internvideo2/
 /datasets/

@@ -9,7 +9,7 @@ tags:
 - coin
 ---
 
-# COIN: videos and InternVideo2 + BEATs features (private, work in progress)
+# COIN: videos and InternVideo2 + BEATs features (public)
 
 [COIN](https://coin-dataset.github.io/) (Tang et al., CVPR 2019) contains 11,827 YouTube
 instructional videos covering 180 tasks in 12 domains, for 468 hours in total. It has
@@ -18,8 +18,7 @@ This repo holds the videos we could still download in 2026 and one feature vecto
 The features are extracted **exactly like our YouCook2 features**
 (`nguyenminh04/uniav-youcook2-data`, `iv2_feats/`), so the two datasets can be trained together.
 
-Code: [`tools/coin_hub.py`](https://github.com/im-xiaoming/Athena-Retriever/blob/ov-refine/tools/coin_hub.py)
-and `tools/extract_internvideo2.py` on branch `ov-refine` of `im-xiaoming/Athena-Retriever`.
+Code: `tools/coin_hub.py` (`--dataset coin`) and `tools/extract_internvideo2.py` in `im-xiaoming/Athena-Retriever`. Videos now live in the separate repo `nguyenminh04/coin-videos` (`videos/`); this repo keeps features, claims and plans. The layout table below still lists the old `videos/` paths.
 Status (2026-10-06): downloading is stopped and **5,180 videos have features** (63 shards: 0000-0015 from the PC's first downloads, 1000-1099 from the distributed download, 2000-2001 from a retry with login cookies; 3,947 from the COIN training split, 1,233 from the testing split; about 20,000 step segments, 743 distinct labels). Not downloaded: about 4,400 videos of chunks 1031-1085 and 38 videos that need an age-verified or member account. See `videos/manifest.json`, `dl/done/` and the `feats/` folder.
 
 ## Layout
@@ -87,4 +86,4 @@ for a in coin['0R9pdc9dO3Q']['annotation']:
 
 ## License
 
-COIN annotations and videos belong to their authors and to YouTube uploaders: research use only, under COIN's terms. This repo is private and is not for redistribution.
+COIN annotations and videos belong to their authors and to YouTube uploaders: research use only, under COIN's terms. Research use only; do not redistribute.
