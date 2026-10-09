@@ -66,7 +66,7 @@ The first videos of `feats/coin_feats_0000.tar`, with their COIN annotation:
 import json, tarfile, numpy as np
 from huggingface_hub import hf_hub_download
 
-tar = hf_hub_download('nguyenminh04/coin-data', 'feats/coin_feats_0000.tar', repo_type='dataset')
+tar = hf_hub_download('nguyenminh04/coin-feats', 'feats/coin_feats_0000.tar', repo_type='dataset')
 tarfile.open(tar).extractall('coin_feats')
 z = np.load('coin_feats/0R9pdc9dO3Q.npz')
 {k: z[k].shape for k in z.files}   # {'v768': (123, 768), 'v512': (123, 512), 'a768': (123, 768)}

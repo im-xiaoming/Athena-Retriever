@@ -14,7 +14,7 @@ for repo, f in (('OpenGVLab/InternVideo2-Stage2_1B-224p-f4', 'InternVideo2-stage
                 ('OpenGVLab/InternVideo2-Stage2-6B-Audio', 'audio_6b.pth')):
     print(hf_hub_download(repo, f, local_dir='/content/iv2_ckpt', token=os.environ['HF_TOKEN']), flush=True)
 PY
-mkdir -p tools && cp /content/coin_hub.py tools/coin_hub.py
+mkdir -p tools && cp /content/coin_hub.py /content/extract_internvideo2.py tools/
 nohup python -u tools/coin_hub.py fetch --dataset htstep --name colab --tmp /content/fetch --reverse --jobs 3 > /content/fetch.log 2>&1 &
 for ds in anet htstep; do
   python -u tools/coin_hub.py work --dataset $ds --name colab-t4 --tmp /content/work_$ds \

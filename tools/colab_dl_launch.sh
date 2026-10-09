@@ -9,6 +9,7 @@ printf %s "$HF_TOKEN" > /tmp/hf_token_colab
 $C upload -s t4 /tmp/hf_token_colab /content/hf_token && rm /tmp/hf_token_colab
 $C upload -s t4 tools/coin_hub.py /content/coin_hub.py
 $C upload -s t4 tools/colab_dl_extract.sh /content/colab_dl_extract.sh
+$C upload -s t4 tools/extract_internvideo2.py /content/extract_internvideo2.py
 echo "import subprocess; subprocess.Popen('nohup bash /content/colab_dl_extract.sh > /content/boot.log 2>&1 &', shell=True)" | $C exec -s t4
 setsid nohup tools/colab_keepalive.sh t4 >/dev/null 2>&1 &
 echo "$(date +%T) started"

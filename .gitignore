@@ -1,6 +1,5 @@
 # secrets and local settings
 .env
-cookies/
 .claude/
 .vscode/
 *.pth
@@ -23,7 +22,6 @@ libs/utils/dist/
 libs/utils/*.egg-info/
 
 # text files are ignored except the ones the code needs
-*.txt
 !athena/requirements.txt
 !athena/encoders/bpe/dict.txt
 !data/coin_exclude.txt

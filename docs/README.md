@@ -7,7 +7,7 @@ dataset repos, using any number of machines at once. Nothing here trains a model
 
 | Dataset | Videos repo | Features repo (also claims, plan, annotations) | Shards |
 |---|---|---|---|
-| COIN (`--dataset coin`, default) | `nguyenminh04/coin-videos` | `nguyenminh04/coin-data` | 0000-0015, 1000-1099, 2000-2001; 5,180 videos with features; `exclude.txt` lists 3 ids shared with YouCook2 val |
+| COIN (`--dataset coin`, default) | `nguyenminh04/coin-videos` | `nguyenminh04/coin-feats` | 0000-0015, 1000-1099, 2000-2001; 5,180 videos with features; `exclude.txt` lists 3 ids shared with YouCook2 val |
 | ActivityNet (`--dataset anet`) | `nguyenminh04/anet-videos` | `nguyenminh04/anet-feats` | 35 chunks, 1000-1034 |
 | HT-Step (`--dataset htstep`) | `nguyenminh04/htstep-videos` | `nguyenminh04/htstep-feats` | 11 chunks, 1000-1010 (1,005 videos: val_seen + about 900 train) |
 | YouCook2 | `nguyenminh04/uniav-youcook2-data` | same repo (`iv2_feats/`, teacher vectors) | 1,500 `.npz` |

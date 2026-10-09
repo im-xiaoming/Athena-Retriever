@@ -1,6 +1,6 @@
 """COIN data for training: features from the HF repo and one compact annotation file with the seen/unseen split.
 
-  python tools/coin_data.py fetch    # feats/coin_feats_*.tar of nguyenminh04/coin-data -> data/coin/iv2_feats/<id>.npz
+  python tools/coin_data.py fetch    # feats/coin_feats_*.tar of nguyenminh04/coin-feats -> data/coin/iv2_feats/<id>.npz
   python tools/coin_data.py anno     # data/coin/coin_anno.json (needs datasets/annotations/COIN.json + taxonomy.xlsx)
 
 coin_anno.json holds, for every video with features (minus data/coin_exclude.txt):
@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO = 'nguyenminh04/coin-data'
+REPO = 'nguyenminh04/coin-feats'
 OUT = os.path.join(ROOT, 'data', 'coin')
 ANN = os.path.join(ROOT, 'datasets', 'annotations')
 UNSEEN_FRAC, SEED = 0.3, 2026

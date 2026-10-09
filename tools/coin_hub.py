@@ -41,7 +41,7 @@ import tarfile
 import time
 from datetime import datetime, timezone
 
-REPO = os.environ.get('COIN_HUB_REPO', 'nguyenminh04/coin-data')   # features, claims, plans
+REPO = os.environ.get('COIN_HUB_REPO', 'nguyenminh04/coin-feats')   # features, claims, plans
 VREPO = os.environ.get('COIN_HUB_VREPO', 'nguyenminh04/coin-videos')   # video shards (separate repo for every dataset)
 PFX = 'coin'                                                        # shard file prefix: <PFX>_videos_NNNN.tar
 SHARD = 100
@@ -194,7 +194,14 @@ def plan_other(api, a):
         ok = lambda v: len(v['sentences']) == len(v['timestamps']) > 0 and all(0 <= t[0] < t[1] for t in v['timestamps'])
         rng = random.Random(2026)
         pick = lambda db, n, role: [(k[2:], role, db[k]) for k in rng.sample(sorted(k for k in db if ok(db[k])), n)]
-        sel = pick(tr, a.n, 'train') + pick(va, a.n_val, 'val')
+        if a.extend:   # keep the plan and annotations on the hub, add --n new train videos as chunks after the last one
+            from huggingface_hub import hf_hub_download
+            get = lambda f: json.load(open(hf_hub_download(REPO, f, repo_type='dataset', token=api.token)))
+            old, oldplan = get('anno/anet.json'), get('dl/plan.json')
+            rng = random.Random(len(old))
+            sel = pick({k: v for k, v in tr.items() if k[2:] not in old}, a.n, 'train')
+        else:
+            sel = pick(tr, a.n, 'train') + pick(va, a.n_val, 'val')
         anno = {i: dict(role=r, duration=v['duration'], segments=v['timestamps'], captions=v['sentences'])
                 for i, r, v in sel}
     else:
@@ -211,7 +218,12 @@ def plan_other(api, a):
                 anno[i] = dict(role=role, duration=v['duration'], activity=v['activity'],
                                segments=[x['segment'] for x in segs], captions=[head[x['id']] for x in segs])
     ids = list(anno)
-    chunks = {'%04d' % (a.first + i): ids[i * SHARD:(i + 1) * SHARD] for i in range(-(-len(ids) // SHARD))}
+    first = a.first
+    chunks = {}
+    if PFX == 'anet' and a.extend:
+        first, chunks, anno = int(max(oldplan)) + 1, dict(oldplan), dict(old, **anno)
+    chunks.update({'%04d' % (first + i): ids[i * SHARD:(i + 1) * SHARD] for i in range(-(-len(ids) // SHARD))})
+    ids = list(anno)
     for path, obj in (('dl/plan.json', chunks), ('anno/%s.json' % PFX, anno)):
         api.upload_file(path_or_fileobj=json.dumps(obj).encode(), path_in_repo=path, repo_id=REPO,
                         repo_type='dataset', commit_message='%s: %d videos' % (path, len(ids)))
@@ -413,6 +425,7 @@ if __name__ == '__main__':
     p.add_argument('--flush', action='store_true', help='upload: also the last partial shard, but no DONE')
     p.add_argument('--first', type=int, default=1000, help='plan: number of the first chunk')
     p.add_argument('--retry', action='store_true', help='plan: dl/plan_retry.json from the fetched chunks')
+    p.add_argument('--extend', action='store_true', help='plan (anet): add --n new train videos after the existing chunks')
     p.add_argument('--plan', default='dl/plan.json', help='fetch: the plan to work through')
     p.add_argument('--jobs', type=int, default=3, help='fetch: parallel yt-dlp processes')
     p.add_argument('--sleep', type=int, default=2, help='fetch: seconds yt-dlp waits before a download (x2 max)')

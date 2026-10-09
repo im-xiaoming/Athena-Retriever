@@ -27,7 +27,7 @@ import modal
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_DIR = '/root/athena'
 DATA_VOL, OUT_VOL = '/vol/data', '/vol/out'
-YC_REPO, COIN_REPO = 'nguyenminh04/uniav-youcook2-data', 'nguyenminh04/coin-data'
+YC_REPO, COIN_REPO = 'nguyenminh04/uniav-youcook2-data', 'nguyenminh04/coin-feats'
 
 app = modal.App('athena-train')
 data_vol = modal.Volume.from_name('uniav-data', create_if_missing=True)

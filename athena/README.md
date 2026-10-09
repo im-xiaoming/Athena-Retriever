@@ -137,7 +137,7 @@ the API writes exactly the training script's captions (6/6), CPU and fp16 checkp
 
 | Path | What | For |
 |---|---|---|
-| `ckpt/api/athena.pth` | event model; HF dataset `nguyenminh04/uniav-youcook2-data`, file `api/athena.pth` | everything |
+| `ckpt/api/athena.pth` | event model; HF model `nguyenminh04/athena`, file `athena.pth` | everything |
 | `athena/assets/caption_pool.npz` | train captions + InternVideo2 text vectors + centring mean (in git) | everything |
 | `data/youcookii/annotations/youcookii_annotations_trainval.json` | GT steps (in git) | show / plot |
 | `InternVideo/` | `git clone --depth 1 https://github.com/OpenGVLab/InternVideo` (unmodified) | describe_video |
