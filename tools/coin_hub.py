@@ -50,15 +50,20 @@ FORMAT = 'bv*[height<=480][ext=mp4]+ba[ext=m4a]/b[height<=480]/bv*+ba/b'   # as 
 DATASETS = {
     'anet': dict(feats='nguyenminh04/anet-feats', videos='nguyenminh04/anet-videos', pfx='anet'),
     'htstep': dict(feats='nguyenminh04/htstep-feats', videos='nguyenminh04/htstep-videos', pfx='htstep'),
+    # benchmarks: tools/bench_fetch.py already put the videos at the repo root as <pfx>_NNN.tar; work only (no plan / fetch)
+    'unav100': dict(feats='nguyenminh04/unav100-feats', videos='nguyenminh04/unav100-videos', pfx='unav100', vfmt='%s_%03d.tar'),
+    'dcase': dict(feats='nguyenminh04/dcase-feats', videos='nguyenminh04/dcase-videos', pfx='dcase', vfmt='%s_%03d.tar'),
 }
+VFMT = 'videos/%s_videos_%04d.tar'                                  # path of video shard k in VREPO
 FORMAT360 = 'bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360]/bv*+ba/b'
 
 
 def configure(a):
-    global REPO, VREPO, PFX, FORMAT
+    global REPO, VREPO, PFX, FORMAT, VFMT
     if a.dataset != 'coin':
         d = DATASETS[a.dataset]
         REPO, VREPO, PFX, FORMAT = d['feats'], d['videos'], d['pfx'], FORMAT360
+        VFMT = d.get('vfmt', VFMT)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COIN = os.path.join(ROOT, 'datasets', 'annotations')
 
@@ -82,7 +87,8 @@ def state(api):
     """Shards uploaded, shards finished, claims {shard: [(worker, age_h), ...] oldest first}, DONE flag."""
     files = set(api.list_repo_files(REPO, repo_type='dataset'))
     vfiles = files if VREPO == REPO else set(api.list_repo_files(VREPO, repo_type='dataset'))
-    shards = sorted(int(m.group(1)) for f in vfiles for m in [re.match(r'videos/%s_videos_(\d+)\.tar$' % PFX, f)] if m)
+    vpat = re.escape(VFMT).replace(re.escape('%s'), PFX).replace(re.escape('%04d'), r'(\d+)').replace(re.escape('%03d'), r'(\d+)')
+    shards = sorted(int(m.group(1)) for f in vfiles for m in [re.match(vpat + '$', f)] if m)
     done = {int(m.group(1)) for f in files for m in [re.match(r'feats/%s_feats_(\d+)\.tar$' % PFX, f)] if m}
     claims = {}
     if any(f.startswith('claims/') for f in files):
@@ -370,7 +376,7 @@ def work(a):
         if k in done or owner(claims, k, a.stale) != a.name:
             log('shard %04d taken by %s, next' % (k, owner(claims, k, a.stale))); continue
         log('shard %04d: downloading' % k)
-        src = hf_hub_download(VREPO, 'videos/%s_videos_%04d.tar' % (PFX, k), repo_type='dataset', local_dir=tmp,
+        src = hf_hub_download(VREPO, VFMT % (PFX, k), repo_type='dataset', local_dir=tmp,
                               token=api.token)
         vids, out = os.path.join(tmp, 'v%04d' % k), os.path.join(tmp, 'f%04d' % k)
         with tarfile.open(src) as t:
@@ -413,7 +419,7 @@ def status(a):
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('cmd', choices=('upload', 'work', 'status', 'plan', 'fetch'))
-    p.add_argument('--dataset', default='coin', choices=('coin', 'anet', 'htstep'))
+    p.add_argument('--dataset', default='coin', choices=tuple(['coin'] + list(DATASETS)))
     p.add_argument('--n', type=int, default=3000, help='plan: train videos (anet 3000, htstep use 900)'); p.add_argument('--n-val', type=int, default=500)
     p.add_argument('--public', action='store_true', help='plan: create the repos public')
     p.add_argument('--name', default='worker'); p.add_argument('--tmp', default='')
