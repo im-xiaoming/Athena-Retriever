@@ -1,7 +1,6 @@
 import math
 import warnings
 
-import torch
 try:
     from torch.optim.lr_scheduler import LRScheduler as _LRScheduler
 except ImportError:  # torch < 2.0

@@ -8,31 +8,11 @@ checkpoint (caption_pool). An event vector is matched against them by cosine and
 picked by consensus (minimum Bayes risk over the top 20) in InternVideo2 text space, exactly as
 train.py scores it.
 """
-import json
-import os
 import re
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-
-def build_caption_pool(caption_emb, annotations, out):
-    """caption_emb_iv2.npz + annotations -> unique train captions with their InternVideo2 vectors."""
-    z = np.load(caption_emb, allow_pickle=True)
-    with open(annotations) as f:
-        subset = {v: x['subset'] for v, x in json.load(f)['database'].items()}
-    texts, embs, seen = [], [], set()
-    for key, text, emb in zip(z['keys'], z['sentences'], z['emb']):
-        text = str(text)
-        if subset[str(key).rsplit('#', 1)[0]] != 'training' or text in seen:
-            continue
-        seen.add(text); texts.append(text); embs.append(emb)
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    # plain unicode array, no pickle: readable by any numpy version (1.x and 2.x)
-    np.savez_compressed(out, texts=np.array(texts, dtype=str), emb=np.stack(embs).astype(np.float16),
-                        mean=np.asarray(z['mean'], np.float32))
-    return len(texts)
 
 
 class Captioner:

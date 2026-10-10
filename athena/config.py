@@ -2,7 +2,7 @@
 ATHENA_<FIELD> (upper case), e.g. ATHENA_DEVICE=cpu or ATHENA_CHECKPOINT=/path/best_cap.pth.tar.
 """
 import os
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 
 import torch
 

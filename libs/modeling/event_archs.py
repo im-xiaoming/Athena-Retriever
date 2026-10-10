@@ -51,6 +51,8 @@ Options (train_cfg), all off by default:
 # clip_dim=512
 
 
+from __future__ import annotations   # list[dict] hints on Python 3.8 (the training env)
+
 import numpy as np
 import torch
 from torch import nn
@@ -636,8 +638,7 @@ class EventCaptionTransformer(nn.Module):
                 s2, sc2, idx2 = batched_nms(segs, scores, idx, self.nms_cfg['iou'], 0.001,
                                             self.test_max_seg,
                                             use_soft_nms=self.nms_cfg['soft'],
-                                            multiclass=False, sigma=self.nms_cfg['sigma'],
-                                            voting_thresh=0.0)
+                                            sigma=self.nms_cfg['sigma'])
                 emb = emb[idx2.long()]
                 segs, scores = s2, sc2
             # segment vector = mean over the whole span, computed before converting to seconds

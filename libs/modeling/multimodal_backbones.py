@@ -155,7 +155,7 @@ class ConvTransformerBackbone(nn.Module):
     def forward(self, x_V, x_A, mask):
         # x_V/x_A: batch size, feature channel, sequence length,
         # mask: batch size, 1, sequence length (bool)
-        B, C_V, T = x_V.size()
+        B, _, T = x_V.size()
         mask_V = mask_A = mask
         # embedding network
         for idx in range(len(self.embd_V)):
@@ -199,12 +199,10 @@ class ConvTransformerBackbone(nn.Module):
         out_feats_V = tuple()
         out_feats_A = tuple()
         out_masks_V = tuple()
-        out_masks_A = tuple()
         # 1x resolution
         out_feats_V += (x_Va, )
         out_masks_V += (mask_V, )
         out_feats_A += (x_Av, )
-        out_masks_A += (mask_A, )
 
         # main branch with downsampling: level idx + 1 is built from level idx of both streams
         for idx in range(len(self.cross_att_Va)):
@@ -214,6 +212,5 @@ class ConvTransformerBackbone(nn.Module):
 
             x_A, mask_A = self.cross_att_Av[idx](out_feats_A[idx], out_feats_V[idx] if self.cross else out_feats_A[idx], mask_A)
             out_feats_A += (x_A, )
-            out_masks_A += (mask_A, )
 
         return out_feats_V, out_feats_A, out_masks_V
