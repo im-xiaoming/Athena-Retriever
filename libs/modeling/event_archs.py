@@ -44,6 +44,12 @@ Options (train_cfg), all off by default:
                           vector from the video stream alone and one from the audio stream alone
                           are each pulled toward the fused segment vector (stop-gradient) and
                           toward the right caption of the pool
+
+Text as the third modality (model.text_stream: true, needs the ground head): the sentence enters
+the backbone as a stream next to V and A (TextBridge at every pyramid level), instead of only the
+ground head. A video alone runs with a learned null text token (event, boundary and embedding
+heads); every ground query runs the pyramid again with its sentence, and the ground head reads
+those features. The stem is shared, the bridges start closed (zero gates).
 """
 
 # in_dim=1024
@@ -254,7 +260,8 @@ class EventCaptionTransformer(nn.Module):
                  input_dim_A, n_head, embd_kernel_size, embd_dim, embd_with_ln,
                  head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, train_cfg, test_cfg, max_seq_len,
-                 nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross'):
+                 nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross',
+                 text_stream=False):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
         assert len(self.fpn_strides) == len(regression_range)
@@ -291,6 +298,9 @@ class EventCaptionTransformer(nn.Module):
         self.w_other = train_cfg.get('loss_weight_other', 0.0)
         self.pool_raw = self.pool_src = self.other_raw = None
         self.omni_dim = omni_dim
+        # text as the third backbone stream: only the ground head feeds it sentences
+        self.text_stream = text_stream
+        assert not text_stream or self.w_ground > 0, 'text_stream needs loss_weight_ground > 0'
 
         assert backbone_type == 'convTransformer', backbone_type
         self.backbone = ConvTransformerBackbone(
@@ -298,7 +308,7 @@ class EventCaptionTransformer(nn.Module):
             n_embd_ks=embd_kernel_size, max_len=max_seq_len, arch=backbone_arch,
             scale_factor=scale_factor, with_ln=embd_with_ln, attn_pdrop=0.0,
             proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe,
-            pyramid_attn=pyramid_attn)
+            pyramid_attn=pyramid_attn, text_dim=clip_dim if text_stream else 0)
         D = embd_dim * 2 # 512 * 2
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
@@ -408,6 +418,7 @@ class EventCaptionTransformer(nn.Module):
         len0 = msk[0].squeeze(1).sum(-1)                                 # (B,)
         fpn_masks = torch.cat([m.squeeze(1) for m in msk], dim=1)        # (B, P)
         self._fpn = (feats, msk, em)                                     # for the ground head
+        self._inputs = (V, A, masks)                                     # text stream: the ground passes
         if self.training:
             return self.losses(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
         return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
@@ -574,7 +585,14 @@ class EventCaptionTransformer(nn.Module):
         query (Q, 512) InternVideo2 caption vectors."""
         feats, msk, em = self._fpn
         q = query.float()
-        return self.ground_head(feats, msk, vid, q, self.embed_head.embed_captions(q), em)
+        if not self.text_stream:
+            return self.ground_head(feats, msk, vid, q, self.embed_head.embed_captions(q), em)
+        # text stream: the pyramid again with each sentence as the third stream of its video, so the
+        # features already have one row per query
+        fV, fA, mq = self.backbone(*self._inputs, text=q, vid=vid)
+        fq = [torch.cat((v, a), dim=1) for v, a in zip(fV, fA)]
+        rows = torch.arange(len(vid), device=vid.device)
+        return self.ground_head(fq, mq, rows, q, self.embed_head.embed_captions(q), em[vid])
 
     def ground_loss(self, video_list, gt_cls, cap_pool, valid):
         """Focal loss of the ground head. Queries: every caption of a video, whose target is the

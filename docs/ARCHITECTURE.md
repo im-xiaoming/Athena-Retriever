@@ -58,6 +58,15 @@ Three ways to use it (`athena.query`):
 4. **Pyramid:** 5 more cross-attention blocks per stream, each downsampling by 2 -> 6 levels with 256, 128, 64, 32, 16, 8 steps.
 5. Output per level: V (512) and A (512), concatenated to **1024** channels for the heads.
 
+**Text as a third stream (`model.text_stream: true`, branch `text-modality`, training code only).** The sentence
+(512-d InternVideo2 vector -> Linear + LN -> one 512-d token T) joins V and A after the stem. A `TextBridge` follows
+level 0 and every pyramid level: T reads the level (`T = T + Attn(q = T, k = v = V and A steps)`, then an MLP), then V and
+A each read T (`X = X + tanh(g_X) * Attn(q = X, k = v = [sink, T])`; the learned sink lets a step ignore the sentence,
+`g_X` starts at 0 so the bridges start closed). A video alone runs with a learned null token (event, boundary and
+embed heads); every ground query reruns the pyramid with its sentence, sharing the stem, and the ground head reads
+those features. Cost: 102M parameters instead of 70.5M, ~7.4 GB peak in training at batch 4 instead of 2.5 GB, and a
+sentence-only search has to rerun the pyramid of every stored video. The athena API does not load these checkpoints.
+
 Regression ranges per level (in steps): [0,4], [4,8], [8,16], [16,32], [32,64], [64,inf). A point is positive for a
 ground-truth segment when its centre lies inside it and the segment length fits the level's range.
 

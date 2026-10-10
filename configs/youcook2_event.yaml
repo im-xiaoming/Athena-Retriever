@@ -97,6 +97,7 @@ model:
   clip_dim: 512        # set by train.py from the caption space
   text_proj: linear    # none: caption / query vectors stay frozen InternVideo2 text vectors (OV-AVEL)
   pyramid_attn: cross  # self: every backbone block attends within its own stream (OV-AVEL Table A9)
+  text_stream: false   # true: the ground query is a third backbone stream next to V and A (needs loss_weight_ground > 0)
   train_cfg:
     loss_weight_reg: 1.0
     loss_weight_emb: 0.2
