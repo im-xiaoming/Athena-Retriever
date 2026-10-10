@@ -41,6 +41,7 @@ from .model.event_model import EventCaptionModel
 
 
 def _load_ckpt(path):
+    """torch.load on any torch version (weights_only exists from 1.13, defaults to True from 2.6)."""
     try:
         return torch.load(path, map_location='cpu', weights_only=False)
     except TypeError:
@@ -67,6 +68,9 @@ def select_events(segs, scores, min_score, max_overlap, max_events):
 
 
 class AthenaPipeline:
+    """Loads the event model from Config.checkpoint (and, lazily, the encoders), keeps an index of
+    every processed video under Config.index_dir/<run> and answers the three kinds of query."""
+
     def __init__(self, cfg=None):
         self.cfg = cfg or Config.from_env()
         self.device, self.dtype = pick_device(self.cfg.device)
@@ -106,7 +110,10 @@ class AthenaPipeline:
                                            strict=True)
             self.seg_model = self.seg_model.to(self.device).eval()
         self.captioner = Captioner(self.cfg.caption_pool, self.model, self.device, self.pool_train)
-        self._encoder = self._text = self._pool_query = self._generator = None
+        self._encoder = self._text = self._pool_query = self._generator = None   # loaded on first use
+        # features of the last video processed, (video_id, visual, audio, duration), and the file they
+        # came from (path, size, mtime) or None, so ground() right after process() does not re-encode
+        self._feats = self._feats_src = None
         # one index per model: event vectors of different checkpoints are not comparable
         self.index_dir = os.path.join(self.cfg.index_dir, self.run)
         self.index = {}
@@ -120,6 +127,7 @@ class AthenaPipeline:
     # ------------------------------------------------------------------ encoders (lazy)
     @property
     def encoder(self):
+        """InternVideo2 video + audio encoder for describe_video (needs the encoder checkpoints)."""
         if self._encoder is None:
             keep = keep_encoders(self.cfg, self.device)
             from .encoders.internvideo2 import InternVideo2AVEncoder
@@ -134,6 +142,7 @@ class AthenaPipeline:
 
     @property
     def generator(self):
+        """GPT-2 caption generator for caption_mode='generate'."""
         if self._generator is None:
             from .generator import CaptionGenerator
             if not os.path.exists(self.cfg.generator):
@@ -215,6 +224,7 @@ class AthenaPipeline:
                  audio=np.asarray(audio, np.float16), duration=float(result['duration']))
 
     def process(self, path, video_id=None, store=True):
+        """A video file -> its events with captions (runs the encoders, or reuses feature_cache)."""
         t0 = time.time()
         video_id = video_id or os.path.splitext(os.path.basename(path))[0]
         feats = self._cached_features(path, video_id)
@@ -268,6 +278,7 @@ class AthenaPipeline:
 
     @property
     def can_ground(self):
+        """True if the checkpoint has a ground head (trained with loss_weight_ground > 0)."""
         return self.seg_model.ground_head is not None
 
     def _video_features(self, video):
@@ -278,10 +289,10 @@ class AthenaPipeline:
             # names it by its basename, which another file may share, so the index is not trusted here)
             st = os.stat(video)
             src = (os.path.abspath(video), st.st_size, st.st_mtime)
-            if getattr(self, '_feats_src', None) != src:
+            if self._feats_src != src:
                 self.process(video)
             return self._feats
-        if getattr(self, '_feats', None) is not None and self._feats[0] == video:
+        if self._feats is not None and self._feats[0] == video:
             return self._feats
         f = os.path.join(self.index_dir, '%s.npz' % video)
         if os.path.exists(f):

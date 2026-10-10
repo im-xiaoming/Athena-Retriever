@@ -112,6 +112,11 @@ def batched_nms(
     sigma=0.5,
     voting_thresh=0.75,
 ):
+    """1-D NMS over segs (N, 2) with scores (N,) -> (segs, scores, cls_idxs) of the kept segments, best
+    first, at most max_seg_num. use_soft_nms: Gaussian soft-NMS (scores decay with overlap, sigma)
+    instead of dropping overlaps above iou_threshold. multiclass=False treats every segment as one
+    class (the event model passes the segment indices as cls_idxs to know which ones were kept).
+    voting_thresh > 0 refines each kept segment by averaging its neighbours (seg_voting)."""
     # Based on Detectron2 implementation,
     num_segs = segs.shape[0]
     # corner case, no prediction outputs

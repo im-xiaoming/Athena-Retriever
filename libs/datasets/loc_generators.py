@@ -24,9 +24,13 @@ class BufferList(nn.Module):
 
 class PointGenerator(nn.Module):
     """
-        A generator for temporal "points"
+        A generator for temporal "points": the positions on every pyramid level where the heads predict.
 
-        max_seq_len can be much larger than the actual seq length
+        Each point is a row (t, regression range lo, regression range hi, stride): t is its position on
+        the level-0 grid (multiples of the level's stride); the range bounds the larger of the point's
+        two distances (in grid steps) to the boundaries of a segment this level is responsible for, so
+        short segments go to fine levels and long ones to coarse levels. Points are built once for
+        max_seq_len * max_buffer_len_factor steps; forward() returns the first ones for the actual length.
     """
     def __init__(
         self,
@@ -77,7 +81,9 @@ class PointGenerator(nn.Module):
         return BufferList(points_list)
 
     def forward(self, fpn_strides, feats, is_training):
-        # feats will be a list of torch tensors
+        """Points of every level for feats (C, T): a list of (T / stride, 4) tensors. Training and
+        short videos always use max_seq_len; a longer input at inference is padded to a multiple of
+        the largest stride, as the model pads it."""
         pts_list = []
         max_len = feats.shape[1]
         if is_training:

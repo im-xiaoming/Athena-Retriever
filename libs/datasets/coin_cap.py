@@ -19,6 +19,9 @@ from .youcook2_cap import NMAX, YouCook2CaptionDataset
 
 
 class CoinCaptionDataset(YouCook2CaptionDataset):
+    """roles: which videos ('train', 'test_seen', 'test_unseen'); common: the YouCook2 dataset options
+    (grid, features), minus the YouCook2 file paths, which are replaced by the COIN ones."""
+
     def __init__(self, is_training, roles, anno_file, label_emb_file, iv2_folder, pad_omni=False, **common):
         common = {k: v for k, v in common.items()
                   if k not in ('json_file', 'caption_emb_file', 'iv2_folder', 'omni_emb_file')}
@@ -38,6 +41,8 @@ class CoinCaptionDataset(YouCook2CaptionDataset):
         self.cap_emb, self.cap_text = {}, {}
 
     def _load_json_db(self, anno_file):
+        """Videos of the wanted roles with features; also fills the per-video caption keys
+        "<video>#<i>" with the vector and text of each step's label."""
         with open(anno_file) as f:
             videos = json.load(f)['videos']
         out = []

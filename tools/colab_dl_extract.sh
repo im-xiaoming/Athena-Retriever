@@ -1,5 +1,5 @@
 #!/bin/bash
-# Colab side: download htstep videos (fetch) and extract features (work) at the same time.
+# Colab side: extract features for the benchmark video shards (claims keep it from colliding with the PC).
 # Expects /content/hf_token and /content/coin_hub.py (uploaded by colab_dl_launch.sh).
 cd /content
 export HF_TOKEN=$(cat /content/hf_token)
@@ -15,8 +15,7 @@ for repo, f in (('OpenGVLab/InternVideo2-Stage2_1B-224p-f4', 'InternVideo2-stage
     print(hf_hub_download(repo, f, local_dir='/content/iv2_ckpt', token=os.environ['HF_TOKEN']), flush=True)
 PY
 mkdir -p tools && cp /content/coin_hub.py /content/extract_internvideo2.py tools/
-nohup python -u tools/coin_hub.py fetch --dataset htstep --name colab --tmp /content/fetch --reverse --jobs 3 > /content/fetch.log 2>&1 &
-for ds in anet htstep; do
+for ds in dcase unav100 anet htstep; do
   python -u tools/coin_hub.py work --dataset $ds --name colab-t4 --tmp /content/work_$ds \
     --repo /content/InternVideo --video-ckpt /content/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \
     --audio-ckpt /content/iv2_ckpt/audio_6b.pth --workers 2 >> /content/work.log 2>&1

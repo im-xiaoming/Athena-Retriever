@@ -22,6 +22,7 @@ from ..postprocess import soft_nms
 
 
 def _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln):
+    """n_layers - 1 masked Conv1D layers with their LayerNorms: the shared body of every head."""
     head, norm = nn.ModuleList(), nn.ModuleList()
     for i in range(n_layers - 1):
         head.append(MaskedConv1D(in_dim if i == 0 else feat_dim, feat_dim, ks,
@@ -31,6 +32,8 @@ def _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln):
 
 
 class EventHead(nn.Module):
+    """One logit per time step: is there an event here (class agnostic)."""
+
     def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True):
         super().__init__()
         self.act = nn.ReLU()
@@ -49,6 +52,8 @@ class EventHead(nn.Module):
 
 
 class EmbedHead(nn.Module):
+    """One normalised vector per time step in the event space, and clip_proj for caption vectors."""
+
     def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536, text_proj='linear'):
         super().__init__()
         self.act = nn.ReLU()
@@ -100,6 +105,8 @@ class SegmentContext(nn.Module):
 
 
 class BoundaryHead(nn.Module):
+    """Per time step: distances to the event's start and end (in strides) and an IoU-quality logit."""
+
     def __init__(self, in_dim, feat_dim, fpn_levels, n_layers=3, ks=3, with_ln=True):
         super().__init__()
         self.act = nn.ReLU()
@@ -186,6 +193,7 @@ class EventCaptionModel(nn.Module):
             self.omni_proj = nn.Sequential(nn.Linear(head_dim, head_dim * 2), nn.GELU(),
                                            nn.Linear(head_dim * 2, omni_dim))
             self.omni_logit_scale = nn.Parameter(torch.ones([]))
+        # points for inputs up to 4 x max_seq_len steps (longer inputs are padded, not resampled)
         self.points = PointGenerator(max_seq_len, 4, len(self.fpn_strides), scale_factor,
                                      regression_range, self.max_div_factor)
 
@@ -194,24 +202,29 @@ class EventCaptionModel(nn.Module):
         """visual, audio: (C, T) on the model's device. Returns segments (grid units), scores, vectors."""
         dev = visual.device
         T = visual.shape[-1]
+        # a batch of one video, padded like the training code (preprocessing in event_archs.py)
         max_len = self.max_seq_len if T <= self.max_seq_len else \
             (T + self.max_div_factor - 1) // self.max_div_factor * self.max_div_factor
-        V = visual.new_zeros(1, visual.shape[0], max_len); V[0, :, :T] = visual
-        A = audio.new_zeros(1, audio.shape[0], max_len); A[0, :, :T] = audio
+        V = visual.new_zeros(1, visual.shape[0], max_len)
+        V[0, :, :T] = visual
+        A = audio.new_zeros(1, audio.shape[0], max_len)
+        A[0, :, :T] = audio
         mask = (torch.arange(max_len, device=dev)[None] < T).unsqueeze(1)
         fV, fA, msk = self.backbone(V, A, mask)
         feats = [torch.cat((v, a), 1) for v, a in zip(fV, fA)]
-        ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)[0]
+        # head outputs of every pyramid level, concatenated: P points in total
+        ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)[0]   # (P,) event logits
         bd, qu = self.bound_head(feats, msk)
-        bd = torch.cat(bd, dim=1)[0]
-        qu = torch.cat(qu, dim=1).squeeze(-1)[0]
+        bd = torch.cat(bd, dim=1)[0]                                        # (P, 2) boundary offsets
+        qu = torch.cat(qu, dim=1).squeeze(-1)[0]                            # (P,) IoU-quality logits
         em, raw0 = self.embed_head(feats, msk)
-        em = torch.cat(em, dim=1)[0]
-        valid = torch.cat([m.squeeze(1) for m in msk], dim=1)[0]
-        len0 = int(msk[0].squeeze(1).sum())
+        em = torch.cat(em, dim=1)[0]                                        # (P, D) step vectors
+        valid = torch.cat([m.squeeze(1) for m in msk], dim=1)[0]            # (P,) inside the video
+        len0 = int(msk[0].squeeze(1).sum())                                 # valid steps on level 0
 
-        pts = torch.cat(self.points(self.fpn_strides, T), dim=0).to(dev)
-        self.last_level0 = (raw0[0], len0)   # for span_tokens (caption generator) and ground()
+        pts = torch.cat(self.points(self.fpn_strides, T), dim=0).to(dev)    # (P, 4)
+        # kept for the calls that follow on the same video: span_vectors, span_tokens, ground
+        self.last_level0 = (raw0[0], len0)
         self._last = dict(feats=feats, msk=msk, em=em, bd=bd, qu=qu, valid=valid, pts=pts)
         segs_np, sc_np = self._decode(ev)
         segs = torch.from_numpy(segs_np).to(dev)
@@ -233,6 +246,7 @@ class EventCaptionModel(nn.Module):
         sc, order = prob[keep].topk(min(max_seg * 5, keep.numel()))
         keep = keep[order]
         p, o = pts[keep], bd[keep]
+        # segment of a point: from t - (start offset) * stride to t + (end offset) * stride
         segs = torch.stack((p[:, 0] - o[:, 0] * p[:, 3], p[:, 0] + o[:, 1] * p[:, 3]), -1)
         ok = (segs[:, 1] - segs[:, 0]) > self.duration_thresh
         if ok.any():   # never drop every candidate: the best one stays even if very short
@@ -276,7 +290,10 @@ class EventCaptionModel(nn.Module):
         raw0, L = self.last_level0
         segs = torch.as_tensor(segs, dtype=torch.float32, device=raw0.device).reshape(-1, 2)
         t = torch.linspace(0, 1, k, device=raw0.device)
-        pos = (segs[:, :1] + t[None] * (segs[:, 1:] - segs[:, :1])).clamp(0, L - 1)
-        lo = pos.floor().long(); hi = (lo + 1).clamp(max=L - 1); w = (pos - lo.float())[..., None]
-        r0 = raw0.t()
+        pos = (segs[:, :1] + t[None] * (segs[:, 1:] - segs[:, :1])).clamp(0, L - 1)   # (N, k) grid positions
+        # linear interpolation between the two level-0 steps around each position
+        lo = pos.floor().long()
+        hi = (lo + 1).clamp(max=L - 1)
+        w = (pos - lo.float())[..., None]
+        r0 = raw0.t()                                                                  # (T, D)
         return r0[lo] * (1 - w) + r0[hi] * w

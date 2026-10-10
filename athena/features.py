@@ -13,10 +13,14 @@ import torch.nn.functional as F
 
 
 def _l2(x):
+    """L2-normalise every row of x (T, C)."""
     return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-6)
 
 
 class FeatureSpec:
+    """The input format a checkpoint was trained with, read from its dataset config: which video
+    keys, row rate, normalisation and grid length."""
+
     def __init__(self, dataset_cfg):
         d = dataset_cfg
         self.source = d.get('feat_source')
@@ -41,6 +45,7 @@ class FeatureSpec:
         return self.from_npz(np.load(os.path.join(folder, video_id + '.npz')))
 
     def stored_ids(self, folder):
+        """Ids of the videos with a <id>.npz in folder."""
         return sorted(f[:-4] for f in os.listdir(folder) if f.endswith('.npz'))
 
     # ------------------------------------------------------------------ model input and time grid
@@ -67,10 +72,13 @@ class FeatureSpec:
         return out
 
     def to_seconds(self, segs, n, duration):
-        """Segments in grid units (of max_seq_len steps) -> seconds, as the dataset defines the grid."""
-        step = float((n - 1) * self.stride + self.window) / self.max_seq_len
+        """Segments in grid units (of max_seq_len steps) -> seconds, as the dataset defines the grid
+        (libs/datasets/youcook2_cap.py, __getitem__): n rows resampled to max_seq_len steps of `step`
+        frames each, step i centred on frame (i + 0.5) * step."""
+        step = float((n - 1) * self.stride + self.window) / self.max_seq_len   # frames per grid step
         return np.clip((segs * step + 0.5 * step) / self.fps, 0.0, float(duration))
 
     @property
     def dims(self):
+        """(visual, audio) channel counts of the model input."""
         return sum(512 if k == 'v512' else 768 for k in self.video_keys), 768

@@ -18,16 +18,18 @@ def soft_nms(segs, scores, sigma=0.5, min_score=0.001, max_num=100):
     areas = (x2 - x1 + np.float32(1e-6)).astype(np.float32)
     inds = np.arange(n, dtype=np.int64)
     dets = np.empty((n, 3), np.float32)
-    nsegs = n
+    nsegs = n   # entries [0, nsegs) are alive; [0, i) are already picked, in order
     for i in range(n):
         if i >= nsegs:
             break
+        # pick the best remaining segment and swap it into position i
         max_pos = i + int(np.argmax(sc[i:nsegs])) if nsegs > i else i
         # the C++ loop keeps the first maximum: argmax does too
         ix1, ix2, iscore, iarea, iind = x1[max_pos], x2[max_pos], sc[max_pos], areas[max_pos], inds[max_pos]
         dets[i] = (ix1, ix2, iscore)
         x1[max_pos], x2[max_pos], sc[max_pos], areas[max_pos], inds[max_pos] = x1[i], x2[i], sc[i], areas[i], inds[i]
         x1[i], x2[i], sc[i], areas[i], inds[i] = ix1, ix2, iscore, iarea, iind
+        # decay the score of every remaining segment by its overlap with the pick
         pos = i + 1
         while pos < nsegs:
             inter = max(np.float32(0.0), min(ix2, x2[pos]) - max(ix1, x1[pos]))

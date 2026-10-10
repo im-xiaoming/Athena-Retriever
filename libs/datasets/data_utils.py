@@ -33,16 +33,19 @@ def truncate_feats(
 
 ):
     """
-    Truncate feats and time stamps in a dict item
+    Training augmentation: crop a random window of the features and cut the GT segments to it.
+
+    With crop_ratio the window is crop_ratio[0]..crop_ratio[1] of the video (here 90-100%). A segment is
+    kept when at least trunc_thresh of it lies inside the window; up to max_num_trials windows are
+    tried until one keeps at least one segment.
 
     data_dict = {'video_id'        : str
-                 'feats'           : Tensor C x T
+                 'feats'           : {'visual': Tensor C x T, 'audio': Tensor C x T}
                  'segments'        : Tensor N x 2 (in feature grid)
                  'labels'          : Tensor N
                  'fps'             : float
-                 'feat_stride'     : int
-                 'feat_num_frames' : in
-
+                 'feat_stride'     : float
+                 'feat_num_frames' : float}
     """
     # get the meta info; feats = {'visual': C x T, 'audio': C x T}
     feat_len = data_dict['feats']['visual'].shape[1]
@@ -114,13 +117,23 @@ def truncate_feats(
     return data_dict
 
 
-def label_points(points, 
-                 gt_segments, 
-                 gt_labels, 
-                 num_classes, 
+def label_points(points,
+                 gt_segments,
+                 gt_labels,
+                 num_classes,
                  class_aware,
                  center_radius=0.0
                  ):
+        """Training targets of every pyramid point (from ActionFormer).
+
+        points: list over pyramid levels of (T_l, 4) tensors (t, regression range lo, hi, stride),
+        from PointGenerator; gt_segments (N, 2) in grid units; gt_labels (N,).
+        A point is positive for a GT segment when it lies inside it and the larger of its two
+        distances to the boundaries is within the level's regression range; if several segments
+        qualify, the shortest wins. Returns, with P the number of points over all levels:
+          cls_targets (P, num_classes)  one-hot label of the point's segment, all zeros for background
+          reg_targets (P, 2)            distances to that segment's start and end, in units of the stride
+        """
         # concat points on all pyramid levels List[T x 4] -> F T x 4
         # This is shared for all samples in the mini-batch
         concat_points = torch.cat(points, dim=0)
@@ -138,7 +151,7 @@ def label_points_single_video(concat_points,
         # center_radius > 0: ActionFormer's center sampling. Only points within center_radius strides
         # of a segment's centre (and inside it) are positive, so points next to a boundary, whose
         # offsets are the hardest to regress, are left out. 0 = every point inside the segment
-        # concat_points : F T x 4 (t, regressoin range, stride)
+        # concat_points : F T x 4 (t, regression range lo, hi, stride)
         # gt_segment : N (#Events) x 2
         # gt_label : N (#Events) x 1
         num_pts = concat_points.shape[0]

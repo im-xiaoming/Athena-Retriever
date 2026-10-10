@@ -37,6 +37,7 @@ def _iou(a, b):
 
 
 def _t(sec):
+    """Seconds -> 'm:ss'."""
     sec = int(round(sec))
     return '%d:%02d' % (sec // 60, sec % 60)
 
@@ -60,6 +61,7 @@ def pair_events(result, gt='auto'):
 
 
 def _bar(segs, duration, width):
+    """Text timeline of `width` characters: '#' where a segment (start, end, caption) is."""
     line = [' '] * width
     for s, e, _ in segs:
         a = int(s / max(duration, 1e-6) * width)
@@ -70,17 +72,19 @@ def _bar(segs, duration, width):
 
 
 def format_events(result, gt='auto', width=96):
+    """The text show() prints: a summary line, two timeline bars (real / model) and the pair table."""
     rows, gt, preds = pair_events(result, gt)
     dur = float(result.get('duration') or max([s[1] for s in gt + preds] or [1]))
     n_good = sum(r['verdict'] == 'good' for r in rows)
     out = ['Video %s, %s long: the model found %d events, the real recipe has %d steps.'
            % (result.get('video_id', '?'), _t(dur), len(preds), len(gt)),
            'Matched well (IoU >= 0.5): %d of %d real steps.' % (n_good, len(gt)) if gt else '', '']
-    bw = width - 8
+    bw = width - 8                                   # bar width inside 'real   |...|'
     ticks = ''.join((_t(dur * k / 4)).ljust(bw // 4) for k in range(4)) + _t(dur)
     out += ['timeline  ' + ticks, 'real   |' + _bar(gt, dur, bw) + '|', 'model  |' + _bar(preds, dur, bw) + '|', '']
 
-    cw = (width - 34) // 2
+    cw = (width - 34) // 2                           # width of each caption column
+    # one table row per pair; long captions wrap onto extra lines
     head = '%-13s %-*s   %-13s %-*s  %s' % ('real time', cw, 'real step (ground truth)', 'model time', cw, 'model caption', 'verdict')
     out += [head, '-' * len(head)]
     for r in rows:
@@ -98,6 +102,7 @@ def format_events(result, gt='auto', width=96):
 
 
 def show(result, gt='auto', width=110):
+    """Print the events of a result next to the real steps (gt='auto': the YouCook2 annotations)."""
     print(format_events(result, gt=gt, width=width))
 
 

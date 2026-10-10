@@ -27,6 +27,8 @@ class Prefix(nn.Module):
 
 
 class CaptionGenerator:
+    """GPT-2 + Prefix from an exported checkpoint; called with event vectors, returns captions."""
+
     def __init__(self, checkpoint, device):
         from transformers import GPT2Config, GPT2LMHeadModel, GPT2TokenizerFast
         ck = torch.load(checkpoint, map_location='cpu', weights_only=False)
@@ -38,10 +40,13 @@ class CaptionGenerator:
         pre = {k: v.float() for k, v in ck['prefix'].items()}
         self.prefix = Prefix(pre['norm.weight'].shape[0], self.gpt.config.n_embd, pre['pos'].shape[0])
         self.prefix.load_state_dict(pre)
-        self.gpt.to(device).eval(); self.prefix.to(device).eval()
-        self.k = pre['pos'].shape[0] - 1
+        self.gpt.to(device).eval()
+        self.prefix.to(device).eval()
+        self.k = pre['pos'].shape[0] - 1   # feature tokens per event (the prefix also holds q)
 
     def _text(self, cands):
+        """The text after the prefix, as in training (train_capgen.build_text): the retrieved captions
+        for a RAG checkpoint, then " caption:"."""
         return (' candidates: ' + ' ; '.join(cands[:self.rag]) + ' .' if self.rag else '') + ' caption:'
 
     @torch.no_grad()
@@ -52,7 +57,8 @@ class CaptionGenerator:
             qs, ts = q[s:s + batch].float().to(self.device), tok[s:s + batch].float().to(self.device)
             pre = self.prefix(qs, ts)                                                   # (B, P, D)
             texts = [self.tokenizer.encode(self._text(candidates[s + i] if candidates else [])) for i in range(len(qs))]
-            L = max(len(t) for t in texts); P = pre.shape[1]
+            L = max(len(t) for t in texts)   # longest text in the batch
+            P = pre.shape[1]                 # prefix length
             ids = torch.full((len(qs), L), pad, dtype=torch.long)
             for i, t in enumerate(texts):
                 ids[i, L - len(t):] = torch.tensor(t)

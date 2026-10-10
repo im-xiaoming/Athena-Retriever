@@ -31,19 +31,24 @@ RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'experiments
 
 
 def build_optimizer(model, opt):
+    """AdamW with three parameter groups (as ActionFormer, plus one for the caption projection):
+      decay    : weights of Linear / Conv layers, with weight_decay
+      no_decay : biases, LayerNorm, learnable scales and other parameters, no weight decay
+      clip     : clip_proj (caption vectors -> event space), its own learning rate clip_proj_lr
+    """
     decay, no_decay, clip = set(), set(), set()
-    white = (torch.nn.Linear, torch.nn.Conv1d, MaskedConv1D)
-    for mn, m in model.named_modules():
-        for pn, p in m.named_parameters(recurse=False):
-            fpn = '%s.%s' % (mn, pn) if mn else pn
-            if 'clip_proj' in fpn:
-                clip.add(fpn)
-            elif pn.endswith('weight') and isinstance(m, white):
-                decay.add(fpn)
+    decay_types = (torch.nn.Linear, torch.nn.Conv1d, MaskedConv1D)
+    for mod_name, mod in model.named_modules():
+        for par_name, _ in mod.named_parameters(recurse=False):
+            full_name = '%s.%s' % (mod_name, par_name) if mod_name else par_name
+            if 'clip_proj' in full_name:
+                clip.add(full_name)
+            elif par_name.endswith('weight') and isinstance(mod, decay_types):
+                decay.add(full_name)
             else:
-                no_decay.add(fpn)
+                no_decay.add(full_name)
     pd = dict(model.named_parameters())
-    assert not (pd.keys() - (decay | no_decay | clip))
+    assert not (pd.keys() - (decay | no_decay | clip))   # every parameter is in exactly one group
     groups = [
         {'params': [pd[n] for n in sorted(decay)], 'weight_decay': opt['weight_decay']},
         {'params': [pd[n] for n in sorted(no_decay)], 'weight_decay': 0.0},
@@ -100,6 +105,7 @@ def load_weights(model, path):
 
 
 def iou(a, b):
+    """IoU of two segments (start, end)."""
     i = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
     u = (a[1] - a[0]) + (b[1] - b[0]) - i
     return i / u if u > 0 else 0.0
@@ -172,14 +178,16 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
     if omni:
         n = len(pool_raw)   # the teacher pool may be padded for COIN labels after the YouCook2 captions
         o_txt = model.omni_text[:n].masked_fill(~model.omni_text_ok[:n, None], 0)
-    cov = {t: 0 for t in ths}
+    cov = {t: 0 for t in ths}              # GT steps covered by a prediction with IoU >= t
     n_gt = n_pred = 0
     best_ious, cos_gt, cos_rand = [], [], []
+    # caption picks, one list per way of picking: txt_sim of every captioned GT step (ret) and the
+    # chosen caption texts for CIDEr (hyp), both keyed like gts_txt
     ret = {v: [] for v in ('top1', 'mbr', 'pt_top1', 'mbr_student', 'mbr_omni', 'oracle')}
     gts_txt, hyp = {}, {v: {} for v in ret}
-    gts_or, hyp_or = {}, {}
-    g_ious = []
-    g = torch.Generator().manual_seed(0)
+    gts_or, hyp_or = {}, {}                # oracle: captions picked for the GT spans themselves
+    g_ious = []                            # grounding: IoU of every GT caption's predicted span
+    g = torch.Generator().manual_seed(0)   # the same random captions for cos_rand in every evaluation
     for batch in loader:
         for x in batch:
             x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
@@ -188,6 +196,7 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
             gts, texts = r['gt_segments'], r['gt_text']
             if r.get('ground_segments') is not None:
                 g_ious += [iou(p, gt) for p, gt in zip(r['ground_segments'].tolist(), gts)]
+            # keep as many predictions (best score first) as the video has GT steps
             k = min(len(gts), r['segments'].shape[0])
             preds = r['segments'][:k].tolist()
             emb = r['embeds'][:k].to(device).float()
@@ -204,27 +213,32 @@ def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), fu
                         s = s + o_txt @ r['embeds_gt_omni'][gi].to(device).float()
                     i = mbr_pick(s, pool_n, scale)[1]
                     ret['oracle'].append(float(pool_n[i] @ cap_n[gi]))
-                    okey = len(gts_or); gts_or[okey] = [texts[gi]]; hyp_or[okey] = [pool_text[i]]
+                    okey = len(gts_or)
+                    gts_or[okey] = [texts[gi]]
+                    hyp_or[okey] = [pool_text[i]]
             for gi, gt in enumerate(gts):
                 n_gt += 1
                 if not preds:
-                    best_ious.append(0.0); continue
+                    best_ious.append(0.0)
+                    continue
                 vals = [iou(p, gt) for p in preds]
-                j = int(np.argmax(vals)); best = vals[j]
+                j = int(np.argmax(vals))   # the prediction that matches this GT step best
+                best = vals[j]
                 best_ious.append(best)
                 for t in ths:
                     cov[t] += (best >= t)
-                if best < 0.3:
+                if best < 0.3:             # captioning is scored on matched steps only
                     continue
                 q = F.normalize(emb[j], dim=-1)
                 if cap_proj is not None:   # only when the model is trained in the metric space
                     cos_gt.append(float(q @ cap_proj[gi]))
                 ridx = int(torch.randint(len(pool_f), (1,), generator=g))
                 cos_rand.append(float(q @ pool_f[ridx]))
-                key = len(gts_txt); gts_txt[key] = [texts[gi]]
-                s_st = pool_f @ q
+                key = len(gts_txt)
+                gts_txt[key] = [texts[gi]]
+                s_st = pool_f @ q          # pool scores of the student (the event model itself)
                 s = s_st
-                if omni:
+                if omni:                   # plus the scores in the teacher's space
                     s_om = o_txt @ r['embeds_omni'][j].to(device).float()
                     s = s_st + s_om
                 t1, mb = mbr_pick(s, pool_n, scale)
@@ -319,7 +333,8 @@ def ov_scores(model, ov, dev):
     return out
 
 
-# One log row per epoch. Each column: (header, metric key, width, format)
+# One log row per epoch, columns in groups. Each group: (title, columns); each column:
+# (header, metric key, width, format). The use_*_columns functions below add optional columns.
 GROUPS = [
     ('train loss', [('event', 'ev_loss', 6, '.3f'), ('reg', 'reg_loss', 6, '.3f'), ('iou', 'iou_loss', 6, '.3f'),
                     ('embed', 'emb_loss', 6, '.3f'), ('span', 'span_loss', 6, '.3f'),
@@ -330,50 +345,54 @@ GROUPS = [
     ('captioning (val)', [('cos_gt', 'cos_gt', 6, '.3f'), ('cos_rand', 'cos_rand', 8, '.3f'),
                           ('txt_sim', 'txt_sim', 7, '.3f'), ('CIDEr', 'CIDEr', 6, '.2f')]),
 ]
-LEAD = '{:>6} {:>5} {:>8}'
+LEAD = '{:>6} {:>5} {:>8}'   # epoch, seconds, learning rate
+HEAD = RULE = ''             # header line and separator, rebuilt whenever GROUPS changes
 
 
 def _cells(fn):
+    """fn(column) for every column, columns joined by spaces and groups by ' | '."""
     return ' | '.join(' '.join(fn(c) for c in cols) for _, cols in GROUPS)
 
 
-HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-RULE = '-' * (len(HEAD) + 4)
+def _refresh_header():
+    global HEAD, RULE
+    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
+    RULE = '-' * (len(HEAD) + 4)
+
+
+_refresh_header()
+
+
+def _add_loss_columns(*cols):
+    """Insert train-loss columns just before the 'total' column."""
+    GROUPS[0][1][-1:-1] = list(cols)
+    _refresh_header()
 
 
 def use_omni_columns():
     """Add the two OmniRetriever teacher losses to the table."""
-    global HEAD, RULE
-    GROUPS[0][1][5:5] = [('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f')]
-    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-    RULE = '-' * (len(HEAD) + 4)
+    _add_loss_columns(('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f'))
 
 
 def use_ground_columns():
     """Add the grounding loss and the grounding scores to the table."""
-    global HEAD, RULE
-    GROUPS[0][1][-1:-1] = [('ground', 'ground_loss', 6, '.3f')]
+    _add_loss_columns(('ground', 'ground_loss', 6, '.3f'))
     GROUPS.append(('grounding (val)', [('R1@.5', 'G R1@0.5', 6, '.2f'), ('R1@.7', 'G R1@0.7', 6, '.2f'),
                                        ('mIoU', 'G mIoU', 6, '.2f')]))
-    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-    RULE = '-' * (len(HEAD) + 4)
+    _refresh_header()
 
 
 def use_ov_columns():
     """Add the open-vocabulary COIN scores (unseen tasks first) to the table."""
-    global HEAD, RULE
     GROUPS.append(('COIN unseen | seen', [('Acc', 'unseen/Acc', 5, '.1f'), ('F1', 'unseen/F1', 5, '.1f'),
                                           ('GR1.5', 'unseen/G R1@0.5', 5, '.1f'), ('Acc', 'seen/Acc', 5, '.1f'),
                                           ('F1', 'seen/F1', 5, '.1f'), ('GR1.5', 'seen/G R1@0.5', 5, '.1f')]))
-    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-    RULE = '-' * (len(HEAD) + 4)
+    _refresh_header()
 
 
 def use_other_column():
-    global HEAD, RULE
-    GROUPS[0][1][-1:-1] = [('other', 'other_loss', 6, '.3f')]
-    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-    RULE = '-' * (len(HEAD) + 4)
+    """Add the "other" (background text) loss to the table."""
+    _add_loss_columns(('other', 'other_loss', 6, '.3f'))
 
 
 def print_header():
@@ -507,6 +526,7 @@ class RunRecord:
 
 
 def main(a):
+    # ======================================= LOAD CONFIG =======================================================
     with open(a.config) as f:
         cfg = yaml.safe_load(f)
     apply_overrides(cfg, a.set)
@@ -514,7 +534,10 @@ def main(a):
     rng = fix_random_seed(cfg.get('init_rand_seed', 1234567891), include_cuda=True)
     out_dir = os.path.join(cfg['output_folder'], a.output)
 
-    ds, dv, dl, dlv, dc, ov = build_loaders(cfg, rng)
+
+    # ======================================= LOADER =======================================================
+    ds, dv, dl, dlv, dc, ov = build_loaders(cfg, rng) # dataset_train, dataset_val, loader_train, loader_val, _, _
+    
     print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
     if dc is not None:
         print('COIN train   : %d videos of seen tasks, %d labels; %.0f%% of every batch, %d batches per epoch'
@@ -535,6 +558,9 @@ def main(a):
         use_other_column()
     if cfg['model']['train_cfg'].get('loss_weight_ground', 0) > 0:
         use_ground_columns()
+        
+        
+    # ======================================= MODEL CALLED HERE =======================================================
     model = EventCaptionTransformer(**cfg['model']).to(dev)
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
@@ -581,29 +607,35 @@ def main(a):
         print('EMA         : decay %g, evaluated and saved instead of the raw weights' % ema.decay, flush=True)
     net = ema.module if ema is not None else model   # the weights that are evaluated and saved
     n_ep = a.epochs + cfg['opt']['warmup_epochs']
+    # metric -> (best value, epoch, checkpoint name): each metric keeps its own best checkpoint
     best = {'R@0.5': (-1.0, 0, 'best_seg'), 'CIDEr': (-1.0, 0, 'best_cap')}
     print_header()
     for ep in range(n_ep):
-        t0 = time.time(); acc = {}
+        t0 = time.time()
+        acc = {}   # sum of every loss over the epoch
         for batch in dl:
             for x in batch:
                 x['feats'] = {k: v.to(dev) for k, v in x['feats'].items()}
             L = model(batch)
-            opt.zero_grad(set_to_none=True); L['final_loss'].backward()
+            opt.zero_grad(set_to_none=True)
+            L['final_loss'].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train_cfg']['clip_grad_l2norm'])
-            opt.step(); sch.step()
+            opt.step()
+            sch.step()   # the schedule steps every iteration, not every epoch
             if ema is not None:
                 ema.update(model)
-            for k, v in L.items(): acc[k] = acc.get(k, 0.0) + v.detach().item()
+            for k, v in L.items():
+                acc[k] = acc.get(k, 0.0) + v.detach().item()
         m = evaluate(net, dlv, dev, pool_raw, ds.pool_text)
         m.update(ov_scores(net, ov, dev))
         mark = ''
         for key, (val, _, name) in best.items():
             if m[key] > val:
-                best[key] = (m[key], ep, name); mark += 'S' if key == 'R@0.5' else 'C'
+                best[key] = (m[key], ep, name)
+                mark += 'S' if key == 'R@0.5' else 'C'
                 torch.save({'epoch': ep, 'state_dict': net.state_dict(), 'metrics': m},
                            os.path.join(out_dir, name + '.pth.tar'))
-        vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})
+        vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})   # val metrics + mean train losses
         print_row('%d/%d' % (ep + 1, n_ep), time.time() - t0, sch.get_last_lr()[0], vals, mark)
         rec.data['history'].append(dict(vals, epoch=ep + 1, seconds=round(time.time() - t0, 1)))
         rec.data['best'] = {k: {'value': v, 'epoch': e + 1, 'ckpt': n} for k, (v, e, n) in best.items()}

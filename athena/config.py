@@ -41,6 +41,8 @@ class Config:
 
     @classmethod
     def from_env(cls, **kw):
+        """Config(**kw), then every ATHENA_<FIELD> environment variable on top (converted to the
+        field's type)."""
         cfg = cls(**kw)
         for f in fields(cls):
             v = os.environ.get('ATHENA_' + f.name.upper())
@@ -66,6 +68,7 @@ def pick_device(pref='auto'):
 
 
 def keep_encoders(cfg, device):
+    """Whether the InternVideo2 encoders stay in memory between videos (Config.keep_encoders_loaded)."""
     if cfg.keep_encoders_loaded != 'auto':
         return cfg.keep_encoders_loaded.lower() in ('1', 'true', 'yes')
     if device.type == 'cuda':

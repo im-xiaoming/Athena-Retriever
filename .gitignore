@@ -21,11 +21,6 @@ libs/utils/build/
 libs/utils/dist/
 libs/utils/*.egg-info/
 
-# text files are ignored except the ones the code needs
-!athena/requirements.txt
-!athena/encoders/bpe/dict.txt
-!data/coin_exclude.txt
-
 # notebooks (the Colab demo is kept)
 *.ipynb
 !athena/demo_colab.ipynb
@@ -47,3 +42,6 @@ athena/index/
 InternVideo/
 OmniRetreiver
 OV-AVEL/
+
+# YouTube login cookies (yt-dlp on the PC): local only
+cookies/

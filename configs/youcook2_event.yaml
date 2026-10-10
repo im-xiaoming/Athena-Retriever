@@ -102,6 +102,7 @@ model:
     loss_weight_emb: 0.2
     cls_prior_prob: 0.01
     init_loss_norm: 400
+    loss_weight_modal: 0.0 # force A or V close to A + V
     loss_weight_span: 0.2
     # ground head: a sentence finds its own span (video + text queries); 0 = no head
     loss_weight_ground: 1.0

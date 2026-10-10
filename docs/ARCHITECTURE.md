@@ -52,7 +52,9 @@ Three ways to use it (`athena.query`):
 
 1. **Embedding:** 2 masked Conv1D (k = 3) + LayerNorm + ReLU, 768 -> 512. Sinusoidal absolute positions added.
 2. **Stem:** 2 self-attention blocks per stream (masked multi-head conv attention with depthwise convs, 4 heads, MLP x4, DropPath 0.1).
-3. **Level 0, cross-attention:** V queries A and A queries V (`pyramid_attn: cross`; `self` makes each stream attend to itself).
+3. **Level 0, cross-attention:** each stream is updated with attention over its own steps, steered by the other stream's
+   queries: `V' = V + Attn(q = A, k = V, v = V)` and `A' = A + Attn(q = V, k = A, v = A)` (`pyramid_attn: cross`; `self`
+   takes the queries from the stream itself).
 4. **Pyramid:** 5 more cross-attention blocks per stream, each downsampling by 2 -> 6 levels with 256, 128, 64, 32, 16, 8 steps.
 5. Output per level: V (512) and A (512), concatenated to **1024** channels for the heads.
 

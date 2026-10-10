@@ -8,7 +8,15 @@ from .blocks import (get_sinusoid_encoding, TransformerBlock,
 
 class ConvTransformerBackbone(nn.Module):
     """
-        A backbone that combines convolutions with transformers
+        A backbone that combines convolutions with transformers, one stream per modality (from UniAV).
+
+        Visual (V) and audio (A) features each go through: conv embedding -> arch[1] - 1 self-attention
+        blocks -> one cross-modal block at full resolution -> arch[2] cross-modal blocks that each halve
+        the length. Returns the arch[2] + 1 pyramid levels of each stream, and their masks.
+
+        Cross-modal block of stream X with the other stream Y (TransformerBlock(x1=X, x2=Y)):
+        out = X + Attention(query = Y, key = X, value = X), i.e. X is re-weighted over time by
+        what Y finds relevant. With pyramid_attn 'self', Y = X.
     """
     def __init__(
         self,
@@ -44,6 +52,7 @@ class ConvTransformerBackbone(nn.Module):
             self.register_buffer("pos_embd", pos_embd, persistent=False)
 
         # embedding network using convs
+        # 768 -> 512
         self.embd_V = nn.ModuleList()
         self.embd_A = nn.ModuleList()
         self.embd_norm_V = nn.ModuleList()
@@ -180,9 +189,11 @@ class ConvTransformerBackbone(nn.Module):
             x_V, mask_V = self.self_att_V[idx](x_V, x_V, mask_V)
             x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A)
 
-        # the same weights either way: with pyramid_attn 'self' the key/value stream is the query stream
+        # level 0: x_Va = V updated with audio queries, x_Av = A updated with visual queries (see the
+        # class docstring); the same weights either way: with pyramid_attn 'self' the queries come
+        # from the stream itself
         x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A if self.cross else x_V, mask_V)
-        x_Av, mask_V = self.ori_cross_att_Av(x_A, x_V if self.cross else x_A, mask_A)
+        x_Av, mask_A = self.ori_cross_att_Av(x_A, x_V if self.cross else x_A, mask_A)
 
         # prep for outputs
         out_feats_V = tuple()
@@ -195,7 +206,7 @@ class ConvTransformerBackbone(nn.Module):
         out_feats_A += (x_Av, )
         out_masks_A += (mask_A, )
 
-        # main branch with downsampling
+        # main branch with downsampling: level idx + 1 is built from level idx of both streams
         for idx in range(len(self.cross_att_Va)):
             x_V, mask_V = self.cross_att_Va[idx](out_feats_V[idx], out_feats_A[idx] if self.cross else out_feats_V[idx], mask_V)
             out_feats_V += (x_V, )

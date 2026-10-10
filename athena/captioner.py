@@ -10,6 +10,7 @@ train.py scores it.
 """
 import json
 import os
+import re
 
 import numpy as np
 import torch
@@ -35,6 +36,15 @@ def build_caption_pool(caption_emb, annotations, out):
 
 
 class Captioner:
+    """Picks a caption for each event vector from the train caption pool.
+
+    Two views of the pool, in the same order as texts:
+      pool_f  captions in the event space (the model's clip_proj): what an event vector is scored against
+      pool_n  normalised InternVideo2 text vectors: where candidates are compared with each other
+    pool_train (from the API checkpoint) replaces the vectors of assets/caption_pool.npz when the model
+    was trained on other caption vectors (another centring, or the teacher's text space).
+    """
+
     def __init__(self, pool_path, model, device, pool_train=None):
         z = np.load(pool_path)
         self.texts = [str(t) for t in z['texts']]
@@ -54,14 +64,19 @@ class Captioner:
 
     @torch.no_grad()
     def caption(self, vecs, k=20, alternatives=3):
-        """vecs (N, D) normalised -> list of {caption, confidence, alternatives}."""
+        """vecs (N, D) normalised -> list of {caption, similarity, consensus, alternatives}.
+
+        Minimum Bayes risk pick, as train.py's mbr_pick: the k best captions by cosine are weighted by
+        softmax(scale * cosine), and the one most similar to the weighted group wins (consensus).
+        similarity is that caption's cosine with the event; alternatives are the next best by cosine.
+        """
         out = []
         for q in vecs.float():
-            s = self.pool_f @ q
+            s = self.pool_f @ q                           # cosine with every pool caption
             top = s.topk(k)
-            p = F.softmax(self.scale * top.values, dim=0)
+            p = F.softmax(self.scale * top.values, dim=0)   # weight of each candidate
             cand = self.pool_n[top.indices]
-            agree = (cand @ cand.t()) @ p
+            agree = (cand @ cand.t()) @ p                 # weighted agreement of each candidate with the others
             order = agree.argsort(descending=True)
             best = int(top.indices[order[0]])
             alts = [{'caption': self.texts[int(top.indices[j])], 'similarity': round(float(top.values[j]), 4)}
@@ -80,25 +95,25 @@ class PoolQuery:
     """
 
     def __init__(self, captioner, top=5):
-        import re
-        self.re, self.top, self.cap = re, top, captioner
+        self.top, self.cap = top, captioner
         docs = [self._words(t) for t in captioner.texts]
         vocab = sorted({w for d in docs for w in d})
-        self.vid = {w: i for i, w in enumerate(vocab)}
-        df = np.zeros(len(vocab), np.float32)
+        self.vid = {w: i for i, w in enumerate(vocab)}   # word -> column
+        df = np.zeros(len(vocab), np.float32)            # document frequency of every word
         for d in docs:
             for w in set(d):
                 df[self.vid[w]] += 1
-        self.idf = np.log((1 + len(docs)) / (1 + df)) + 1
+        self.idf = np.log((1 + len(docs)) / (1 + df)) + 1   # smoothed idf, as scikit-learn
         rows = np.zeros((len(docs), len(vocab)), np.float32)
         for i, d in enumerate(docs):
             for w in d:
                 rows[i, self.vid[w]] += 1
         rows *= self.idf
-        self.docs = rows / np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-9)
+        self.docs = rows / np.maximum(np.linalg.norm(rows, axis=1, keepdims=True), 1e-9)   # (N captions, V)
 
-    def _words(self, text):
-        return self.re.findall(r"[a-z]+", text.lower())
+    @staticmethod
+    def _words(text):
+        return re.findall(r"[a-z]+", text.lower())
 
     def __call__(self, text):
         v = np.zeros(len(self.vid), np.float32)

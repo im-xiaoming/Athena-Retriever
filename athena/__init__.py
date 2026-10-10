@@ -1,4 +1,6 @@
-"""UniAV event captioning as Python functions.
+"""Athena (event segmentation, captioning and grounding for cooking videos) as Python functions.
+
+Module-level functions share one AthenaPipeline (athena/pipeline.py), created on first use.
 
     import athena as uv
 
@@ -38,6 +40,7 @@ def load(**config):
 
 
 def _get():
+    """The shared pipeline, loaded with the default Config on first use."""
     return _pipeline if _pipeline is not None else load()
 
 

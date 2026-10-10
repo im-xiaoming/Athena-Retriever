@@ -7,6 +7,7 @@ from torch import nn
 
 
 def Linear(in_features, out_features, bias=True):
+    """nn.Linear with Xavier-uniform weights and a zero bias."""
     m = nn.Linear(in_features, out_features, bias)
     nn.init.xavier_uniform_(m.weight)
     if bias:
@@ -163,7 +164,8 @@ class MaskedMHCA(nn.Module):
         self.n_qx_stride = n_qx_stride
         self.n_kv_stride = n_kv_stride
 
-        # query conv (depthwise)
+        # query conv (depthwise); the stride is n_kv_stride as upstream, which is the same value
+        # here: every block uses equal strides for queries and keys / values
         kernel_size = self.n_qx_stride + 1 if self.n_qx_stride > 1 else 3
         stride, padding = self.n_kv_stride, kernel_size // 2
         # 1d depthwise conv
@@ -204,7 +206,8 @@ class MaskedMHCA(nn.Module):
         self.proj = nn.Conv1d(self.n_embd, self.n_embd, 1)
 
     def forward(self, x1, x2, mask):
-        # x1: k,v   x2: q
+        # x1: the stream that gives keys and values; x2: the stream that gives queries
+        # (x1 is x2 for self-attention). The output has one row per query step.
         # x: batch size, feature channel, sequence length,
         # mask: batch size, 1, sequence length (bool)
         B, C, T = x1.size()
@@ -320,6 +323,8 @@ class TransformerBlock(nn.Module):
             self.drop_path_mlp = nn.Identity()
 
     def forward(self, x1, x2, mask, pos_embd=None):
+        # x1: the stream being updated (keys, values and the residual); x2: the stream the queries
+        # come from (x1 itself for self-attention): out = x1 + Attn(q=x2, k=x1, v=x1), then the MLP.
         # pre-LN transformer: https://arxiv.org/pdf/2002.04745.pdf
         out, out_mask = self.attn(self.ln11(x1), self.ln12(x2), mask)
         out_mask_float = out_mask.to(out.dtype)
@@ -333,7 +338,6 @@ class TransformerBlock(nn.Module):
         
         return out, out_mask 
 
-# drop path: from https://github.com/facebookresearch/SlowFast/blob/master/slowfast/models/common.py
 class Scale(nn.Module):
     """
     Multiply the output regression range by a learnable constant value

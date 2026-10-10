@@ -32,6 +32,13 @@ LEGACY_KEYS = {'feat_folder', 'feat_stride', 'num_frames', 'downsample_rate', 'c
 
 
 class YouCook2CaptionDataset(Dataset):
+    """One item per video: its features resampled to max_seq_len steps, its GT steps in grid units,
+    the training targets of every pyramid point and the caption vectors of its steps (see __getitem__).
+
+    Datasets for other sources (CoinCaptionDataset) subclass it and only replace _load_captions and
+    _load_json_db.
+    """
+
     def __init__(
         self, is_training, split, json_file, caption_emb_file, default_fps, max_seq_len,
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
@@ -103,10 +110,13 @@ class YouCook2CaptionDataset(Dataset):
         self.cap_pool_idx = {}
         for it in self.data_list:
             for i in range(it['n_cap']):
-                k = '%s#%d' % (it['id'], i); t = str(self.cap_text[k])
-                if t not in self.pool_index:
+                k = '%s#%d' % (it['id'], i)
+                t = str(self.cap_text[k])
+                if t not in self.pool_index:   # first time this sentence is seen: new pool entry
                     self.pool_index[t] = len(self.pool_text)
-                    self.pool_text.append(t); self.pool_keys.append(k); emb.append(self.cap_emb[k])
+                    self.pool_text.append(t)
+                    self.pool_keys.append(k)
+                    emb.append(self.cap_emb[k])
                 self.cap_pool_idx[k] = self.pool_index[t]
         self.pool_emb = np.stack(emb).astype(np.float32)
 
@@ -140,6 +150,8 @@ class YouCook2CaptionDataset(Dataset):
             self.omni_text_ok.sum(), len(self.pool_text), len(av), path), flush=True)
 
     def _load_json_db(self, json_file):
+        """Videos of this split that have caption vectors and features: their GT steps (at most NMAX)
+        in seconds, and labels 0..n-1 (each step's caption index within the video)."""
         with open(json_file) as f:
             db = json.load(f)['database']
         out = []
@@ -188,12 +200,28 @@ class YouCook2CaptionDataset(Dataset):
         return fv[:n], fa[:n], self.default_fps // self.iv2_rows_per_sec, self.default_fps
 
     def __getitem__(self, idx):
+        """Returns a dict:
+          video_id, fps, duration, n_cap
+          feats         {'visual': (C_v, T), 'audio': (C_a, T)}, T = max_seq_len
+          segments      (N, 2) GT steps in grid units; labels (N,) their caption index in the video
+          feat_stride   frames per grid step (with feat_num_frames: grid units <-> seconds)
+          points        pyramid points, list of (T_l, 4): (t, regression range lo, hi, stride)
+          gt_cls_labels (P, NMAX) one-hot caption index of the step each point belongs to (zeros: none)
+          gt_offsets    (P, 2) distances from each point to its step's start and end, in strides
+          cap_emb (NMAX, 512), cap_mask (NMAX,), cap_text [NMAX]  caption vectors / texts of the steps
+          cap_pool_idx  (NMAX,) index of each caption in the shared train caption pool (-1: padding)
+          cap_av_idx    (NMAX,) index of each step's teacher clip vector (-1: none), with the teacher
+          source        dataset id; segments_sec  GT steps in seconds, for scoring
+        """
         item = self.data_list[idx]
         vid = item['id']
         fv, fa, stride, window = self._load_features(vid)
-        # time scale of the grid after resampling to max_seq_len steps
+        # Time grid. The n feature rows are resampled to max_seq_len steps, so one step spans
+        # feat_stride frames (at default_fps) and step i is centred on frame (i + 0.5) * feat_stride.
+        # A time t in seconds is therefore at grid position t * fps / feat_stride - 0.5
+        # (feat_offset = 0.5); the model converts back with (pos * feat_stride + 0.5 * num_frames) / fps.
         feat_stride = float((fv.shape[0] - 1) * stride + window) / self.max_seq_len
-        num_frames = feat_stride
+        num_frames = feat_stride   # frames seen by one step: exactly one step's worth
         feat_offset = 0.5 * num_frames / feat_stride
         fv = torch.from_numpy(np.ascontiguousarray(fv.transpose()))
         fa = torch.from_numpy(np.ascontiguousarray(fa.transpose()))
@@ -205,6 +233,8 @@ class YouCook2CaptionDataset(Dataset):
         segments = torch.from_numpy(item['segments'] * item['fps'] / feat_stride - feat_offset)
         labels = torch.from_numpy(item['labels'])
         if self.is_training:
+            # drop GT steps that start after the features end; a step cut by the end is kept (clamped)
+            # only if at least trunc_thresh of it remains; at least one step is always kept
             vid_len = feats['visual'].shape[1] + feat_offset
             keep_s, keep_l = [], []
             for seg, lab in zip(segments, labels):
@@ -242,7 +272,9 @@ class YouCook2CaptionDataset(Dataset):
         pidx = np.full((NMAX,), -1, dtype=np.int64)
         for i in range(item['n_cap']):
             k = '%s#%d' % (vid, i)
-            emb[i] = self.cap_emb[k]; cmask[i] = True; texts[i] = str(self.cap_text[k])
+            emb[i] = self.cap_emb[k]
+            cmask[i] = True
+            texts[i] = str(self.cap_text[k])
             pidx[i] = self.cap_pool_idx[k] + self.pool_offset
         data_dict['cap_emb'] = torch.from_numpy(emb)
         data_dict['cap_mask'] = torch.from_numpy(cmask)

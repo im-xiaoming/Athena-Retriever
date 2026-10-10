@@ -25,6 +25,8 @@ def iou(a, b):
 
 
 def match(preds, gts, thr=0.5):
+    """True positives: each prediction, in order, takes the unused GT segment it overlaps most,
+    and counts if that IoU is >= thr."""
     used, tp = set(), 0
     for p in preds:
         best, bj = 0.0, -1
@@ -43,17 +45,20 @@ def main():
         'separate' if pipe.seg_model is not pipe.model else 'the same'))
     with open(os.path.join(ROOT, 'data', 'youcookii', 'annotations', 'youcookii_annotations_trainval.json')) as f:
         db = json.load(f)['database']
-    F = os.path.join(ROOT, 'data', 'youcookii', 'iv2_feats' if pipe.spec.stride == pipe.spec.fps else 'iv2_dense')
-    have = set(pipe.spec.stored_ids(F))
-    cands, n_gt_total = [], 0
+    # 1 row per second -> iv2_feats, 2 rows per second -> iv2_dense (tools/make_iv2_dense.py)
+    feat_dir = os.path.join(ROOT, 'data', 'youcookii',
+                            'iv2_feats' if pipe.spec.stride == pipe.spec.fps else 'iv2_dense')
+    have = set(pipe.spec.stored_ids(feat_dir))
+    cands, n_gt_total = [], 0   # per video: (predicted segments in s, their scores, GT segments)
     for vid, x in sorted(db.items()):
         if x['subset'] != 'validation' or vid not in have:
             continue
-        fv, fa, n = pipe.spec.prepare(*pipe.spec.from_store(vid, F))
+        fv, fa, n = pipe.spec.prepare(*pipe.spec.from_store(vid, feat_dir))
         segs, scores, _ = pipe.seg_model(fv.to(pipe.device), fa.to(pipe.device))
         secs = pipe.spec.to_seconds(segs, n, x['duration'])
         gts = [a['segment'] for a in x['annotations'][:16]]
-        cands.append((secs, scores, gts)); n_gt_total += len(gts)
+        cands.append((secs, scores, gts))
+        n_gt_total += len(gts)
     print('validation videos: %d, GT events: %d' % (len(cands), n_gt_total))
 
     # 1. parity with training evaluation (k = #GT, best IoU per GT)

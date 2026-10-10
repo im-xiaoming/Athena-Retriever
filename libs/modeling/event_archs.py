@@ -45,6 +45,12 @@ Options (train_cfg), all off by default:
                           are each pulled toward the fused segment vector (stop-gradient) and
                           toward the right caption of the pool
 """
+
+# in_dim=1024
+# feat_dim=512
+# clip_dim=512
+
+
 import numpy as np
 import torch
 from torch import nn
@@ -55,7 +61,9 @@ from .multimodal_backbones import ConvTransformerBackbone
 from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
 
 
-def _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln):
+def _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln): # not change T
+    """The shared body of every head: n_layers - 1 masked Conv1D layers, each followed by a LayerNorm
+    (or nothing); the caller adds the ReLU and its own output conv."""
     head, norm = nn.ModuleList(), nn.ModuleList()
     for i in range(n_layers - 1):
         head.append(MaskedConv1D(in_dim if i == 0 else feat_dim, feat_dim, ks,
@@ -65,7 +73,12 @@ def _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln):
 
 
 class EventHead(nn.Module):
-    """A single channel: is there an event at this time step. Class agnostic."""
+    """
+    Iterate for each level of T = [256, 128, 64, 32, 16, 8], and check if each level has event occured.
+    
+    Returns:
+        Tuple[tensor[B, T, 1]]
+    """
 
     def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, prior_prob=0.01):
         super().__init__()
@@ -81,14 +94,14 @@ class EventHead(nn.Module):
                 x, _ = self.head[i](x, m)
                 x = self.act(self.norm[i](x))
             o, _ = self.out(x, m)
-            res += (o.permute(0, 2, 1),)          # (B, T, 1)
-        return res
+            res += (o.permute(0, 2, 1),)          # (B, T_l, 1)
+        return res # tuple[tensor(B, T_l, 1)]
 
 
 class EmbedHead(nn.Module):
     """One L2-normalised vector per time step, in the space of the projected captions."""
 
-    def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=1536, text_proj='linear'):
+    def __init__(self, in_dim, feat_dim, n_layers=3, ks=3, with_ln=True, clip_dim=512, text_proj='linear'):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
@@ -98,7 +111,7 @@ class EmbedHead(nn.Module):
             assert clip_dim == feat_dim, 'text_proj none needs head_dim == caption dim (%d)' % clip_dim
             self.clip_proj = None
         else:
-            self.clip_proj = Linear(clip_dim, feat_dim)
+            self.clip_proj = Linear(clip_dim, feat_dim) # 512 -> 512
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(self, fpn_feats, fpn_masks):
@@ -118,6 +131,8 @@ class EmbedHead(nn.Module):
     def embed_captions(self, cap):
         return F.normalize(cap if self.clip_proj is None else self.clip_proj(cap), dim=-1)
 
+
+# raw (512, 256) level 0, not normalized
 
 def span_mean(raw, length, segs):
     """Mean of raw features (D, T) over spans segs (N, 2), in grid units.
@@ -140,10 +155,15 @@ class SegmentContext(nn.Module):
     starts at zero, so initially this is exactly the span mean.
     """
 
-    def __init__(self, dim):
+    def __init__(self, dim: int = 512):
         super().__init__()
-        self.mlp = nn.Sequential(nn.Linear(2 * dim + 2, dim), nn.GELU(), nn.Linear(dim, dim))
-        nn.init.zeros_(self.mlp[-1].weight); nn.init.zeros_(self.mlp[-1].bias)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * dim + 2, dim), # span + glob + pos = 512 + 512 + 2
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
 
     def forward(self, raw, length, segs):
         span = span_mean(raw, length, segs)                          # (N, D)
@@ -153,7 +173,10 @@ class SegmentContext(nn.Module):
 
 
 class BoundaryHead(nn.Module):
-    def __init__(self, in_dim, feat_dim, fpn_levels, n_layers=3, ks=3, with_ln=True):
+    """Per time step: distances to the start and the end of its event (in units of the level's stride,
+    >= 0) and one IoU-quality logit (how good the segment from this step will be, used for ranking)."""
+
+    def __init__(self, in_dim, feat_dim, fpn_levels: int = 6, n_layers=3, ks=3, with_ln=True):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
@@ -175,8 +198,8 @@ class BoundaryHead(nn.Module):
                 x = self.act(self.norm[i](x))
             o, _ = self.out(x, m)
             q, _ = self.iou_out(x, m)
-            res += (F.relu(self.scale[l](o)).permute(0, 2, 1),)  # (B, T, 2)
-            qual += (q.permute(0, 2, 1),)                         # (B, T, 1)
+            res += (F.relu(self.scale[l](o)).permute(0, 2, 1),)  # (B, T_l, 2)
+            qual += (q.permute(0, 2, 1),)                         # (B, T_l, 1)
         return res, qual
 
 
@@ -195,7 +218,8 @@ class GroundHead(nn.Module):
         assert n_layers >= 2
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
-        self.film = nn.Linear(text_dim, 2 * feat_dim)
+        #                               gamma x beta
+        self.film = nn.Linear(text_dim, 2 * feat_dim) # FiLM: Visual Reasoning with a General Conditioning Layer (Perez et al., AAAI 2018)
         nn.init.zeros_(self.film.weight); nn.init.zeros_(self.film.bias)
         self.out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
         torch.nn.init.constant_(self.out.conv.bias, -np.log((1 - prior_prob) / prior_prob))
@@ -230,10 +254,10 @@ class EventCaptionTransformer(nn.Module):
                  head_with_ln, use_abs_pe, train_cfg, test_cfg, max_seq_len,
                  nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross'):
         super().__init__()
-        self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)]
+        self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
         assert len(self.fpn_strides) == len(regression_range)
         self.max_seq_len = max_seq_len
-        self.max_div_factor = max(self.fpn_strides)
+        self.max_div_factor = max(self.fpn_strides) # 32
         self.nmax = nmax
         self.w_reg = train_cfg['loss_weight_reg']
         self.w_emb = train_cfg['loss_weight_emb']
@@ -256,7 +280,7 @@ class EventCaptionTransformer(nn.Module):
         self.w_omni_txt = train_cfg.get('loss_weight_omni_txt', 0.2)
         self.w_omni_av = train_cfg.get('loss_weight_omni_av', 0.2)
         self.omni_target = train_cfg.get('omni_target', 'av')
-        self.w_modal = train_cfg.get('loss_weight_modal', 0.0)
+        self.w_modal = train_cfg.get('loss_weight_modal', 0.0) # idea of L_D from OmniRetriever
         # grounding: every caption of a video is a query for its own span; captions of other videos
         # in the batch (not close to any caption of this video) are queries with no span
         self.w_ground = train_cfg.get('loss_weight_ground', 0.0)
@@ -273,7 +297,7 @@ class EventCaptionTransformer(nn.Module):
             scale_factor=scale_factor, with_ln=embd_with_ln, attn_pdrop=0.0,
             proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe,
             pyramid_attn=pyramid_attn)
-        D = embd_dim * 2
+        D = embd_dim * 2 # 512 * 2
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
@@ -288,8 +312,11 @@ class EventCaptionTransformer(nn.Module):
         if self.w_modal > 0:   # single-stream students, training only
             self.modal_proj = nn.ModuleDict({m: nn.Linear(embd_dim, head_dim) for m in ('v', 'a')})
         if omni_dim > 0:
-            self.omni_proj = nn.Sequential(nn.Linear(head_dim, head_dim * 2), nn.GELU(),
-                                           nn.Linear(head_dim * 2, omni_dim))
+            self.omni_proj = nn.Sequential(
+                nn.Linear(head_dim, head_dim * 2),
+                nn.GELU(),
+                nn.Linear(head_dim * 2, omni_dim)
+            )
             self.omni_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def set_caption_pool(self, pool_raw, pool_src=None, other=None):
@@ -320,29 +347,60 @@ class EventCaptionTransformer(nn.Module):
         return list(set(p.device for p in self.parameters()))[0]
 
     @torch.no_grad()
-    def preprocessing(self, video_list, padding_val=0.0):
-        fv = [x['feats']['visual'] for x in video_list]
+    def preprocessing(self, video_list: list[dict], padding_val=0.0):
+        """Stack the videos of a batch into (B, C=768, T) tensors plus a (B, 1, T) validity mask.
+        T is max_seq_len (always in training); a longer video at inference is padded up to a
+        multiple of the largest pyramid stride."""
+        
+        fv = [x['feats']['visual'] for x in video_list] # x['feats']['visual'] = (C, T)
         fa = [x['feats']['audio'] for x in video_list]
-        lens = torch.as_tensor([f.shape[-1] for f in fv])
-        max_len = self.max_seq_len if self.training or lens.max() <= self.max_seq_len else \
-            int((lens.max() + self.max_div_factor - 1) // self.max_div_factor * self.max_div_factor)
+        lens = torch.as_tensor([f.shape[-1] for f in fv]) # T are different because of data agumnetation
+        
+        longest = lens.max()
+        if self.training or longest <= self.max_seq_len:
+            max_len = self.max_seq_len
+        else:
+            # round up to the next multiple of max_div_factor
+            stride = self.max_div_factor # 32
+            max_len = int((longest + stride - 1) // stride * stride) # make sure max_len are divided evenly for stride
+            
         def pad(xs):
+            """Padding function"""
+            # new_full: create tensor same device and dtype
+            #                        B           C           T
             out = xs[0].new_full([len(xs), xs[0].shape[0], max_len], padding_val)
             for s, d in zip(xs, out):
                 d[..., :s.shape[-1]].copy_(s)
             return out.to(self.device)
-        masks = (torch.arange(max_len)[None, :] < lens[:, None]).unsqueeze(1).to(self.device)
-        return pad(fv), pad(fa), masks
+        
+        masks = (torch.arange(max_len)[None, :] < lens[:, None]).unsqueeze(1).to(self.device) # (1, max_len) < (N, 1) = (N, max_len) -> (N, 1, max_len)
+        return pad(fv), pad(fa), masks # (B, C, T)
 
     def forward(self, video_list):
-        V, A, masks = self.preprocessing(video_list)
-        fV, fA, msk = self.backbone(V, A, masks)
+        """Training: dict of losses (final_loss is the weighted sum). Evaluation: one dict per video
+        (see inference). P below is the number of points over all pyramid levels (504 for 256 steps):
+        the outputs of every level are concatenated along the time axis."""
+        
+        V, A, masks = self.preprocessing(video_list) # V = A = (B, C, T)
+        
+        # RETURN PYRIMID FEATURE
+        fV, fA, msk = self.backbone(V, A, masks) # fV = fA = (B, C, T_l), l ∈ [0, 5]
+        
         self._streams0 = (fV[0], fA[0])   # level-0 streams, for the single-stream students
-        feats = [torch.cat((v, a), 1) for v, a in zip(fV, fA)]
-        ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)   # (B, P)
+        
+        feats = [torch.cat((v, a), dim=1) for v, a in zip(fV, fA)]           # per level (B, 2 * embd_dim[512], T_l), len(feats) = 6
+        
+        # Event Head
+        #                   tuple(tensor(B, T_l, 1))
+        ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)   # (B, P), P = point = 504
+        
+        # Bounding Head
+        # tuple(tensor(B, T_l, 2)), tuple(tensor(B, T_l, 1))
         bd, qu = self.bound_head(feats, msk)
         bd = torch.cat(bd, dim=1)                                        # (B, P, 2)
         qu = torch.cat(qu, dim=1).squeeze(-1)                            # (B, P)
+        
+        # Embedding Head
         em, raw0 = self.embed_head(feats, msk)
         em = torch.cat(em, dim=1)                                        # (B, P, D)
         len0 = msk[0].squeeze(1).sum(-1)                                 # (B,)
@@ -368,20 +426,23 @@ class EventCaptionTransformer(nn.Module):
         g = gt_idx.clamp(min=0)
         rows = torch.arange(len(g), device=q.device)
         with torch.no_grad():
+            # ok (M, N): which pool captions each row may see (its own dataset, usable columns)
             ok = torch.ones(len(g), len(pool_f), dtype=torch.bool, device=q.device)
             if src is not None and self.pool_src is not None:
                 ok = self.pool_src[None] == src[:, None]
             if col_ok is not None:
                 ok = ok & col_ok[None]
+            # soft target: soft_alpha spread over the captions similar to the true one (softmax of
+            # caption-caption cosine / soft_tau, in the caption space), the rest on the true caption
             sim = (self.pool_n[g] @ self.pool_n.t() / self.soft_tau).masked_fill(~ok, float('-inf'))
             tgt = self.soft_alpha * F.softmax(sim, dim=-1)
             tgt[rows, g] += 1 - self.soft_alpha
-            if other_f is not None:
+            if other_f is not None:   # extra "other" column: the whole target of background rows
                 tgt = torch.cat((tgt, tgt.new_zeros(len(g), 1)), 1)
                 tgt[bg] = 0
                 tgt[bg, -1] = 1
                 ok = torch.cat((ok, ok.new_ones(len(g), 1)), 1)
-        logit = logit.masked_fill(~ok, -1e4)
+        logit = logit.masked_fill(~ok, -1e4)   # hidden columns get (almost) zero probability
         return -(tgt * F.log_softmax(logit, dim=-1)).sum(-1).mean()
 
     def losses(self, video_list, valid, ev, bd, qu, em, raw0, len0):
@@ -437,7 +498,9 @@ class EventCaptionTransformer(nn.Module):
             other_loss = (self.pool_loss(em[bi, pi], torch.full_like(bi, -1), pool_f, src=vsrc[bi], other_f=other_f)
                           if bi.numel() else 0 * em.sum())
         # 4. span embedding: mean over the GT span, plus a jittered copy so the model
-        #    copes with predicted boundaries that are slightly off at inference
+        #    copes with predicted boundaries that are slightly off at inference.
+        #    Collected per span: qs segment vectors, gs pool index of its caption, avs index of its
+        #    teacher clip vector, ss dataset id, zs single-stream (video / audio only) vectors
         qs, gs, avs, ss, zs = [], [], [], [], {'v': [], 'a': []}
         for b, x in enumerate(video_list):
             seg = x['segments'].to(dev).float()
@@ -490,7 +553,8 @@ class EventCaptionTransformer(nn.Module):
                 if rk.any():
                     ot = self.pool_loss(so[rk], gs[rk], self.omni_text, self.omni_logit_scale,
                                         self.omni_text_ok)
-                ai = torch.cat(avs); ok = ai >= 0
+                ai = torch.cat(avs)
+                ok = ai >= 0                         # spans whose clip has a teacher vector
                 if ok.any():
                     la = self.omni_logit_scale.exp().clamp(max=100) * (so[ok] @ self.omni_av.t())
                     oa = F.cross_entropy(la, ai[ok])
@@ -511,6 +575,10 @@ class EventCaptionTransformer(nn.Module):
         return self.ground_head(feats, msk, vid, q, self.embed_head.embed_captions(q), em)
 
     def ground_loss(self, video_list, gt_cls, cap_pool, valid):
+        """Focal loss of the ground head. Queries: every caption of a video, whose target is the
+        points of its own step (the same positives as the event head), and up to ground_neg captions
+        of other videos in the batch (cosine < ground_neg_max_cos to every caption of this video),
+        whose target is all zeros. Normalised by the number of positive points."""
         dev = gt_cls.device
         vid, qi, tgt = [], [], []
         B = len(video_list)
@@ -533,13 +601,19 @@ class EventCaptionTransformer(nn.Module):
 
     @torch.no_grad()
     def inference(self, video_list, valid, ev, bd, qu, em, raw0, len0):
-        """Segment with event score times boundary-quality score, and return the embeddings."""
+        """Segment with event score times boundary-quality score, and return the embeddings.
+
+        One dict per video: segments (K, 2) and ground_segments (one per GT caption, or None) in
+        seconds; scores (K,); embeds (K, D) segment vectors, embeds_pt the single-point vectors,
+        embeds_omni the teacher-space ones; embeds_gt / embeds_gt_omni the vectors of the GT spans;
+        gt_segments, gt_text the GT steps in seconds and their captions.
+        """
         from ..utils import batched_nms
         a = self.iou_power
         prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
         out = []
         for b, v in enumerate(video_list):
-            pts = torch.cat(v['points'], dim=0).to(ev.device)
+            pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, range lo, range hi, stride
             keep = (prob[b] > self.test_score_thresh).nonzero(as_tuple=True)[0]
             if keep.numel() == 0:
                 keep = prob[b].topk(1).indices
@@ -547,6 +621,7 @@ class EventCaptionTransformer(nn.Module):
             k = min(self.test_max_seg * 5, keep.numel())
             sc, order = sc.topk(k)
             keep = keep[order]
+            # segment of a point: from t - (start offset) * stride to t + (end offset) * stride
             p, o = pts[keep], bd[b][keep]
             left = p[:, 0] - o[:, 0] * p[:, 3]
             right = p[:, 0] + o[:, 1] * p[:, 3]
@@ -577,7 +652,7 @@ class EventCaptionTransformer(nn.Module):
             gseg = v['segments'].to(raw0.device).float()
             gemb = self.seg_ctx(raw0[b], int(len0[b]), gseg)
             gomni = self.omni_embed(gemb).cpu() if self.omni_dim > 0 else None
-            segs = (segs * st + 0.5 * nf) / fps
+            segs = (segs * st + 0.5 * nf) / fps   # grid units -> seconds (see the dataset's __getitem__)
             segs = segs.clamp(min=0.0, max=float(v['duration']))
             gr = None
             if self.w_ground > 0:   # each GT caption as a query: its best segment, in seconds

@@ -3,7 +3,7 @@
 # Usage: set -a; . ./.env; set +a; HOME=~/colab2 tools/colab_dl_launch.sh
 cd "$(dirname "$0")/.."
 C=/home/minh/.local/bin/colab
-until $C new --gpu T4 -s t4 >/dev/null 2>&1; do echo "$(date +%T) no T4 yet"; sleep 300; done
+$C new --gpu T4 -s t4 >/dev/null 2>&1 || { echo "no T4 for $HOME"; exit 1; }
 echo "$(date +%T) T4 granted"
 printf %s "$HF_TOKEN" > /tmp/hf_token_colab
 $C upload -s t4 /tmp/hf_token_colab /content/hf_token && rm /tmp/hf_token_colab

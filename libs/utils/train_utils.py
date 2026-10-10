@@ -9,6 +9,8 @@ from .lr_schedulers import LinearWarmupCosineAnnealingLR
 
 
 def fix_random_seed(seed, include_cuda=True):
+    """Seed python, numpy and torch; with include_cuda also make cuDNN / cuBLAS deterministic.
+    Returns the torch generator, used by the data loader."""
     rng_generator = torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
