@@ -16,6 +16,7 @@ caption_space omni trains in the OmniRetriever-7B text space instead (teacher fi
 """
 import os
 import json
+import random
 
 import numpy as np
 import torch
@@ -39,6 +40,12 @@ class YouCook2CaptionDataset(Dataset):
     as it is; COIN (CoinCaptionDataset) subclasses it and only replaces _load_captions and _load_json_db.
     pad_omni: a training source without teacher vectors next to one that has them; its items carry
     cap_av_idx -1 so a mixed batch has the key everywhere.
+
+    Feature augmentation, training items only (all off by default):
+      aug_stretch     the crop (crop_ratio) is resampled back to max_seq_len steps, so its events get longer
+      aug_modal_drop  probability that one stream, audio or visual (even odds), is zeroed
+      aug_mask_spans  number of random spans zeroed in each stream, each 1..aug_mask_width steps long
+      aug_noise       std of the Gaussian noise added to the features (rows are L2-normalised)
     """
 
     def __init__(
@@ -46,7 +53,8 @@ class YouCook2CaptionDataset(Dataset):
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
         crop_ratio, num_classes, force_upsampling=True, omni_emb_file=None, feat_source='iv2',
         iv2_folder='./data/youcookii/iv2_feats', iv2_video_keys=('v768',), iv2_l2norm=True,
-        iv2_rows_per_sec=1, caption_space='iv2', center_sample_radius=0.0, pad_omni=False, **legacy,
+        iv2_rows_per_sec=1, caption_space='iv2', center_sample_radius=0.0, pad_omni=False,
+        aug_stretch=False, aug_modal_drop=0.0, aug_mask_spans=0, aug_mask_width=4, aug_noise=0.0, **legacy,
     ):
         unknown = set(legacy) - LEGACY_KEYS
         assert not unknown, 'unknown dataset options %s' % sorted(unknown)
@@ -67,6 +75,8 @@ class YouCook2CaptionDataset(Dataset):
         self.num_classes = num_classes
         self.crop_ratio = crop_ratio
         self.center_radius = center_sample_radius   # ActionFormer center sampling (training targets only)
+        self.aug_stretch, self.aug_modal_drop, self.aug_noise = aug_stretch, aug_modal_drop, aug_noise
+        self.aug_mask_spans, self.aug_mask_width = aug_mask_spans, aug_mask_width
 
         self.source = 0          # dataset id: rows of the pool loss only see captions of their own dataset
         self.pool_offset = 0     # where this dataset's captions start in a pool shared by several datasets
@@ -203,6 +213,32 @@ class YouCook2CaptionDataset(Dataset):
         n = min(fv.shape[0], fa.shape[0])
         return fv[:n], fa[:n], self.default_fps // self.iv2_rows_per_sec, self.default_fps
 
+    def _augment(self, d, feat_offset):
+        """Feature augmentation of a training item after the crop, in place (see the class docstring)."""
+        T = d['feats']['visual'].shape[1]
+        if self.aug_stretch and T < self.max_seq_len:
+            # grid position p of a time becomes (p + offset) * scale - offset, as linear resampling maps step centres
+            scale = self.max_seq_len / T
+            for k in ('visual', 'audio'):
+                d['feats'][k] = F.interpolate(d['feats'][k][None], size=self.max_seq_len, mode='linear',
+                                              align_corners=False)[0]
+            d['segments'] = (d['segments'] + feat_offset) * scale - feat_offset
+            d['feat_stride'] /= scale
+            d['feat_num_frames'] /= scale
+            T = self.max_seq_len
+        for k in ('visual', 'audio'):
+            f = d['feats'][k].clone()
+            for _ in range(self.aug_mask_spans):
+                w = random.randint(1, min(self.aug_mask_width, T))
+                st = random.randint(0, T - w)
+                f[:, st:st + w] = 0
+            if self.aug_noise > 0:
+                f = f + self.aug_noise * torch.randn_like(f)
+            d['feats'][k] = f
+        if self.aug_modal_drop > 0 and random.random() < self.aug_modal_drop:
+            k = random.choice(('visual', 'audio'))
+            d['feats'][k] = torch.zeros_like(d['feats'][k])
+
     def __getitem__(self, idx):
         """Returns a dict:
           video_id, fps, duration, n_cap
@@ -262,6 +298,7 @@ class YouCook2CaptionDataset(Dataset):
         if self.is_training:
             data_dict = truncate_feats(
                 data_dict, self.max_seq_len, self.trunc_thresh, feat_offset, self.crop_ratio)
+            self._augment(data_dict, feat_offset)
 
         points = self.point_generator(self.fpn_strides, data_dict['feats']['visual'], self.is_training)
         data_dict['gt_cls_labels'], data_dict['gt_offsets'] = label_points(

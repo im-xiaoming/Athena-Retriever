@@ -47,6 +47,12 @@ dataset:
   iv2_l2norm: true
   iv2_rows_per_sec: 1      # 2 with iv2_folder ./data/youcookii/iv2_dense (tools/make_iv2_dense.py)
   center_sample_radius: 0.0  # > 0 (ActionFormer: 1.5): only points within this many strides of a step's centre are positive
+  # feature augmentation of training items (YouCook2CaptionDataset._augment), all off by default
+  aug_stretch: false     # true: the crop is resampled back to max_seq_len (with crop_ratio [0.6, 1.0]: speed jitter)
+  aug_modal_drop: 0.0    # probability of zeroing the audio or the visual stream
+  aug_mask_spans: 0      # random spans zeroed per stream, each 1..aug_mask_width steps
+  aug_mask_width: 4
+  aug_noise: 0.0         # Gaussian noise std (rows are L2-normalised, 768-d: one entry ~0.036)
   # caption space: iv2 (InternVideo2 text) | omni (teacher text)
   caption_space: iv2
   # OmniRetriever-7B teacher vectors (tools/omni_youcook2.py, HF teacher/omni_emb_full.npz).
