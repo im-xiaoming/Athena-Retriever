@@ -18,7 +18,7 @@ Rounds before 2026-10-11 are described in `NOTES.md` (2026-10-03/04, ONE-PEACE t
 
 | Date | Report | Runs | Main result |
 |---|---|---|---|
-| 2026-10-11 | [all training sets, regularisation + augmentation](reports/2026-10-11_all-data.md) | `all_b16`, `all_aug` | YouCook2 same as YouCook2-only, COIN unseen Acc 12.5 (best), UnAV-100 zero-shot mAP 23.0 (+6.3); overfits after epoch 8 |
+| 2026-10-11 | [all training sets, regularisation + augmentation, text stream](reports/2026-10-11_all-data.md) | `all_b16`, `all_aug`, `all_text` | `all_b16`: YouCook2 same as YouCook2-only, COIN unseen Acc 12.5, UnAV-100 zero-shot mAP 23.0 (+6.3), overfits after epoch 8. `all_aug`: no overfitting, same segmentation (R@0.5 54.2) and COIN unseen (12.7), CIDEr 84.6 (-6). `all_text`: running |
 
 ## Conventions
 
