@@ -12,6 +12,7 @@ dataset repos, using any number of machines at once. Nothing here trains a model
 | HT-Step (`--dataset htstep`) | `nguyenminh04/htstep-videos` | `nguyenminh04/htstep-feats` | 11 chunks, 1000-1010 (1,005 videos: val_seen + about 900 train) |
 | YouCook2 | `nguyenminh04/uniav-youcook2-data` | same repo (`iv2_feats/`, teacher vectors) | 1,500 `.npz` |
 
+Benchmark test sets (DCASE, UnAV-100) and the original UniAV: `docs/BENCHMARK.md`.
 Dataset cards: `docs/hf_cards/`. Repos are public. Tokens (`HF_TOKEN`, ...) live in `.env`; never print or commit it.
 
 ## Flow

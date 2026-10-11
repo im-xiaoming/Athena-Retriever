@@ -47,3 +47,8 @@ OV-AVEL/
 cookies/
 data/anet/
 data/htstep/
+benchmark/*/onepeace_finetune_features_025s/
+benchmark/preds/
+data/dcase/
+data/unav100/
+ckpt/uniav/

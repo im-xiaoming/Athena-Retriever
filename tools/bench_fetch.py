@@ -1,7 +1,7 @@
 """Download the benchmark videos listed in benchmark/*.json and upload them to a HF dataset repo in tar shards.
 
 Resumable: a shard that already exists on the hub is skipped. Meant to run on Colab (cloud IPs need no cookies).
-  python tools/bench_fetch.py --json benchmark/dcase_all.json --prefix dcase --tmp /content/bench
+  python tools/bench_fetch.py --json benchmark/desed/dcase_all.json --prefix dcase --tmp /content/bench
 Ids look like <ytid> (UnAV100, whole video) or <ytid>_<start>_<end> (DCASE, a clip of the video).
 """
 import argparse, json, os, shutil, subprocess, tarfile, time

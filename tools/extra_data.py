@@ -11,7 +11,7 @@ build writes, from anno/<name>.json of the features repo (tools/coin_hub.py plan
                                   centred on the joint YouCook2 + COIN mean (data/youcookii/caption_emb_iv2j.npz),
                                   so every dataset shares one text space
 Training videos that are held out anywhere are dropped: YouCook2 validation, COIN test_seen / test_unseen,
-the benchmarks (benchmark/unav100_all.json, benchmark/dcase_all.json) and the other dataset's validation videos.
+the benchmarks (benchmark/unav100/unav100_all.json, benchmark/desed/dcase_all.json) and the other dataset's validation videos.
 --upload puts both files in the features repo (anno/annotations.json, text_feats/caption_emb_iv2j.npz).
 """
 import argparse
@@ -50,7 +50,7 @@ def held_out():
         out = {k for k, v in json.load(f)['database'].items() if v['subset'].lower() == 'validation'}
     with open(os.path.join(ROOT, 'data', 'coin', 'coin_anno.json')) as f:
         out |= {k for k, v in json.load(f)['videos'].items() if v['role'] != 'train'}
-    for b in ('unav100_all.json', 'dcase_all.json'):
+    for b in ('unav100/unav100_all.json', 'desed/dcase_all.json'):
         with open(os.path.join(ROOT, 'benchmark', b)) as f:
             out |= {k[:11] for k in json.load(f)['database']}   # DCASE ids are "<youtube id>_<start>_<end>"
     for n in REPOS:
