@@ -1,5 +1,7 @@
 # Athena architecture
 
+Diagram: `docs/architecture.drawio` (editable in draw.io; PNG export `docs/architecture.png`). Losses with formulas: `README.md`.
+
 Source of truth: `libs/modeling/event_archs.py` (model, losses, inference), `libs/modeling/multimodal_backbones.py`
 (backbone), `athena/` (production wrapper), `configs/youcook2_event.yaml` (sizes and weights quoted below).
 Sizes are for the default config: 256 steps, `embd_dim = head_dim = 512`, 4 attention heads.
