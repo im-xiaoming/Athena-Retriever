@@ -100,9 +100,10 @@ to 256 steps (speed jitter), dropping the audio or the visual stream, masking sh
 ## Results
 
 Every run, report and comparison: [`experiments/README.md`](experiments/README.md). Latest round (2026-10-11,
-all four training sources): YouCook2 R@0.5 54.0, CIDEr 90.7, grounding R1@0.5 45.7, COIN unseen-task accuracy 12.5;
-zero-shot on UnAV-100 class-agnostic mAP 23.0 (the original UniAV, trained on that set: 55.9), see
-[`docs/BENCHMARK.md`](docs/BENCHMARK.md).
+all four training sources): `all_b16` YouCook2 R@0.5 54.0, CIDEr 90.7, grounding R1@0.5 45.7, COIN unseen-task
+accuracy 12.5; zero-shot on UnAV-100 class-agnostic mAP 23.0 (the original UniAV, trained on that set: 55.9), see
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md). With the sentence as a third backbone stream (`model.text_stream: true`,
+run `all_text`): grounding R1@0.5 49.1, COIN unseen accuracy 14.2, R@0.5 54.6, CIDEr 88.5, at ~2.8x the training time.
 
 Notes for reading the numbers:
 - Seed noise: about ±1.5 R@0.5, ±2 CIDEr, ±0.003 `txt_sim`; smaller differences are noise.
