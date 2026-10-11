@@ -414,12 +414,15 @@ def print_row(ep, t, lr, vals, mark):
 
 
 def build_loaders(cfg, rng):
-    """YouCook2 train / val, plus COIN (cfg['coin']): its seen-task training videos joined to the train set
-    when coin.train, and its test sets for the open-vocabulary scores when coin.eval.
+    """YouCook2 train / val, plus more training sources: COIN's seen-task training videos when coin.train
+    (cfg['coin'], whose test sets also give the open-vocabulary scores when coin.eval), and every
+    cfg['extra_train'] source with ratio > 0 (ActivityNet Captions, HT-Step: tools/extra_data.py), read by the
+    same dataset class from YouCook2-format files, training subset only.
 
-    Returns ds (YouCook2 train), dv, dl (train loader), dlv, dc (COIN train or None), ov {name: (loader, ds)}.
-    With COIN, every batch draws coin.batch_ratio of its videos from COIN on average, and an epoch has
-    as many batches as YouCook2 alone would have / (1 - batch_ratio).
+    Returns ds (YouCook2 train), dv, dl (train loader), dlv, extra {name: train dataset}, ov {name: (loader, ds)}.
+    Every batch draws each source's ratio of its videos from it on average (coin.batch_ratio, extra_train.<name>.ratio),
+    YouCook2 the rest, and an epoch has as many batches as YouCook2 alone would have / its share.
+    Source ids (pool_src) follow the order YouCook2 0, COIN, then the extra sources.
     """
     ds = YouCook2CaptionDataset(True, cfg['train_split'], **cfg['dataset'])
     dv = YouCook2CaptionDataset(False, cfg['val_split'], **cfg['dataset'])
@@ -427,15 +430,29 @@ def build_loaders(cfg, rng):
     have_coin = bool(cc) and os.path.exists(cc['anno_file']) and os.path.isdir(cc['iv2_folder'])
     common = dict(cfg['dataset'], anno_file=cc.get('anno_file'), label_emb_file=cc.get('label_emb_file'),
                   iv2_folder=cc.get('iv2_folder'))
-    dc, train_set, sampler = None, ds, RandomSampler(ds)
+    extra, ratio = {}, {}
     if cc.get('train'):
         assert have_coin, 'coin.train needs %s and %s (tools/coin_data.py)' % (cc.get('anno_file'), cc.get('iv2_folder'))
-        dc = CoinCaptionDataset(True, ['train'], pad_omni=ds.omni, **common)
-        dc.pool_offset = len(ds.pool_text)
-        train_set = torch.utils.data.ConcatDataset([ds, dc])
-        r = cc.get('batch_ratio', 0.5)
-        w = torch.cat((torch.full((len(ds),), (1 - r) / len(ds)), torch.full((len(dc),), r / len(dc))))
-        sampler = torch.utils.data.WeightedRandomSampler(w.double(), int(round(len(ds) / (1 - r))), generator=rng)
+        extra['coin'] = CoinCaptionDataset(True, ['train'], pad_omni=ds.omni, **common)
+        ratio['coin'] = cc.get('batch_ratio', 0.5)
+    for name, ec in (cfg.get('extra_train') or {}).items():
+        if ec.get('ratio', 0) > 0:
+            extra[name] = YouCook2CaptionDataset(True, cfg['train_split'], **dict(
+                cfg['dataset'], json_file=ec['json_file'], caption_emb_file=ec['caption_emb_file'],
+                iv2_folder=ec['iv2_folder'], omni_emb_file=None, pad_omni=ds.omni))
+            ratio[name] = ec['ratio']
+    train_set, sampler = ds, RandomSampler(ds)
+    if extra:
+        offset = len(ds.pool_text)
+        for i, d in enumerate(extra.values()):
+            d.source, d.pool_offset = i + 1, offset
+            offset += len(d.pool_text)
+        r0 = 1 - sum(ratio.values())
+        assert r0 > 0, 'the extra sources take the whole batch: %s' % ratio
+        train_set = torch.utils.data.ConcatDataset([ds, *extra.values()])
+        w = torch.cat([torch.full((len(ds),), r0 / len(ds))]
+                      + [torch.full((len(d),), ratio[n] / len(d)) for n, d in extra.items()])
+        sampler = torch.utils.data.WeightedRandomSampler(w.double(), int(round(len(ds) / r0)), generator=rng)
     dl = DataLoader(train_set, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
                     sampler=sampler, collate_fn=trivial_batch_collator,
                     worker_init_fn=worker_init_reset_seed, drop_last=True, generator=rng,
@@ -448,7 +465,7 @@ def build_loaders(cfg, rng):
             d = CoinCaptionDataset(False, [role], **common)
             ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
                                    sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
-    return ds, dv, dl, dlv, dc, ov
+    return ds, dv, dl, dlv, extra, ov
 
 
 def eval_only(a, model, dlv, dev, pool_raw, pool_text, ov=None):
@@ -536,12 +553,15 @@ def main(a):
 
 
     # ======================================= LOADER =======================================================
-    ds, dv, dl, dlv, dc, ov = build_loaders(cfg, rng) # dataset_train, dataset_val, loader_train, loader_val, _, _
+    ds, dv, dl, dlv, extra, ov = build_loaders(cfg, rng) # dataset_train, dataset_val, loader_train, loader_val, _, _
     
     print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
-    if dc is not None:
-        print('COIN train   : %d videos of seen tasks, %d labels; %.0f%% of every batch, %d batches per epoch'
-              % (len(dc), len(dc.pool_text), 100 * cfg['coin'].get('batch_ratio', 0.5), len(dl)), flush=True)
+    for name, d in extra.items():
+        r = cfg['coin'].get('batch_ratio', 0.5) if name == 'coin' else cfg['extra_train'][name]['ratio']
+        print('%-12s : %d training videos, %d unique captions, %.0f%% of every batch' % (
+            name, len(d), len(d.pool_text), 100 * r), flush=True)
+    if extra:
+        print('Batches      : %d per epoch, YouCook2 the rest of every batch' % len(dl), flush=True)
     for name, (_, d) in ov.items():
         print('COIN %-7s : %d videos (open-vocabulary scores, %d labels in the bank)' % (name, len(d), len(d.labels)),
               flush=True)
@@ -564,29 +584,30 @@ def main(a):
     model = EventCaptionTransformer(**cfg['model']).to(dev)
     print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
 
-    # the caption pool comes from the TRAIN split only; val captions are never used. With COIN it also
-    # holds the labels of the seen-task training videos (pool_src 1); YouCook2 captioning is still scored
-    # against the YouCook2 captions only (pool_raw)
+    # the caption pool comes from the TRAIN split only; val captions are never used. With other sources it
+    # also holds their training captions (COIN labels, ActivityNet / HT-Step sentences; pool_src 1, 2, ...);
+    # YouCook2 captioning is still scored against the YouCook2 captions only (pool_raw)
     pool_raw = torch.from_numpy(ds.pool_train).to(dev)
     joint, src = pool_raw, torch.zeros(len(pool_raw), dtype=torch.long, device=dev)
-    if dc is not None:
-        assert ds.caption_space == 'iv2', 'COIN joins the InternVideo2 caption space only'
-        joint = torch.cat((pool_raw, torch.from_numpy(dc.pool_emb).to(dev)))
-        src = torch.cat((src, torch.ones(len(dc.pool_emb), dtype=torch.long, device=dev)))
-    other = ds.other if ds.other is not None else (dc.other if dc is not None else None)
+    if extra:
+        assert ds.caption_space == 'iv2', 'other sources join the InternVideo2 caption space only'
+        joint = torch.cat([pool_raw] + [torch.from_numpy(d.pool_emb).to(dev) for d in extra.values()])
+        src = torch.cat([src] + [torch.full((len(d.pool_emb),), d.source, dtype=torch.long, device=dev)
+                                 for d in extra.values()])
+    other = next((d.other for d in (ds, *extra.values()) if d.other is not None), None)
     model.set_caption_pool(joint, src, None if other is None else torch.from_numpy(other).to(dev))
     if ds.caption_space != 'iv2':
         model.pool_metric = torch.from_numpy(ds.pool_emb).to(dev)
         print('Captions     : trained and picked in %s space (%d-d); metrics in InternVideo2 text space'
               % (ds.caption_space, pool_raw.shape[1]), flush=True)
     if ds.omni:
-        pad = len(joint) - len(ds.omni_text_pool)   # COIN labels have no teacher vector
+        pad = len(joint) - len(ds.omni_text_pool)   # only YouCook2 captions have teacher vectors
         model.set_omni_pool(torch.from_numpy(np.concatenate((ds.omni_text_pool, np.zeros((pad, ds.omni_dim), np.float16)))).to(dev),
                             torch.from_numpy(np.concatenate((ds.omni_text_ok, np.zeros(pad, bool)))).to(dev),
                             torch.from_numpy(ds.omni_av_pool).to(dev),
                             torch.as_tensor(ds.av_text_idx, dtype=torch.long, device=dev))
     print('Caption pool : %d unique train captions%s' % (
-        len(ds.pool_text), ' + %d COIN labels' % len(dc.pool_text) if dc is not None else ''), flush=True)
+        len(ds.pool_text), ''.join(' + %d %s' % (len(d.pool_text), n) for n, d in extra.items())), flush=True)
     if ov:
         use_ov_columns()
     if a.eval:

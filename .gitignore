@@ -45,3 +45,5 @@ OV-AVEL/
 
 # YouTube login cookies (yt-dlp on the PC): local only
 cookies/
+data/anet/
+data/htstep/

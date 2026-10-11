@@ -1,6 +1,7 @@
 #!/bin/bash
 # Colab A100: the open-vocabulary runs of docs/PLAN_openvocab.md, one after the other.
-#   bash tools/colab_ov.sh setup      # clone, install, build NMS, fetch YouCook2 + COIN features (HF token in /content/hf_token)
+#   BRANCH=multi-data bash tools/colab_ov.sh setup   # clone, install, build NMS, fetch YouCook2 + COIN + ActivityNet +
+#                                                    # HT-Step features (HF token in /content/hf_token)
 #   bash tools/colab_ov.sh queue R0 R1 R2 R3 R4
 # Logs: /content/ov_logs/<run>.log (one table row per epoch). touch /content/ov_stop to stop after the current run;
 # a run is stopped at once by killing its train.py. Two queues can run at once (the A100 is
@@ -10,7 +11,7 @@ REPO=/content/Athena-Retriever
 case "$1" in
 setup)
   cd /content
-  [ -d Athena-Retriever ] || git clone -q -b ov-refine https://github.com/im-xiaoming/Athena-Retriever.git Athena-Retriever
+  [ -d Athena-Retriever ] || git clone -q -b ${BRANCH:-multi-data} https://github.com/im-xiaoming/Athena-Retriever.git Athena-Retriever
   cd Athena-Retriever && git pull -q && git log --oneline -1
   pip install -q pycocoevalcap h5py tensorboard 2>&1 | tail -1
   java -version 2>&1 | head -1 || echo "no java: METEOR will be skipped"
@@ -29,6 +30,8 @@ os.system('cp %s/teacher/omni_emb_full.npz data/youcookii/' % d)
 print('youcook2 features:', len(os.listdir('data/youcookii/iv2_feats')))
 PY
   python tools/coin_data.py fetch --cache /content/hf_coin
+  python tools/extra_data.py fetch anet --cache /content/hf_anet
+  python tools/extra_data.py fetch htstep --cache /content/hf_htstep
   ;;
 queue)
   shift
@@ -43,6 +46,7 @@ queue)
       R2) ARGS="coin.train=true model.text_proj=none" ;;
       R3) ARGS="coin.train=true model.text_proj=none model.train_cfg.loss_weight_other=1.0" ;;
       R4) ARGS="coin.train=true model.text_proj=none model.train_cfg.loss_weight_other=1.0 model.pyramid_attn=self" ;;
+      ALL) ARGS="coin.train=true coin.batch_ratio=0.2 extra_train.anet.ratio=0.3 extra_train.htstep.ratio=0.1" ;;  # every training set
       E1) ARGS="train_cfg.ema_decay=0.999" ;;                               # localization options on R0
       E2) ARGS="dataset.center_sample_radius=1.5" ;;
       *) echo "unknown run $run"; continue ;;

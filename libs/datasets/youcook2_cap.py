@@ -35,8 +35,10 @@ class YouCook2CaptionDataset(Dataset):
     """One item per video: its features resampled to max_seq_len steps, its GT steps in grid units,
     the training targets of every pyramid point and the caption vectors of its steps (see __getitem__).
 
-    Datasets for other sources (CoinCaptionDataset) subclass it and only replace _load_captions and
-    _load_json_db.
+    Other sources in the same file formats (ActivityNet Captions, HT-Step: tools/extra_data.py) use it
+    as it is; COIN (CoinCaptionDataset) subclasses it and only replaces _load_captions and _load_json_db.
+    pad_omni: a training source without teacher vectors next to one that has them; its items carry
+    cap_av_idx -1 so a mixed batch has the key everywhere.
     """
 
     def __init__(
@@ -44,7 +46,7 @@ class YouCook2CaptionDataset(Dataset):
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
         crop_ratio, num_classes, force_upsampling=True, omni_emb_file=None, feat_source='iv2',
         iv2_folder='./data/youcookii/iv2_feats', iv2_video_keys=('v768',), iv2_l2norm=True,
-        iv2_rows_per_sec=1, caption_space='iv2', center_sample_radius=0.0, **legacy,
+        iv2_rows_per_sec=1, caption_space='iv2', center_sample_radius=0.0, pad_omni=False, **legacy,
     ):
         unknown = set(legacy) - LEGACY_KEYS
         assert not unknown, 'unknown dataset options %s' % sorted(unknown)
@@ -71,8 +73,10 @@ class YouCook2CaptionDataset(Dataset):
         self._load_captions(caption_emb_file)
 
         self.data_list = self._load_json_db(json_file)
+        assert self.data_list, 'no %s video of %s has both features (%s) and caption vectors' % (split, json_file, iv2_folder)
         self._build_pool()
         self.omni = bool(omni_emb_file) and is_training   # only the train split needs the teacher
+        self.pad_omni = pad_omni and not self.omni
         if self.omni:
             self._load_omni(omni_emb_file)
         assert caption_space in ('iv2', 'omni'), 'caption_space %s (ONE-PEACE was removed)' % caption_space
@@ -284,6 +288,8 @@ class YouCook2CaptionDataset(Dataset):
             for i in range(item['n_cap']):
                 aidx[i] = self.cap_av_idx.get('%s#%d' % (vid, i), -1)
             data_dict['cap_av_idx'] = torch.from_numpy(aidx)
+        elif self.pad_omni:
+            data_dict['cap_av_idx'] = torch.full((NMAX,), -1, dtype=torch.int64)
         data_dict['cap_text'] = texts
         data_dict['source'] = self.source
         # original boundaries in seconds, used only for scoring

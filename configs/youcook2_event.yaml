@@ -61,6 +61,19 @@ coin:
   anno_file: ./data/coin/coin_anno.json
   label_emb_file: ./data/coin/label_emb_iv2j.npz
   iv2_folder: ./data/coin/iv2_feats
+# more training videos in YouCook2's file formats (tools/extra_data.py build / fetch), read by the same dataset
+# class, training subset only; ratio = share of every batch drawn from the source (YouCook2 gets the rest), 0 = off
+extra_train:
+  anet:
+    ratio: 0.0
+    json_file: ./data/anet/annotations.json
+    caption_emb_file: ./data/anet/caption_emb_iv2j.npz
+    iv2_folder: ./data/anet/iv2_feats
+  htstep:
+    ratio: 0.0
+    json_file: ./data/htstep/annotations.json
+    caption_emb_file: ./data/htstep/caption_emb_iv2j.npz
+    iv2_folder: ./data/htstep/iv2_feats
 model:
   backbone_type: convTransformer
   backbone_arch:

@@ -13,7 +13,6 @@ import json
 import os
 
 import numpy as np
-import torch
 
 from .youcook2_cap import NMAX, YouCook2CaptionDataset
 
@@ -26,9 +25,8 @@ class CoinCaptionDataset(YouCook2CaptionDataset):
         common = {k: v for k, v in common.items()
                   if k not in ('json_file', 'caption_emb_file', 'iv2_folder', 'omni_emb_file')}
         super().__init__(is_training, list(roles), anno_file, label_emb_file, iv2_folder=iv2_folder,
-                         omni_emb_file=None, **common)
+                         omni_emb_file=None, pad_omni=pad_omni, **common)
         self.source = 1
-        self.pad_omni = pad_omni   # the model trains with the YouCook2-only teacher: COIN steps have no clip vector
 
     def _load_captions(self, path):
         """Every COIN step label with its vector; per-video caption keys are filled in _load_json_db."""
@@ -60,9 +58,3 @@ class CoinCaptionDataset(YouCook2CaptionDataset):
                         'labels': np.arange(len(segs), dtype=np.int64), 'n_cap': len(segs),
                         'task': v['task']})
         return tuple(out)
-
-    def __getitem__(self, idx):
-        d = super().__getitem__(idx)
-        if self.pad_omni:
-            d['cap_av_idx'] = torch.full((NMAX,), -1, dtype=torch.int64)
-        return d

@@ -54,7 +54,13 @@ Rules that make machines interchangeable:
 
 ## Features in training
 
-`libs/datasets/youcook2_cap.py` (YouCook2) and `libs/datasets/coin_cap.py` (COIN) read the features.
+`libs/datasets/youcook2_cap.py` reads YouCook2, ActivityNet Captions and HT-Step (one class, the same file
+formats); `libs/datasets/coin_cap.py` subclasses it for COIN (step labels, seen/unseen roles).
+`tools/extra_data.py build anet|htstep --upload` (PC, GPU) turns the planned annotations into YouCook2-format
+`anno/annotations.json` and InternVideo2 caption vectors `text_feats/caption_emb_iv2j.npz` (joint YouCook2 + COIN
+centring) in the features repo; training videos held out anywhere (YouCook2 val, COIN test, UnAV-100, DCASE, the
+other dataset's val) are dropped. `tools/extra_data.py fetch anet|htstep` puts features and both files in
+`data/<name>/`; `extra_train.<name>.ratio` in the config sets each source's share of a batch.
 Design decisions for mixing datasets (one shared expert, caption pool per dataset, 1:1 source batches, GPT-2
 caption generator with a source tag) and the COIN seen/unseen split are in `docs/PLAN_openvocab.md`.
 Evaluation always includes YouCook2 val (394 videos); seed noise is about ±1.5 R@0.5, ±2 CIDEr.
