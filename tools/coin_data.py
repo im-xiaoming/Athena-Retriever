@@ -47,7 +47,7 @@ def fetch(a):
     n = 0
     for t in tars:
         with tarfile.open(os.path.join(d, 'feats', t)) as tf:
-            members = [m for m in tf.getmembers() if m.name.endswith('.npz')]
+            members = [m for m in tf.getmembers() if m.name.endswith('.npz') and m.size > 0]   # empty: failed extraction
             tf.extractall(feats, members=members)
             n += len(members)
     print('%d videos from %d tars -> %s' % (n, len(tars), feats), flush=True)
