@@ -15,7 +15,7 @@ setup)
   cd Athena-Retriever && git pull -q && git log --oneline -1
   pip install -q pycocoevalcap h5py tensorboard 2>&1 | tail -1
   java -version 2>&1 | head -1 || echo "no java: METEOR will be skipped"
-  (cd libs/utils && python setup.py install --user > /content/nms_build.log 2>&1) && python -c "import nms_1d_cpu" && echo "nms ok"
+  (cd libs/utils && python setup.py install --user > /content/nms_build.log 2>&1) && python -c "import torch, nms_1d_cpu" && echo "nms ok"
   export HF_TOKEN=$(cat /content/hf_token)
   python - <<'PY'
 import os, tarfile

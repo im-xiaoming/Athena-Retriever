@@ -118,7 +118,8 @@ Optimiser: AdamW, lr 1e-4, wd 1e-4, grad clip 1.0, batch 4, 10 epochs (2 warm-up
 
 1. `score = sigmoid(event)^0.7 * sigmoid(IoU)^0.3` per point (`iou_power: 0.3`), keep points above 0.05 (at least one), top 500.
 2. Segment of a point = `[p - off0 * stride, p + off1 * stride]`; drop those shorter than `duration_thresh`.
-3. Class-agnostic soft-NMS (IoU 0.7, sigma 0.5), at most 100 events; convert steps to seconds.
+3. Class-agnostic Gaussian soft-NMS (`score *= exp(-IoU^2 / 0.5)`, the IoU 0.7 threshold only applies to hard NMS), at most 100
+   events; convert steps to seconds.
 4. `q = SegmentContext(...)` for each kept event.
 5. **Caption, retrieval:** cosine of `q` with the pool in the event space, top 20, softmax with the learned scale as weights, choose the
    candidate with the highest weighted agreement with the others in InternVideo2 text space (minimum Bayes risk). The result keeps 3 alternatives.
