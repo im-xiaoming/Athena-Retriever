@@ -18,7 +18,8 @@ OUT = os.path.join(ROOT, 'experiments', 'RESULTS.md')
 COLS = [('R@0.5', 'R@0.5', '%.2f'), ('R@0.7', 'R@0.7', '%.2f'), ('mIoU', 'mIoU', '%.2f'),
         ('CIDEr', 'CIDEr', '%.1f'), ('METEOR', 'METEOR', '%.2f'),
         ('txt_sim', 'txt_sim', '%.3f'), ('ret_sim (old)', 'ret_sim', '%.3f'), ('top1 (old)', 'ret_sim[top1]', '%.3f'),
-        ('best seg R@0.5', None, '%.2f')]
+        ('G R1@0.5', 'G R1@0.5', '%.2f'), ('COIN unseen Acc', 'unseen/Acc', '%.2f'), ('COIN unseen F1', 'unseen/F1', '%.2f'),
+        ('COIN unseen G R1@0.5', 'unseen/G R1@0.5', '%.2f'), ('best seg R@0.5', None, '%.2f')]
 
 
 def load():
@@ -46,7 +47,9 @@ def main():
              'is the best R@0.5 seen during training. `*` marks the best value per column.',
              'Run-to-run noise (seed only): R@0.5 about 1.5, CIDEr about 2, ret_sim / txt_sim about 0.003.',
              '`txt_sim` (from 2026-10-05) is caption similarity in InternVideo2 text space; `ret_sim (old)` is the',
-             'same in ONE-PEACE space, used before. The two are not comparable.', ''
+             'same in ONE-PEACE space, used before. The two are not comparable.',
+             '`G R1@0.5` (YouCook2 grounding) and the COIN columns exist from 2026-10-07 (grounding head, COIN test sets).',
+             'Reports per training round, with comparisons and the benchmark: `experiments/README.md`.', ''
              '| run | host | commit | teacher | overrides | ' + ' | '.join(h for h, _, _ in COLS) + ' | note |',
              '|' + '---|' * (6 + len(COLS))]
     for r in rows:
