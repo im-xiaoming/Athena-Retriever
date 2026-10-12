@@ -51,6 +51,13 @@ ground head. A video alone runs with a learned null text token (event, boundary 
 heads); every ground query runs the pyramid again with its sentence, and the ground head reads
 those features. The stem is shared, the bridges start closed (zero gates).
 
+One-to-one score (train_cfg.loss_weight_o2o: w > 0): a second event head trained so that, for every GT step,
+only the point whose predicted segment matches the step best is positive (target = that IoU); every other point,
+including the ones that predict a piece of the same step, is negative. The event head's targets are one-to-many
+(every point inside a step), so its score says "inside some step", not "this is the segment for the step", which
+is what picking the top K needs (YOLOv10's dual assignment, DETR's matching). At inference the ranking score uses
+sigmoid(o2o) instead of sigmoid(event) with weight test_cfg.o2o_weight (1: o2o only, 0: the event head only).
+
 Source token (model.source_token: n > 0, n = number of training sources): one learned vector per dataset (YouCook2 0,
 COIN 1, then the extra sources), added to the pyramid features read by the event and boundary heads, so each dataset
 can keep its own idea of what an event is and where it starts. Zero init; an item without 'source' uses 0 (YouCook2).
@@ -300,6 +307,10 @@ class EventCaptionTransformer(nn.Module):
         self.ground_neg = train_cfg.get('ground_neg_per_video', 2)
         self.ground_neg_max_cos = train_cfg.get('ground_neg_max_cos', 0.7)
         self.w_other = train_cfg.get('loss_weight_other', 0.0)
+        # one-to-one score head (see the module docstring); o2o_weight mixes it into the ranking score
+        self.w_o2o = train_cfg.get('loss_weight_o2o', 0.0)
+        self.o2o_min_iou = train_cfg.get('o2o_min_iou', 0.3)
+        self.o2o_weight = test_cfg.get('o2o_weight', 1.0)
         self.pool_raw = self.pool_src = self.other_raw = None
         self.omni_dim = omni_dim
         # text as the third backbone stream: only the ground head feeds it sentences
@@ -324,6 +335,9 @@ class EventCaptionTransformer(nn.Module):
                                        head_num_layers, head_kernel_size, head_with_ln)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, clip_dim, text_proj)
+        if self.w_o2o > 0:
+            self.o2o_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
+                                      head_with_ln, train_cfg['cls_prior_prob'])
         self.seg_ctx = SegmentContext(head_dim)
         if self.w_ground > 0:
             assert clip_dim == 512, 'the ground head takes InternVideo2 text queries (caption_space iv2)'
@@ -423,6 +437,8 @@ class EventCaptionTransformer(nn.Module):
         # Bounding Head
         # tuple(tensor(B, T_l, 2)), tuple(tensor(B, T_l, 1))
         bd, qu = self.bound_head(fe, msk)
+        # one-to-one score, read by losses and inference
+        self._o2o = (torch.cat(self.o2o_head(fe, msk), dim=1).squeeze(-1) if self.w_o2o > 0 else None)   # (B, P)
         bd = torch.cat(bd, dim=1)                                        # (B, P, 2)
         qu = torch.cat(qu, dim=1).squeeze(-1)                            # (B, P)
         
@@ -587,12 +603,39 @@ class EventCaptionTransformer(nn.Module):
                     oa = F.cross_entropy(la, ai[ok])
             out['omni_txt_loss'], out['omni_av_loss'] = ot, oa
             total = total + self.w_omni_txt * ot + self.w_omni_av * oa
+        # 5b. one-to-one score: per GT step only its best-matching point is positive
+        if self.w_o2o > 0:
+            out['o2o_loss'] = self.o2o_loss(video_list, valid, bd)
+            total = total + self.w_o2o * out['o2o_loss']
         # 6. grounding: each caption finds its own span, other videos' captions find none
         if self.w_ground > 0:
             out['ground_loss'] = self.ground_loss(video_list, gt_cls, cap_pool, valid)
             total = total + self.w_ground * out['ground_loss']
         out['final_loss'] = total
         return out
+
+    def o2o_loss(self, video_list, valid, bd):
+        """Focal loss of the one-to-one head. For every GT step, the valid point whose predicted segment (boundary
+        head, detached) has the highest IoU with it is the only positive, with target = that IoU (none when below
+        o2o_min_iou); all other points are negatives. Normalised by the number of positives."""
+        oo = self._o2o
+        tgt = torch.zeros_like(oo)
+        with torch.no_grad():
+            for b, x in enumerate(video_list):
+                seg = x['segments'].to(oo.device).float()
+                if seg.numel() == 0:
+                    continue
+                pts = torch.cat(x['points'], dim=0).to(oo.device)        # (P, 4): t, range lo, range hi, stride
+                left = pts[:, 0] - bd[b, :, 0] * pts[:, 3]
+                right = pts[:, 0] + bd[b, :, 1] * pts[:, 3]
+                inter = (torch.min(right[:, None], seg[None, :, 1]) - torch.max(left[:, None], seg[None, :, 0])).clamp(min=0)
+                union = (right - left)[:, None] + (seg[:, 1] - seg[:, 0])[None] - inter
+                iou = (inter / union.clamp(min=1e-6)).masked_fill(~valid[b][:, None], 0)   # (P, N)
+                val, best = iou.max(0)                                    # best point of each step
+                keep = val >= self.o2o_min_iou
+                tgt[b, best[keep]] = torch.max(tgt[b, best[keep]], val[keep])
+        n = max(int((tgt > 0).sum()), 1)
+        return sigmoid_focal_loss(oo[valid], tgt[valid], reduction='sum') / n
 
     def ground(self, vid, query):
         """Ground-head logits (Q, P) on the last forward pass; vid (Q,) batch index of each query,
@@ -645,13 +688,19 @@ class EventCaptionTransformer(nn.Module):
         from ..utils import batched_nms
         a = self.iou_power
         prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
+        # candidates are picked by the event-head score (score_thresh is calibrated for it); with the
+        # one-to-one head they are ranked by its score (o2o_weight 1) or a mix of both
+        rank = prob
+        if self._o2o is not None:
+            w = self.o2o_weight
+            rank = (ev.sigmoid().pow(1 - w) * self._o2o.sigmoid().pow(w)).pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
         out = []
         for b, v in enumerate(video_list):
             pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, range lo, range hi, stride
             keep = (prob[b] > self.test_score_thresh).nonzero(as_tuple=True)[0]
             if keep.numel() == 0:
                 keep = prob[b].topk(1).indices
-            sc = prob[b][keep]
+            sc = rank[b][keep]
             k = min(self.test_max_seg * 5, keep.numel())
             sc, order = sc.topk(k)
             keep = keep[order]

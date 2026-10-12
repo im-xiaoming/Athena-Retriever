@@ -665,6 +665,8 @@ def main(a):
     cfg['model']['clip_dim'] = ds.pool_train.shape[1]   # caption space (dataset.caption_space)
     if cfg['model']['train_cfg'].get('loss_weight_other', 0) > 0:
         use_other_column()
+    if cfg['model']['train_cfg'].get('loss_weight_o2o', 0) > 0:
+        _add_loss_columns(('o2o', 'o2o_loss', 6, '.3f'))
     if cfg['model']['train_cfg'].get('loss_weight_ground', 0) > 0:
         use_ground_columns()
         

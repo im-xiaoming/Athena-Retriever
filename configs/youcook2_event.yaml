@@ -129,6 +129,9 @@ model:
     loss_weight_ground: 1.0
     # steps outside every event pulled to the text "other" (OV-AVEL); 0 = off
     loss_weight_other: 0.0
+    # one-to-one score head: per GT step only the point whose predicted segment matches it best is positive; 0 = off
+    loss_weight_o2o: 0.0
+    o2o_min_iou: 0.3     # a step whose best predicted segment is below this IoU gives no positive
     dropout: 0.0
     droppath: 0.1
   test_cfg:
@@ -136,6 +139,7 @@ model:
     duration_thresh: 0.05
     max_seg_num: 100
     iou_power: 0.3
+    o2o_weight: 1.0      # with the one-to-one head: 1 ranks by it alone, 0 by the event head alone
 train_cfg:
   clip_grad_l2norm: 1.0
   ema_decay: 0.0       # > 0 (e.g. 0.999): evaluate and save an exponential moving average of the weights
