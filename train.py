@@ -291,8 +291,10 @@ def evaluate_ov(model, loader, device, labels, label_emb, other=None):
     F1     : the model's top-k events (k = number of GT steps), each named by its nearest label; a hit is
              an unmatched GT step with the same label and IoU >= 0.5; an event named "other" is dropped
     G R1@t : grounding (ground head): each step label as the query must find its own span, IoU >= t
+    R@t    : class-agnostic segmentation, scored like YouCook2 (see seg_counts)
     """
     model.eval()
+    seg = SegCounts()
     bank = model.embed_head.embed_captions(torch.as_tensor(label_emb, device=device).float())
     names = list(labels)
     if other is not None:
@@ -319,23 +321,82 @@ def evaluate_ov(model, loader, device, labels, label_emb, other=None):
                 if best[0] >= 0.5:
                     tp += 1; used.add(best[1])
             n_gt += len(gts)
+            seg.add(r)
             if r.get('ground_segments') is not None:
                 g_ious += [iou(p, g) for p, g in zip(r['ground_segments'].tolist(), gts)]
     model.train()
     out = {'Acc': 100.0 * float(np.mean(acc)) if acc else 0.0, 'F1': 100.0 * 2 * tp / max(n_pred + n_gt, 1)}
+    out.update(seg.scores())
     if g_ious:
         for t in (0.5, 0.7):
             out['G R1@%.1f' % t] = 100.0 * float(np.mean([i >= t for i in g_ious]))
     return out
 
 
+class SegCounts:
+    """Class-agnostic segmentation scores, the same as YouCook2's R@t / mIoU in evaluate: per video keep as
+    many predictions (best first) as it has GT steps; a GT step counts at t when one of them has IoU >= t."""
+
+    def __init__(self, ths=(0.3, 0.5, 0.7)):
+        self.ths, self.cov, self.ious = ths, {t: 0 for t in ths}, []
+
+    def add(self, r):
+        gts = r['gt_segments']
+        preds = r['segments'][:min(len(gts), r['segments'].shape[0])].tolist()
+        for g in gts:
+            best = max((iou(p, g) for p in preds), default=0.0)
+            self.ious.append(best)
+            for t in self.ths:
+                self.cov[t] += best >= t
+
+    def scores(self):
+        n = max(len(self.ious), 1)
+        out = {'R@%.1f' % t: 100.0 * c / n for t, c in self.cov.items()}
+        out['mIoU'] = 100.0 * float(np.mean(self.ious)) if self.ious else 0.0
+        out['n_gt'] = len(self.ious)
+        return out
+
+
+@torch.no_grad()
+def evaluate_seg(model, loader, device):
+    """Segmentation only, on a held-out set of another dataset (ActivityNet / HT-Step validation)."""
+    model.eval()
+    w_ground, model.w_ground = model.w_ground, 0   # grounding is not scored here: skip its passes
+    seg = SegCounts()
+    for batch in loader:
+        for x in batch:
+            x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
+        for r in model(batch):
+            seg.add(r)
+    model.w_ground = w_ground
+    model.train()
+    return seg.scores()
+
+
 def ov_scores(model, ov, dev):
-    """evaluate_ov on every COIN test set: {'seen/Acc': ..., 'unseen/G R1@0.5': ...}."""
+    """Every held-out set besides YouCook2 val: COIN test sets (open-vocabulary scores + segmentation) and
+    the other sources' validation sets (segmentation), keys '<set>/<metric>' ('unseen/Acc', 'anet/R@0.5').
+    'R@0.5 avg' is the mean R@0.5 over the datasets (COIN seen + unseen as one), filled in by add_seg_avg."""
     out = {}
     for name, (loader, ds) in ov.items():
-        for k, v in evaluate_ov(model, loader, dev, ds.labels, ds.label_emb, ds.other).items():
+        res = (evaluate_ov(model, loader, dev, ds.labels, ds.label_emb, ds.other) if hasattr(ds, 'labels')
+               else evaluate_seg(model, loader, dev))
+        for k, v in res.items():
             out['%s/%s' % (name, k)] = v
     return out
+
+
+def add_seg_avg(m):
+    """m['coin/R@0.5'] = COIN seen and unseen pooled by GT count; m['R@0.5 avg'] = mean R@0.5 over YouCook2 and
+    every other dataset scored, when there is at least one."""
+    per = [m[k] for k in m if k.endswith('/R@0.5') and k.split('/')[0] not in ('unseen', 'seen', 'coin')]
+    coin = [k for k in ('unseen', 'seen') if '%s/R@0.5' % k in m]
+    if coin:
+        n = sum(m['%s/n_gt' % k] for k in coin)
+        m['coin/R@0.5'] = sum(m['%s/R@0.5' % k] * m['%s/n_gt' % k] for k in coin) / max(n, 1)
+        per.append(m['coin/R@0.5'])
+    if per:
+        m['R@0.5 avg'] = float(np.mean([m['R@0.5']] + per))
 
 
 # One log row per epoch, columns in groups. Each group: (title, columns); each column:
@@ -395,13 +456,21 @@ def use_ov_columns():
     _refresh_header()
 
 
+def use_seg_columns(names):
+    """Add R@0.5 on every other held-out dataset and their mean (YouCook2 included) to the table."""
+    cols = [('COIN', 'coin/R@0.5', 6, '.2f')] if 'unseen' in names or 'seen' in names else []
+    cols += [(n[:6], '%s/R@0.5' % n, 6, '.2f') for n in names if n not in ('unseen', 'seen')]
+    GROUPS.append(('R@0.5 other sets', cols + [('avg', 'R@0.5 avg', 6, '.2f')]))
+    _refresh_header()
+
+
 def use_other_column():
     """Add the "other" (background text) loss to the table."""
     _add_loss_columns(('other', 'other_loss', 6, '.3f'))
 
 
 def print_header():
-    print('Legend       : S = new best R@0.5, C = new best CIDEr (each saves its checkpoint)')
+    print('Legend       : S = new best R@0.5, C = new best CIDEr, A = new best R@0.5 avg (each saves its checkpoint)')
     print('               cos_rand = cosine to a random caption (floor), txt_sim = similarity of')
     print('               chosen caption to GT caption (InternVideo2 text space), CIDEr = word overlap')
     print(RULE)
@@ -470,6 +539,15 @@ def build_loaders(cfg, rng):
             d = CoinCaptionDataset(False, [role], **common)
             ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
                                    sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
+    # the other sources' validation sets, scored on segmentation whenever their files are here (ratio 0 too)
+    for name, ec in (cfg.get('extra_train') or {}).items():
+        if ec.get('eval', True) and os.path.exists(ec['json_file']) and os.path.isdir(ec['iv2_folder']):
+            d = YouCook2CaptionDataset(False, cfg['val_split'], **dict(
+                cfg['dataset'], json_file=ec['json_file'], caption_emb_file=ec['caption_emb_file'],
+                iv2_folder=ec['iv2_folder'], omni_emb_file=None))
+            if len(d):
+                ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
+                                       sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
     return ds, dv, dl, dlv, extra, ov
 
 
@@ -486,6 +564,7 @@ def eval_only(a, model, dlv, dev, pool_raw, pool_text, ov=None):
                              'sigma': float(rest[1]) if len(rest) > 1 else 0.5}
             m = evaluate(model, dlv, dev, pool_raw, pool_text, full=not a.fast)
             m.update(ov_scores(model, ov or {}, dev))
+            add_seg_avg(m)
             print('\niou_power %s  NMS %-14s' % (power, spec)
                   + '  '.join('%s %.3f' % (k, v) for k, v in m.items()), flush=True)
 
@@ -568,8 +647,11 @@ def main(a):
     if extra:
         print('Batches      : %d per epoch, YouCook2 the rest of every batch' % len(dl), flush=True)
     for name, (_, d) in ov.items():
-        print('COIN %-7s : %d videos (open-vocabulary scores, %d labels in the bank)' % (name, len(d), len(d.labels)),
-              flush=True)
+        if hasattr(d, 'labels'):
+            print('COIN %-7s : %d videos (open-vocabulary scores, %d labels in the bank)' % (name, len(d), len(d.labels)),
+                  flush=True)
+        else:
+            print('%-12s : %d validation videos (segmentation)' % (name, len(d)), flush=True)
     # the input width follows the feature source; stored in the run record's config
     cfg['model']['input_dim_V'], cfg['model']['input_dim_A'] = ds.feat_dims
     print('Features     : InternVideo2 %s + BEATs a768, %d row(s)/s, visual %d + audio %d channels' % (
@@ -613,8 +695,10 @@ def main(a):
                             torch.as_tensor(ds.av_text_idx, dtype=torch.long, device=dev))
     print('Caption pool : %d unique train captions%s' % (
         len(ds.pool_text), ''.join(' + %d %s' % (len(d.pool_text), n) for n, d in extra.items())), flush=True)
-    if ov:
+    if any(n in ov for n in ('unseen', 'seen')):
         use_ov_columns()
+    if ov:
+        use_seg_columns(list(ov))
     if a.init:   # fine-tune: start from these weights (new modules keep their init)
         sd = upgrade_state_dict(load_ckpt(a.init)['state_dict'])
         miss, unused = model.load_state_dict(sd, strict=False)
@@ -660,11 +744,14 @@ def main(a):
                 acc[k] = acc.get(k, 0.0) + v.detach().item()
         m = evaluate(net, dlv, dev, pool_raw, ds.pool_text)
         m.update(ov_scores(net, ov, dev))
+        add_seg_avg(m)
+        if 'R@0.5 avg' in m and 'R@0.5 avg' not in best:   # every dataset scored: best mean R@0.5 too
+            best['R@0.5 avg'] = (-1.0, 0, 'best_seg_avg')
         mark = ''
         for key, (val, _, name) in best.items():
             if m[key] > val:
                 best[key] = (m[key], ep, name)
-                mark += 'S' if key == 'R@0.5' else 'C'
+                mark += {'R@0.5': 'S', 'CIDEr': 'C'}.get(key, 'A')
                 torch.save({'epoch': ep, 'state_dict': net.state_dict(), 'metrics': m},
                            os.path.join(out_dir, name + '.pth.tar'))
         vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})   # val metrics + mean train losses
@@ -672,9 +759,9 @@ def main(a):
         rec.data['history'].append(dict(vals, epoch=ep + 1, seconds=round(time.time() - t0, 1)))
         rec.data['best'] = {k: {'value': v, 'epoch': e + 1, 'ckpt': n} for k, (v, e, n) in best.items()}
         rec.save()
-        # early stop: neither best R@0.5 nor best CIDEr has improved for `patience` epochs
+        # early stop: no best (R@0.5, CIDEr, R@0.5 avg) has improved for `patience` epochs
         if a.patience and ep - max(e for _, e, _ in best.values()) >= a.patience:
-            print('Early stop   : no new best R@0.5 or CIDEr for %d epochs' % a.patience, flush=True)
+            print('Early stop   : no new best %s for %d epochs' % (' / '.join(best), a.patience), flush=True)
             rec.data['stopped_early'] = ep + 1
             rec.save()
             break
@@ -691,6 +778,7 @@ def finalize(rec, model, dlv, dev, pool_raw, pool_text, ov=None):
     load_weights(model, os.path.join(rec.data['out_dir'], 'best_cap.pth.tar'))
     final = evaluate(model, dlv, dev, pool_raw, pool_text, full=True)
     final.update(ov_scores(model, ov or {}, dev))
+    add_seg_avg(final)
     rec.data['final_eval'] = dict(final, ckpt='best_cap')
     rec.data['finished'] = rec.data.get('finished') or time.strftime('%Y-%m-%d %H:%M:%S')
     rec.save()
