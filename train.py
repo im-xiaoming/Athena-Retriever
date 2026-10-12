@@ -672,6 +672,12 @@ def main(a):
         rec.data['history'].append(dict(vals, epoch=ep + 1, seconds=round(time.time() - t0, 1)))
         rec.data['best'] = {k: {'value': v, 'epoch': e + 1, 'ckpt': n} for k, (v, e, n) in best.items()}
         rec.save()
+        # early stop: neither best R@0.5 nor best CIDEr has improved for `patience` epochs
+        if a.patience and ep - max(e for _, e, _ in best.values()) >= a.patience:
+            print('Early stop   : no new best R@0.5 or CIDEr for %d epochs' % a.patience, flush=True)
+            rec.data['stopped_early'] = ep + 1
+            rec.save()
+            break
     print(RULE)
     for key, (val, ep, name) in best.items():
         print('Best %-6s = %6.2f at epoch %d -> %s' % (
@@ -698,6 +704,8 @@ if __name__ == '__main__':
                    help='40 epochs overfit from epoch 7; 10 is enough')
     p.add_argument('--eval', default='', help='only score this checkpoint, no training')
     p.add_argument('--init', default='', help='start training from the weights of this checkpoint (fine-tune)')
+    p.add_argument('--patience', type=int, default=0,
+                   help='stop when neither best R@0.5 nor best CIDEr improved for this many epochs (0 = off)')
     p.add_argument('--nms', default='soft:0.7:0.5',
                    help='NMS settings to score with --eval, comma separated, e.g. soft:0.7:0.5,hard:0.5')
     p.add_argument('--iou-power', default='',
