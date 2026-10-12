@@ -193,12 +193,30 @@ class SegmentContext(nn.Module):
 
 class BoundaryHead(nn.Module):
     """Per time step: distances to the start and the end of its event (in units of the level's stride,
-    >= 0) and one IoU-quality logit (how good the segment from this step will be, used for ranking)."""
+    >= 0) and one IoU-quality logit (how good the segment from this step will be, used for ranking).
 
-    def __init__(self, in_dim, feat_dim, fpn_levels: int = 6, n_layers=3, ks=3, with_ln=True):
+    bins > 0: Trident head (TriDet, Shi et al. CVPR 2023) instead of direct regression. A start head and an
+    end head give a boundary response per step, a centre head gives 2 x (bins + 1) offsets per step. The start
+    distance of step t is the expectation over d = 0..bins of softmax_d(start[t - d] + centre_left[t, d]), the end
+    distance the same with end[t + d]: the boundary is placed from the boundary evidence of the neighbouring
+    steps, as a distribution, instead of a single number regressed from step t alone."""
+
+    def __init__(self, in_dim, feat_dim, fpn_levels: int = 6, n_layers=3, ks=3, with_ln=True, bins=0):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
+        self.bins = bins
+        if bins > 0:
+            self.start_out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
+            self.end_out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
+            self.centre_out = MaskedConv1D(feat_dim, 2 * (bins + 1), ks, stride=1, padding=ks // 2)
+            # zero init: every bin starts equally likely
+            for m in (self.start_out, self.end_out, self.centre_out):
+                torch.nn.init.zeros_(m.conv.weight); torch.nn.init.zeros_(m.conv.bias)
+            self.register_buffer('bin_pos', torch.arange(bins + 1, dtype=torch.float), persistent=False)
+            # predicts the IoU between the segment from this step and the GT, used for ranking
+            self.iou_out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
+            return
         self.scale = nn.ModuleList([Scale() for _ in range(fpn_levels)])
         self.out = MaskedConv1D(feat_dim, 2, ks, stride=1, padding=ks // 2)
         # offsets go through a ReLU: with a zero bias, an unlucky init can make one side negative at
@@ -215,11 +233,31 @@ class BoundaryHead(nn.Module):
             for i in range(len(self.head)):
                 x, _ = self.head[i](x, m)
                 x = self.act(self.norm[i](x))
-            o, _ = self.out(x, m)
             q, _ = self.iou_out(x, m)
-            res += (F.relu(self.scale[l](o)).permute(0, 2, 1),)  # (B, T_l, 2)
             qual += (q.permute(0, 2, 1),)                         # (B, T_l, 1)
+            if self.bins > 0:
+                res += (self._trident(x, m),)
+                continue
+            o, _ = self.out(x, m)
+            res += (F.relu(self.scale[l](o)).permute(0, 2, 1),)  # (B, T_l, 2)
         return res, qual
+
+    def _trident(self, x, m):
+        """Expected start / end distances (B, T, 2), in strides, from the boundary responses of the steps
+        0..bins before (start) and after (end) each step, plus its own centre offsets."""
+        nb = self.bins
+        st, _ = self.start_out(x, m)
+        en, _ = self.end_out(x, m)
+        ce, _ = self.centre_out(x, m)                                       # (B, 2 (nb + 1), T)
+        st = st.masked_fill(~m, -1e4)                                       # padding steps are never a boundary
+        en = en.masked_fill(~m, -1e4)
+        # left[b, t, d] = start[t - d], right[b, t, d] = end[t + d]; outside the video: -1e4
+        left = F.pad(st, (nb, 0), value=-1e4).unfold(-1, nb + 1, 1)[:, 0].flip(-1)   # (B, T, nb + 1)
+        right = F.pad(en, (0, nb), value=-1e4).unfold(-1, nb + 1, 1)[:, 0]
+        cl, cr = ce[:, :nb + 1].permute(0, 2, 1), ce[:, nb + 1:].permute(0, 2, 1)
+        dl = (F.softmax(left + cl, dim=-1) * self.bin_pos).sum(-1)
+        dr = (F.softmax(right + cr, dim=-1) * self.bin_pos).sum(-1)
+        return torch.stack((dl, dr), dim=-1)
 
 
 class GroundHead(nn.Module):
@@ -272,7 +310,7 @@ class EventCaptionTransformer(nn.Module):
                  head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, train_cfg, test_cfg, max_seq_len,
                  nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross',
-                 text_stream=False, source_token=0):
+                 text_stream=False, source_token=0, boundary_bins=0):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
         assert len(self.fpn_strides) == len(regression_range)
@@ -332,7 +370,7 @@ class EventCaptionTransformer(nn.Module):
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
-                                       head_num_layers, head_kernel_size, head_with_ln)
+                                       head_num_layers, head_kernel_size, head_with_ln, bins=boundary_bins)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, clip_dim, text_proj)
         if self.w_o2o > 0:
