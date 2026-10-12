@@ -50,6 +50,10 @@ the backbone as a stream next to V and A (TextBridge at every pyramid level), in
 ground head. A video alone runs with a learned null text token (event, boundary and embedding
 heads); every ground query runs the pyramid again with its sentence, and the ground head reads
 those features. The stem is shared, the bridges start closed (zero gates).
+
+Source token (model.source_token: n > 0, n = number of training sources): one learned vector per dataset (YouCook2 0,
+COIN 1, then the extra sources), added to the pyramid features read by the event and boundary heads, so each dataset
+can keep its own idea of what an event is and where it starts. Zero init; an item without 'source' uses 0 (YouCook2).
 """
 
 # in_dim=1024
@@ -261,7 +265,7 @@ class EventCaptionTransformer(nn.Module):
                  head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, train_cfg, test_cfg, max_seq_len,
                  nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross',
-                 text_stream=False):
+                 text_stream=False, source_token=0):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
         assert len(self.fpn_strides) == len(regression_range)
@@ -310,6 +314,10 @@ class EventCaptionTransformer(nn.Module):
             proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe,
             pyramid_attn=pyramid_attn, text_dim=clip_dim if text_stream else 0)
         D = embd_dim * 2 # 512 * 2
+        # one vector per training source for the event and boundary heads (0 = off)
+        self.src_emb = nn.Embedding(source_token, D) if source_token > 0 else None
+        if self.src_emb is not None:
+            nn.init.zeros_(self.src_emb.weight)
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
@@ -402,13 +410,19 @@ class EventCaptionTransformer(nn.Module):
         
         feats = [torch.cat((v, a), dim=1) for v, a in zip(fV, fA)]           # per level (B, 2 * embd_dim[512], T_l), len(feats) = 6
         
+        # event and boundary heads read the features plus the token of the item's dataset
+        fe = feats
+        if self.src_emb is not None:
+            e = self.src_emb(torch.as_tensor([x.get('source', 0) for x in video_list], device=feats[0].device))
+            fe = [f + e[:, :, None] for f in feats]
+
         # Event Head
         #                   tuple(tensor(B, T_l, 1))
-        ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)   # (B, P), P = point = 504
+        ev = torch.cat(self.event_head(fe, msk), dim=1).squeeze(-1)      # (B, P), P = point = 504
         
         # Bounding Head
         # tuple(tensor(B, T_l, 2)), tuple(tensor(B, T_l, 1))
-        bd, qu = self.bound_head(feats, msk)
+        bd, qu = self.bound_head(fe, msk)
         bd = torch.cat(bd, dim=1)                                        # (B, P, 2)
         qu = torch.cat(qu, dim=1).squeeze(-1)                            # (B, P)
         

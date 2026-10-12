@@ -85,8 +85,13 @@ def load_ckpt(path):
     """torch.load for our own checkpoints on any torch version.
 
     torch >= 2.6 defaults to weights_only=True, which rejects the metrics dict stored
-    next to the weights; torch 1.11 has no weights_only argument at all.
+    next to the weights; torch 1.11 has no weights_only argument at all. Checkpoints written on
+    Colab hold numbers pickled by numpy 2, which numpy < 2 (the PC training env) reads through
+    these module aliases.
     """
+    if not hasattr(np, '_core'):
+        sys.modules.setdefault('numpy._core', np.core)
+        sys.modules.setdefault('numpy._core.multiarray', np.core.multiarray)
     try:
         return torch.load(path, map_location='cpu', weights_only=False)
     except TypeError:
@@ -610,6 +615,12 @@ def main(a):
         len(ds.pool_text), ''.join(' + %d %s' % (len(d.pool_text), n) for n, d in extra.items())), flush=True)
     if ov:
         use_ov_columns()
+    if a.init:   # fine-tune: start from these weights (new modules keep their init)
+        sd = upgrade_state_dict(load_ckpt(a.init)['state_dict'])
+        miss, unused = model.load_state_dict(sd, strict=False)
+        print('Init         : %s (%d missing, %d unused keys%s)' % (
+            a.init, len(miss), len(unused), ': ' + ', '.join(sorted({k.split('.')[0] for k in miss + unused}))
+            if miss or unused else ''), flush=True)
     if a.eval:
         return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text, ov)
     if a.finalize:   # redo the final evaluation of a finished run, e.g. after a crash in it
@@ -686,6 +697,7 @@ if __name__ == '__main__':
     p.add_argument('--epochs', type=int, default=10,
                    help='40 epochs overfit from epoch 7; 10 is enough')
     p.add_argument('--eval', default='', help='only score this checkpoint, no training')
+    p.add_argument('--init', default='', help='start training from the weights of this checkpoint (fine-tune)')
     p.add_argument('--nms', default='soft:0.7:0.5',
                    help='NMS settings to score with --eval, comma separated, e.g. soft:0.7:0.5,hard:0.5')
     p.add_argument('--iou-power', default='',
