@@ -294,7 +294,7 @@ def evaluate_ov(model, loader, device, labels, label_emb, other=None):
     R@t    : class-agnostic segmentation, scored like YouCook2 (see seg_counts)
     """
     model.eval()
-    seg = SegCounts()
+    seg_n = SegCounts()
     bank = model.embed_head.embed_captions(torch.as_tensor(label_emb, device=device).float())
     names = list(labels)
     if other is not None:
@@ -321,12 +321,12 @@ def evaluate_ov(model, loader, device, labels, label_emb, other=None):
                 if best[0] >= 0.5:
                     tp += 1; used.add(best[1])
             n_gt += len(gts)
-            seg.add(r)
+            seg_n.add(r)
             if r.get('ground_segments') is not None:
                 g_ious += [iou(p, g) for p, g in zip(r['ground_segments'].tolist(), gts)]
     model.train()
     out = {'Acc': 100.0 * float(np.mean(acc)) if acc else 0.0, 'F1': 100.0 * 2 * tp / max(n_pred + n_gt, 1)}
-    out.update(seg.scores())
+    out.update(seg_n.scores())
     if g_ious:
         for t in (0.5, 0.7):
             out['G R1@%.1f' % t] = 100.0 * float(np.mean([i >= t for i in g_ious]))
