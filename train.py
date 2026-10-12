@@ -502,8 +502,9 @@ def build_loaders(cfg, rng):
     dv = YouCook2CaptionDataset(False, cfg['val_split'], **cfg['dataset'])
     cc = cfg.get('coin') or {}
     have_coin = bool(cc) and os.path.exists(cc['anno_file']) and os.path.isdir(cc['iv2_folder'])
+    # the other sources have 1 feature row per second unless their config says otherwise (YouCook2 may use 2)
     common = dict(cfg['dataset'], anno_file=cc.get('anno_file'), label_emb_file=cc.get('label_emb_file'),
-                  iv2_folder=cc.get('iv2_folder'))
+                  iv2_folder=cc.get('iv2_folder'), iv2_rows_per_sec=cc.get('iv2_rows_per_sec', 1))
     extra, ratio = {}, {}
     if cc.get('train'):
         assert have_coin, 'coin.train needs %s and %s (tools/coin_data.py)' % (cc.get('anno_file'), cc.get('iv2_folder'))
@@ -513,7 +514,8 @@ def build_loaders(cfg, rng):
         if ec.get('ratio', 0) > 0:
             extra[name] = YouCook2CaptionDataset(True, cfg['train_split'], **dict(
                 cfg['dataset'], json_file=ec['json_file'], caption_emb_file=ec['caption_emb_file'],
-                iv2_folder=ec['iv2_folder'], omni_emb_file=None, pad_omni=ds.omni))
+                iv2_folder=ec['iv2_folder'], iv2_rows_per_sec=ec.get('iv2_rows_per_sec', 1),
+                omni_emb_file=None, pad_omni=ds.omni))
             ratio[name] = ec['ratio']
     train_set, sampler = ds, RandomSampler(ds)
     if extra:
@@ -544,7 +546,7 @@ def build_loaders(cfg, rng):
         if ec.get('eval', True) and os.path.exists(ec['json_file']) and os.path.isdir(ec['iv2_folder']):
             d = YouCook2CaptionDataset(False, cfg['val_split'], **dict(
                 cfg['dataset'], json_file=ec['json_file'], caption_emb_file=ec['caption_emb_file'],
-                iv2_folder=ec['iv2_folder'], omni_emb_file=None))
+                iv2_folder=ec['iv2_folder'], iv2_rows_per_sec=ec.get('iv2_rows_per_sec', 1), omni_emb_file=None))
             if len(d):
                 ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
                                        sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
