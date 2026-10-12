@@ -20,7 +20,7 @@ Rounds before 2026-10-11 are described in `NOTES.md` (2026-10-03/04, ONE-PEACE t
 | Date | Report | Runs | Main result |
 |---|---|---|---|
 | 2026-10-11 | [all training sets, regularisation + augmentation, text stream](reports/2026-10-11_all-data.md) | `all_b16`, `all_aug`, `all_text` | `all_b16`: YouCook2 same as YouCook2-only, COIN unseen Acc 12.5, UnAV-100 zero-shot mAP 23.0 (+6.3), overfits after epoch 8. `all_aug`: no overfitting, same segmentation (R@0.5 54.2) and COIN unseen (12.7), CIDEr 84.6 (-6). `all_text` (text as a third backbone stream): best run, G R1@0.5 49.1 (+3.4), COIN unseen Acc 14.2, R@0.5 54.6, CIDEr 88.5 |
-| 2026-10-12 | [raising YouCook2 R@0.5 above 54-55](reports/2026-10-12_seg-plateau.md) | `ft_yc2`, `ft_other`, `all_src` | nothing moves R@0.5 beyond noise: YouCook2-only fine-tune, background loss, dataset token, non-overlap pick, a trained proposal re-ranker; next lever = input features |
+| 2026-10-12 | [raising YouCook2 R@0.5 above 54-55](reports/2026-10-12_seg-plateau.md) | `ft_yc2`, `ft_other`, `all_src` | nothing moves R@0.5 beyond noise: YouCook2-only fine-tune, background loss, dataset token, non-overlap pick, a trained proposal re-ranker; an ensemble of 5 existing checkpoints does: R@0.5 56.1 (+2.1 over `all_b16`, +0.7 over E1) |
 
 ## Conventions
 

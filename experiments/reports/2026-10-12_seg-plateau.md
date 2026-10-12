@@ -28,6 +28,28 @@ project only two changes moved R@0.5: better input features (ONE-PEACE -> Intern
 IoU-quality ranking branch (+1). The next lever is the input: denser (2 fps) or stronger visual features, mainly
 for the short steps (R@0.5 18 % for steps under ~6 s).
 
+## Update: ensembling checkpoints does move R@0.5
+
+No feature re-extraction (too expensive for the user). Five `best_seg` checkpoints already on the PC, all on the
+same 504-point grid: E1 (`ckpt/api/athena.pth`, YouCook2 + EMA), R1 (`athena_coin.pth`, + COIN), `all_b16`,
+`ft_yc2`, `ft_other`. Per point, the event and IoU probabilities and the boundary offsets are averaged over the
+members, then the usual score, soft-NMS and top K. Fixed before looking at the numbers: all five members, voting
+threshold 0.75 (UniAV's default).
+
+| Model | R@0.5 | R@0.7 |
+|---|---|---|
+| E1 / R1 / `all_b16` / `ft_yc2` / `ft_other` alone | 55.39 / 53.55 / 53.98 / 54.07 / 54.14 | 31.97 / 31.08 / 32.04 / 32.70 / 32.00 |
+| **ensemble of the 5** | **56.12** | **34.18** |
+| ensemble of the 5 + segment voting (UniAV / ActionFormer `seg_voting`, IoU 0.75) | 56.15 | 34.71 |
+| `all_b16` + segment voting | 53.68 | 32.86 |
+
+Paired bootstrap over videos (2,000 resamples): ensemble - `all_b16` = +2.11 R@0.5 (95 % CI +0.95 to +3.28);
+ensemble - E1 = +0.68 (CI -0.61 to +1.94, not significant). Pairs of differently trained models gain most
+(E1 + `all_b16` 56.71, exploratory, picked on val), pairs of a run and its own fine-tune least (`all_b16` + `ft_yc2`
+55.03): the gain comes from diversity between members. Segment voting only helps R@0.7.
+
+Scripts: `ens.py` (runs the members, stores per-point outputs), `ens_eval.py`, `ens_boot.py`.
+
 ## Runs
 
 | Run | Record | Code | Setup | Checkpoints |
@@ -95,6 +117,9 @@ python experiments/scripts/2026-10-12_seg-plateau/rerank_other.py <d>/props_othe
 ```
 
 ## Next
+
+- More diverse ensemble members at no feature cost: E1-recipe runs with other seeds on the PC (~20 min each), then
+  the ensemble of all of them.
 
 - Input features: InternVideo2 at 2 fps (re-extraction on Colab, ~29 video-s/s on an A100) with `max_seq_len` 512,
   aimed at the short steps; or a second visual feature next to InternVideo2.
