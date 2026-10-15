@@ -1,119 +1,31 @@
-"""Train the event segmentation + captioning model on YouCook2.
+"""Train the event segmentation + captioning model on YouCook2, then score it on the validation set.
 
-  python train.py configs/youcook2_event.yaml --output run1
-  python train.py configs/youcook2_event.yaml --output run2 --set init_rand_seed=2
-  python train.py configs/youcook2_event.yaml --eval ckpt/run1/best_cap.pth.tar
+  python train.py
 
-Every training run writes experiments/runs/<host>-<output>.json with the git commit,
-the resolved config, the overrides, per-epoch metrics and a full evaluation of the
-best captioning checkpoint. tools/summarize_runs.py turns those files into a table.
+Settings are in config.py. The best R@0.5 checkpoint is saved to OUT_DIR/best.pth.tar.
 """
-import argparse
 import copy
-import json
+import math
 import os
-import socket
-import subprocess
-import sys
+import random
 import time
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import yaml
+from pycocoevalcap.cider.cider import Cider
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from libs.datasets import CoinCaptionDataset, YouCook2CaptionDataset, trivial_batch_collator, worker_init_reset_seed
-from libs.modeling import EventCaptionTransformer, MaskedConv1D, upgrade_state_dict
-from libs.utils import make_scheduler, fix_random_seed
-
-RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'experiments', 'runs')
-
-
-def build_optimizer(model, opt):
-    """AdamW with three parameter groups (as ActionFormer, plus one for the caption projection):
-      decay    : weights of Linear / Conv layers, with weight_decay
-      no_decay : biases, LayerNorm, learnable scales and other parameters, no weight decay
-      clip     : clip_proj (caption vectors -> event space), its own learning rate clip_proj_lr
-    """
-    decay, no_decay, clip = set(), set(), set()
-    decay_types = (torch.nn.Linear, torch.nn.Conv1d, MaskedConv1D)
-    for mod_name, mod in model.named_modules():
-        for par_name, _ in mod.named_parameters(recurse=False):
-            full_name = '%s.%s' % (mod_name, par_name) if mod_name else par_name
-            if 'clip_proj' in full_name:
-                clip.add(full_name)
-            elif par_name.endswith('weight') and isinstance(mod, decay_types):
-                decay.add(full_name)
-            else:
-                no_decay.add(full_name)
-    pd = dict(model.named_parameters())
-    assert not (pd.keys() - (decay | no_decay | clip))   # every parameter is in exactly one group
-    groups = [
-        {'params': [pd[n] for n in sorted(decay)], 'weight_decay': opt['weight_decay']},
-        {'params': [pd[n] for n in sorted(no_decay)], 'weight_decay': 0.0},
-        {'params': [pd[n] for n in sorted(clip)], 'weight_decay': 0.0, 'lr': opt['clip_proj_lr']},
-    ]
-    return torch.optim.AdamW([g for g in groups if g['params']], lr=opt['learning_rate'])   # no clip_proj with text_proj none
-
-
-class ModelEma:
-    """Exponential moving average of the weights, as ActionFormer does (train_cfg.ema_decay, e.g. 0.999):
-    with it on, every evaluation and saved checkpoint uses the averaged weights."""
-
-    def __init__(self, model, decay):
-        self.module = copy.deepcopy(model)
-        self.decay = decay
-        self.updates = 0
-        for p in self.module.parameters():
-            p.requires_grad_(False)
-
-    @torch.no_grad()
-    def update(self, model):
-        # decay warm-up (as timm / TensorFlow): a fixed 0.999 would still hold 76% of the random init after
-        # the first epoch (276 steps) and 4% at the end, so early evaluations would score an untrained model
-        self.updates += 1
-        d = min(self.decay, (1 + self.updates) / (10 + self.updates))
-        for e, m in zip(self.module.state_dict().values(), model.state_dict().values()):
-            if e.dtype.is_floating_point:
-                e.mul_(d).add_(m.detach(), alpha=1 - d)
-            else:
-                e.copy_(m)
-
-
-def load_ckpt(path):
-    """torch.load for our own checkpoints on any torch version.
-
-    torch >= 2.6 defaults to weights_only=True, which rejects the metrics dict stored
-    next to the weights; torch 1.11 has no weights_only argument at all. Checkpoints written on
-    Colab hold numbers pickled by numpy 2, which numpy < 2 (the PC training env) reads through
-    these module aliases.
-    """
-    if not hasattr(np, '_core'):
-        sys.modules.setdefault('numpy._core', np.core)
-        sys.modules.setdefault('numpy._core.multiarray', np.core.multiarray)
-    try:
-        return torch.load(path, map_location='cpu', weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location='cpu')
-
-
-def load_weights(model, path):
-    """Load a training checkpoint into the model (older layouts are upgraded); returns the checkpoint."""
-    ck = load_ckpt(path)
-    sd = upgrade_state_dict(ck['state_dict'])
-    if hasattr(model, 'ground_head') and not any(k.startswith('ground_head.') for k in sd):
-        raise SystemExit('%s has no ground head (trained before it existed): add '
-                         '--set model.train_cfg.loss_weight_ground=0' % path)
-    model.load_state_dict(sd)
-    return ck
+import config as C
+from dataset import YouCook2Dataset, trivial_batch_collator, worker_init_reset_seed
+from model import EventCaptionModel
 
 
 def iou(a, b):
     """IoU of two segments (start, end)."""
-    i = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
-    u = (a[1] - a[0]) + (b[1] - b[0]) - i
-    return i / u if u > 0 else 0.0
+    inter = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+    union = (a[1] - a[0]) + (b[1] - b[0]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 def mbr_pick(s, pool_n, scale, k=20):
@@ -122,690 +34,173 @@ def mbr_pick(s, pool_n, scale, k=20):
     s (N,) scores every caption in the pool. Take the top k, turn their scores into
     probabilities, and return the candidate most similar to the whole group
     (minimum Bayes risk). A caption backed by many strong candidates beats one that
-    is on top by chance. Returns (top-1 index, MBR index).
+    is on top by chance.
     """
     top = s.topk(k)
     p = F.softmax(scale * top.values, dim=0)
     cand = pool_n[top.indices]
     agree = (cand @ cand.t()) @ p
-    return int(top.indices[0]), int(top.indices[agree.argmax()])
-
-
-def meteor(gts, hyp, timeout=60):
-    """METEOR via pycocoevalcap (java), in a separate Python process with a time limit.
-
-    On Colab the java helper can die mid-call while pycocoevalcap holds its lock;
-    the object's __del__ then waits on that lock forever. Isolating it in a child
-    process means a failure or hang only costs this metric, never the evaluation.
-    """
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        src = os.path.join(d, 'in.json')
-        with open(src, 'w') as f:
-            json.dump({'gts': {str(k): v for k, v in gts.items()}, 'hyp': {str(k): v for k, v in hyp.items()}}, f)
-        code = ('import json,sys; from pycocoevalcap.meteor.meteor import Meteor; '
-                'd=json.load(open(sys.argv[1])); print(Meteor().compute_score(d["gts"], d["hyp"])[0]*100, flush=True)')
-        try:
-            r = subprocess.run([sys.executable, '-c', code, src], capture_output=True, text=True, timeout=timeout)
-            return float(r.stdout.strip().splitlines()[-1])
-        except subprocess.TimeoutExpired:
-            print('METEOR skipped: timed out after %ds' % timeout, flush=True)
-        except (ValueError, IndexError):
-            print('METEOR skipped: %s' % (r.stderr.strip().splitlines() or ['no output'])[-1][:200], flush=True)
-    return None
+    return int(top.indices[agree.argmax()])
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, pool_raw, pool_text, ths=(0.3, 0.5, 0.7), full=False):
-    """Score segmentation and captioning on the validation set.
+def evaluate(model, loader, pool_text):
+    """Segmentation and captioning scores on the validation set.
 
-    Captioning is scored only on GT segments matched by a prediction with IoU >= 0.3.
-    cos_gt   : cosine between the predicted segment vector and its GT caption
-    cos_rand : the same against a random caption, i.e. the floor
-    txt_sim  : how close the chosen caption is to the GT caption, cosine in InternVideo2 text space
-               (runs before 2026-10-05 stored ret_sim, the same in ONE-PEACE space: not comparable)
-    CIDEr    : standard captioning metric, word overlap, independent of any encoder
-    G R1@t   : grounding (with the ground head): each GT caption is the query, its best segment
-               must overlap the caption's own span with IoU >= t; G mIoU is the mean IoU
-    full     : also score variants (top-1, single-point vector, each embedding space
-               separately when the OmniRetriever teacher is on, oracle GT spans)
-    With the teacher, a caption's score is the sum of cosines in both spaces.
+    R@t      : share of GT steps matched by one of the top-k predictions (k = number of GT steps) with IoU >= t
+    mIoU     : mean best IoU of every GT step
+    txt_sim  : cosine (InternVideo2 text space) between the caption picked for a matched step and its GT caption
+    CIDEr    : word overlap of the same picks
+    G R1@0.5 : grounding, each GT caption as the query must find its own span with IoU >= 0.5
+    Captioning is scored only on GT steps matched by a prediction with IoU >= 0.3.
     """
-    from pycocoevalcap.cider.cider import Cider
     model.eval()
-    pool_f = model.embed_head.embed_captions(pool_raw)
-    # metrics and the consensus pick use the InternVideo2 caption vectors, whatever space the model is trained in
-    pool_n = F.normalize(getattr(model, 'pool_metric', None) if getattr(model, 'pool_metric', None) is not None
-                         else pool_raw, dim=-1)
-    same_space = getattr(model, 'pool_metric', None) is None
+    dev = model.points.device
+    pool_f = model.embed_head.embed_captions(model.pool_raw)
+    pool_n = F.normalize(model.pool_raw, dim=-1)
     scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
-    omni = model.omni_dim > 0
-    if omni:
-        n = len(pool_raw)   # the teacher pool may be padded for COIN labels after the YouCook2 captions
-        o_txt = model.omni_text[:n].masked_fill(~model.omni_text_ok[:n, None], 0)
-    cov = {t: 0 for t in ths}              # GT steps covered by a prediction with IoU >= t
-    n_gt = n_pred = 0
-    best_ious, cos_gt, cos_rand = [], [], []
-    # caption picks, one list per way of picking: txt_sim of every captioned GT step (ret) and the
-    # chosen caption texts for CIDEr (hyp), both keyed like gts_txt
-    ret = {v: [] for v in ('top1', 'mbr', 'pt_top1', 'mbr_student', 'mbr_omni', 'oracle')}
-    gts_txt, hyp = {}, {v: {} for v in ret}
-    gts_or, hyp_or = {}, {}                # oracle: captions picked for the GT spans themselves
-    g_ious = []                            # grounding: IoU of every GT caption's predicted span
-    g = torch.Generator().manual_seed(0)   # the same random captions for cos_rand in every evaluation
+
+    best_ious, txt_sim, g_ious = [], [], []
+    gts_txt, hyp = {}, {}
     for batch in loader:
-        for x in batch:
-            x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
-        res = model(batch)
-        for r, x in zip(res, batch):
-            gts, texts = r['gt_segments'], r['gt_text']
-            if r.get('ground_segments') is not None:
-                g_ious += [iou(p, gt) for p, gt in zip(r['ground_segments'].tolist(), gts)]
+        for r, x in zip(model(batch), batch):
+            gts = r['gt_segments']
+            g_ious += [iou(p, g) for p, g in zip(r['ground_segments'].tolist(), gts)]
             # keep as many predictions (best score first) as the video has GT steps
-            k = min(len(gts), r['segments'].shape[0])
+            k = min(len(gts), len(r['segments']))
             preds = r['segments'][:k].tolist()
-            emb = r['embeds'][:k].to(device).float()
-            emb_pt = r['embeds_pt'][:k].to(device).float()
-            n_pred += k
-            cap_raw = x['cap_emb'].to(device).float()
-            cap_proj = model.embed_head.embed_captions(cap_raw) if same_space else None
-            cap_n = F.normalize(cap_raw, dim=-1)
-            if full:
-                # caption the GT spans themselves: measures captioning alone
-                for gi in range(len(gts)):
-                    s = pool_f @ r['embeds_gt'][gi].to(device).float()
-                    if omni:
-                        s = s + o_txt @ r['embeds_gt_omni'][gi].to(device).float()
-                    i = mbr_pick(s, pool_n, scale)[1]
-                    ret['oracle'].append(float(pool_n[i] @ cap_n[gi]))
-                    okey = len(gts_or)
-                    gts_or[okey] = [texts[gi]]
-                    hyp_or[okey] = [pool_text[i]]
+            cap_n = F.normalize(x['cap_emb'].to(dev), dim=-1)
             for gi, gt in enumerate(gts):
-                n_gt += 1
-                if not preds:
-                    best_ious.append(0.0)
-                    continue
-                vals = [iou(p, gt) for p in preds]
+                vals = [iou(p, gt) for p in preds] or [0.0]
                 j = int(np.argmax(vals))   # the prediction that matches this GT step best
-                best = vals[j]
-                best_ious.append(best)
-                for t in ths:
-                    cov[t] += (best >= t)
-                if best < 0.3:             # captioning is scored on matched steps only
+                best_ious.append(vals[j])
+                if vals[j] < 0.3:          # captioning is scored on matched steps only
                     continue
-                q = F.normalize(emb[j], dim=-1)
-                if cap_proj is not None:   # only when the model is trained in the metric space
-                    cos_gt.append(float(q @ cap_proj[gi]))
-                ridx = int(torch.randint(len(pool_f), (1,), generator=g))
-                cos_rand.append(float(q @ pool_f[ridx]))
-                key = len(gts_txt)
-                gts_txt[key] = [texts[gi]]
-                s_st = pool_f @ q          # pool scores of the student (the event model itself)
-                s = s_st
-                if omni:                   # plus the scores in the teacher's space
-                    s_om = o_txt @ r['embeds_omni'][j].to(device).float()
-                    s = s_st + s_om
-                t1, mb = mbr_pick(s, pool_n, scale)
-                picks = {'top1': t1, 'mbr': mb}
-                if full:
-                    picks['pt_top1'] = int((pool_f @ F.normalize(emb_pt[j], dim=-1)).argmax())
-                    if omni:
-                        picks['mbr_student'] = mbr_pick(s_st, pool_n, scale)[1]
-                        picks['mbr_omni'] = mbr_pick(s_om, pool_n, scale)[1]
-                for v, i in picks.items():
-                    ret[v].append(float(pool_n[i] @ cap_n[gi]))
-                    hyp[v][key] = [pool_text[i]]
+                i = mbr_pick(pool_f @ r['embeds'][j].to(dev), pool_n, scale)
+                txt_sim.append(float(pool_n[i] @ cap_n[gi]))
+                gts_txt[len(gts_txt)] = [x['cap_text'][gi]]
+                hyp[len(hyp)] = [pool_text[i]]
     model.train()
-    mean = lambda xs: float(np.mean(xs)) if xs else 0.0
-    cider = lambda v: Cider().compute_score(gts_txt, hyp[v])[0] * 100 if hyp[v] else 0.0
-    out = {'R@%.1f' % t: 100.0 * cov[t] / max(n_gt, 1) for t in ths}
-    out['mIoU'] = 100.0 * mean(best_ious)
-    out['seg/vid'] = n_pred / max(len(loader.dataset), 1)
-    out['cos_gt'] = mean(cos_gt) if cos_gt else float('nan')   # not defined when trained in another space
-    out['cos_rand'] = mean(cos_rand)
-    out['txt_sim'] = mean(ret['mbr'])
-    out['CIDEr'] = cider('mbr')
-    if g_ious:
-        for t in (0.5, 0.7):
-            out['G R1@%.1f' % t] = 100.0 * mean([i >= t for i in g_ious])
-        out['G mIoU'] = 100.0 * mean(g_ious)
-    if full:
-        for v in ('top1', 'pt_top1') + (('mbr_student', 'mbr_omni') if omni else ()):
-            out['txt_sim[%s]' % v] = mean(ret[v])
-            out['CIDEr[%s]' % v] = cider(v)
-        m = meteor(gts_txt, hyp['mbr'])
-        if m is not None:
-            out['METEOR'] = m
-        out['txt_sim[oracle]'] = mean(ret['oracle'])
-        out['CIDEr[oracle]'] = Cider().compute_score(gts_or, hyp_or)[0] * 100
-        out['n_captioned'] = len(gts_txt)
+
+    best_ious = np.array(best_ious)
+    out = {'R@0.3': 100 * np.mean(best_ious >= 0.3), 'R@0.5': 100 * np.mean(best_ious >= 0.5),
+           'R@0.7': 100 * np.mean(best_ious >= 0.7), 'mIoU': 100 * np.mean(best_ious),
+           'txt_sim': np.mean(txt_sim), 'CIDEr': Cider().compute_score(gts_txt, hyp)[0] * 100,
+           'G R1@0.5': 100 * np.mean(np.array(g_ious) >= 0.5)}
     return out
 
 
-@torch.no_grad()
-def evaluate_ov(model, loader, device, labels, label_emb, other=None):
-    """Open-vocabulary scores on COIN videos (docs/PLAN_openvocab.md), after OV-AVEL's metrics.
-
-    Acc    : the vector of each GT step span against every COIN label (and "other"); top-1 must be its label
-    F1     : the model's top-k events (k = number of GT steps), each named by its nearest label; a hit is
-             an unmatched GT step with the same label and IoU >= 0.5; an event named "other" is dropped
-    G R1@t : grounding (ground head): each step label as the query must find its own span, IoU >= t
-    R@t    : class-agnostic segmentation, scored like YouCook2 (see seg_counts)
+def build_optimizer(model):
+    """AdamW with three parameter groups (as ActionFormer, plus one for the caption projection):
+      decay    : weights of Linear / Conv layers, with weight decay
+      no_decay : biases, LayerNorm, learnable scales and other parameters, no weight decay
+      clip     : clip_proj (caption vectors -> event space), its own learning rate CLIP_PROJ_LR
     """
-    model.eval()
-    seg_n = SegCounts()
-    bank = model.embed_head.embed_captions(torch.as_tensor(label_emb, device=device).float())
-    names = list(labels)
-    if other is not None:
-        bank = torch.cat((bank, model.embed_head.embed_captions(torch.as_tensor(other, device=device).float()[None])))
-        names.append('<other>')
-    acc, g_ious = [], []
-    tp = n_pred = n_gt = 0
-    for batch in loader:
-        for x in batch:
-            x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
-        for r in model(batch):
-            gts, texts = r['gt_segments'], r['gt_text'][:len(r['gt_segments'])]
-            pred = (r['embeds_gt'].to(device).float() @ bank.t()).argmax(-1).tolist()
-            acc += [names[i] == t for i, t in zip(pred, texts)]
-            k = min(len(gts), r['segments'].shape[0])
-            named = (r['embeds'][:k].to(device).float() @ bank.t()).argmax(-1).tolist()
-            used = set()
-            for seg, li in zip(r['segments'][:k].tolist(), named):
-                if names[li] == '<other>':
-                    continue
-                n_pred += 1
-                best = max(((iou(seg, g), j) for j, g in enumerate(gts) if j not in used and texts[j] == names[li]),
-                           default=(0.0, -1))
-                if best[0] >= 0.5:
-                    tp += 1; used.add(best[1])
-            n_gt += len(gts)
-            seg_n.add(r)
-            if r.get('ground_segments') is not None:
-                g_ious += [iou(p, g) for p, g in zip(r['ground_segments'].tolist(), gts)]
-    model.train()
-    out = {'Acc': 100.0 * float(np.mean(acc)) if acc else 0.0, 'F1': 100.0 * 2 * tp / max(n_pred + n_gt, 1)}
-    out.update(seg_n.scores())
-    if g_ious:
-        for t in (0.5, 0.7):
-            out['G R1@%.1f' % t] = 100.0 * float(np.mean([i >= t for i in g_ious]))
-    return out
+    decay, no_decay, clip = [], [], []
+    for mod_name, mod in model.named_modules():
+        for par_name, p in mod.named_parameters(recurse=False):
+            if 'clip_proj' in mod_name:
+                clip.append(p)
+            elif par_name == 'weight' and isinstance(mod, (torch.nn.Linear, torch.nn.Conv1d)):
+                decay.append(p)
+            else:
+                no_decay.append(p)
+    return torch.optim.AdamW([
+        {'params': decay, 'weight_decay': C.WEIGHT_DECAY},
+        {'params': no_decay, 'weight_decay': 0.0},
+        {'params': clip, 'weight_decay': 0.0, 'lr': C.CLIP_PROJ_LR},
+    ], lr=C.LR)
 
 
-class SegCounts:
-    """Class-agnostic segmentation scores, the same as YouCook2's R@t / mIoU in evaluate: per video keep as
-    many predictions (best first) as it has GT steps; a GT step counts at t when one of them has IoU >= t."""
-
-    def __init__(self, ths=(0.3, 0.5, 0.7)):
-        self.ths, self.cov, self.ious = ths, {t: 0 for t in ths}, []
-
-    def add(self, r):
-        gts = r['gt_segments']
-        preds = r['segments'][:min(len(gts), r['segments'].shape[0])].tolist()
-        for g in gts:
-            best = max((iou(p, g) for p in preds), default=0.0)
-            self.ious.append(best)
-            for t in self.ths:
-                self.cov[t] += best >= t
-
-    def scores(self):
-        n = max(len(self.ious), 1)
-        out = {'R@%.1f' % t: 100.0 * c / n for t, c in self.cov.items()}
-        out['mIoU'] = 100.0 * float(np.mean(self.ious)) if self.ious else 0.0
-        out['n_gt'] = len(self.ious)
-        return out
+def lr_factor(step, warmup_steps, total_steps):
+    """Linear warm-up from 0, then cosine decay to 0; the learning rate is updated every iteration."""
+    if step < warmup_steps:
+        return step / (warmup_steps - 1)
+    return 0.5 * (1 + math.cos(math.pi * (step - warmup_steps) / (total_steps - warmup_steps)))
 
 
-@torch.no_grad()
-def evaluate_seg(model, loader, device):
-    """Segmentation only, on a held-out set of another dataset (ActivityNet / HT-Step validation)."""
-    model.eval()
-    w_ground, model.w_ground = model.w_ground, 0   # grounding is not scored here: skip its passes
-    seg = SegCounts()
-    for batch in loader:
-        for x in batch:
-            x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
-        for r in model(batch):
-            seg.add(r)
-    model.w_ground = w_ground
-    model.train()
-    return seg.scores()
+class ModelEma:
+    """Exponential moving average of the weights, as ActionFormer does: evaluation and the saved
+    checkpoint use the averaged weights."""
+
+    def __init__(self, model):
+        self.module = copy.deepcopy(model)
+        self.updates = 0
+        for p in self.module.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        # decay warm-up: a fixed 0.999 would still hold most of the random init after the first epoch
+        self.updates += 1
+        d = min(C.EMA_DECAY, (1 + self.updates) / (10 + self.updates))
+        for e, m in zip(self.module.state_dict().values(), model.state_dict().values()):
+            if e.dtype.is_floating_point:
+                e.mul_(d).add_(m.detach(), alpha=1 - d)
+            else:
+                e.copy_(m)
 
 
-def ov_scores(model, ov, dev):
-    """Every held-out set besides YouCook2 val: COIN test sets (open-vocabulary scores + segmentation) and
-    the other sources' validation sets (segmentation), keys '<set>/<metric>' ('unseen/Acc', 'anet/R@0.5').
-    'R@0.5 avg' is the mean R@0.5 over the datasets (COIN seen + unseen as one), filled in by add_seg_avg."""
-    out = {}
-    for name, (loader, ds) in ov.items():
-        res = (evaluate_ov(model, loader, dev, ds.labels, ds.label_emb, ds.other) if hasattr(ds, 'labels')
-               else evaluate_seg(model, loader, dev))
-        for k, v in res.items():
-            out['%s/%s' % (name, k)] = v
-    return out
-
-
-def add_seg_avg(m):
-    """m['coin/R@0.5'] = COIN seen and unseen pooled by GT count; m['R@0.5 avg'] = mean R@0.5 over YouCook2 and
-    every other dataset scored, when there is at least one."""
-    per = [m[k] for k in m if k.endswith('/R@0.5') and k.split('/')[0] not in ('unseen', 'seen', 'coin')]
-    coin = [k for k in ('unseen', 'seen') if '%s/R@0.5' % k in m]
-    if coin:
-        n = sum(m['%s/n_gt' % k] for k in coin)
-        m['coin/R@0.5'] = sum(m['%s/R@0.5' % k] * m['%s/n_gt' % k] for k in coin) / max(n, 1)
-        per.append(m['coin/R@0.5'])
-    if per:
-        m['R@0.5 avg'] = float(np.mean([m['R@0.5']] + per))
-
-
-# One log row per epoch, columns in groups. Each group: (title, columns); each column:
-# (header, metric key, width, format). The use_*_columns functions below add optional columns.
-GROUPS = [
-    ('train loss', [('event', 'ev_loss', 6, '.3f'), ('reg', 'reg_loss', 6, '.3f'), ('iou', 'iou_loss', 6, '.3f'),
-                    ('embed', 'emb_loss', 6, '.3f'), ('span', 'span_loss', 6, '.3f'),
-                    ('total', 'final_loss', 6, '.3f')]),
-    ('segmentation (val)', [('R@0.3', 'R@0.3', 6, '.2f'), ('R@0.5', 'R@0.5', 6, '.2f'),
-                            ('R@0.7', 'R@0.7', 6, '.2f'), ('mIoU', 'mIoU', 6, '.2f'),
-                            ('seg/vid', 'seg/vid', 7, '.2f')]),
-    ('captioning (val)', [('cos_gt', 'cos_gt', 6, '.3f'), ('cos_rand', 'cos_rand', 8, '.3f'),
-                          ('txt_sim', 'txt_sim', 7, '.3f'), ('CIDEr', 'CIDEr', 6, '.2f')]),
-]
-LEAD = '{:>6} {:>5} {:>8}'   # epoch, seconds, learning rate
-HEAD = RULE = ''             # header line and separator, rebuilt whenever GROUPS changes
-
-
-def _cells(fn):
-    """fn(column) for every column, columns joined by spaces and groups by ' | '."""
-    return ' | '.join(' '.join(fn(c) for c in cols) for _, cols in GROUPS)
-
-
-def _refresh_header():
-    global HEAD, RULE
-    HEAD = LEAD.format('epoch', 'time', 'lr') + ' | ' + _cells(lambda c: '%*s' % (c[2], c[0]))
-    RULE = '-' * (len(HEAD) + 4)
-
-
-_refresh_header()
-
-
-def _add_loss_columns(*cols):
-    """Insert train-loss columns just before the 'total' column."""
-    GROUPS[0][1][-1:-1] = list(cols)
-    _refresh_header()
-
-
-def use_omni_columns():
-    """Add the two OmniRetriever teacher losses to the table."""
-    _add_loss_columns(('o_txt', 'omni_txt_loss', 6, '.3f'), ('o_av', 'omni_av_loss', 6, '.3f'))
-
-
-def use_ground_columns():
-    """Add the grounding loss and the grounding scores to the table."""
-    _add_loss_columns(('ground', 'ground_loss', 6, '.3f'))
-    GROUPS.append(('grounding (val)', [('R1@.5', 'G R1@0.5', 6, '.2f'), ('R1@.7', 'G R1@0.7', 6, '.2f'),
-                                       ('mIoU', 'G mIoU', 6, '.2f')]))
-    _refresh_header()
-
-
-def use_ov_columns():
-    """Add the open-vocabulary COIN scores (unseen tasks first) to the table."""
-    GROUPS.append(('COIN unseen | seen', [('Acc', 'unseen/Acc', 5, '.1f'), ('F1', 'unseen/F1', 5, '.1f'),
-                                          ('GR1.5', 'unseen/G R1@0.5', 5, '.1f'), ('Acc', 'seen/Acc', 5, '.1f'),
-                                          ('F1', 'seen/F1', 5, '.1f'), ('GR1.5', 'seen/G R1@0.5', 5, '.1f')]))
-    _refresh_header()
-
-
-def use_seg_columns(names):
-    """Add R@0.5 on every other held-out dataset and their mean (YouCook2 included) to the table."""
-    cols = [('COIN', 'coin/R@0.5', 6, '.2f')] if 'unseen' in names or 'seen' in names else []
-    cols += [(n[:6], '%s/R@0.5' % n, 6, '.2f') for n in names if n not in ('unseen', 'seen')]
-    GROUPS.append(('R@0.5 other sets', cols + [('avg', 'R@0.5 avg', 6, '.2f')]))
-    _refresh_header()
-
-
-def use_other_column():
-    """Add the "other" (background text) loss to the table."""
-    _add_loss_columns(('other', 'other_loss', 6, '.3f'))
-
-
-def print_header():
-    print('Legend       : S = new best R@0.5, C = new best CIDEr, A = new best R@0.5 avg (each saves its checkpoint)')
-    print('               cos_rand = cosine to a random caption (floor), txt_sim = similarity of')
-    print('               chosen caption to GT caption (InternVideo2 text space), CIDEr = word overlap')
-    print(RULE)
-    widths = [sum(c[2] for c in cols) + len(cols) - 1 for _, cols in GROUPS]
-    print(LEAD.format('', '', '') + ' | ' + ' | '.join(
-        '{:^{}}'.format(name, w) for (name, _), w in zip(GROUPS, widths)))
-    print(HEAD)
-    print(RULE, flush=True)
-
-
-def print_row(ep, t, lr, vals, mark):
-    row = LEAD.format(ep, '%.0fs' % t, '%.1e' % lr) + ' | ' + _cells(
-        lambda c: format(vals.get(c[1], float('nan')), '>%d%s' % (c[2], c[3])))
-    print(row + ('  ' + mark if mark else ''), flush=True)
-
-
-def build_loaders(cfg, rng):
-    """YouCook2 train / val, plus more training sources: COIN's seen-task training videos when coin.train
-    (cfg['coin'], whose test sets also give the open-vocabulary scores when coin.eval), and every
-    cfg['extra_train'] source with ratio > 0 (ActivityNet Captions, HT-Step: tools/extra_data.py), read by the
-    same dataset class from YouCook2-format files, training subset only.
-
-    Returns ds (YouCook2 train), dv, dl (train loader), dlv, extra {name: train dataset}, ov {name: (loader, ds)}.
-    Every batch draws each source's ratio of its videos from it on average (coin.batch_ratio, extra_train.<name>.ratio),
-    YouCook2 the rest, and an epoch has as many batches as YouCook2 alone would have / its share.
-    Source ids (pool_src) follow the order YouCook2 0, COIN, then the extra sources.
-    """
-    ds = YouCook2CaptionDataset(True, cfg['train_split'], **cfg['dataset'])
-    dv = YouCook2CaptionDataset(False, cfg['val_split'], **cfg['dataset'])
-    cc = cfg.get('coin') or {}
-    have_coin = bool(cc) and os.path.exists(cc['anno_file']) and os.path.isdir(cc['iv2_folder'])
-    # the other sources have 1 feature row per second unless their config says otherwise (YouCook2 may use 2)
-    common = dict(cfg['dataset'], anno_file=cc.get('anno_file'), label_emb_file=cc.get('label_emb_file'),
-                  iv2_folder=cc.get('iv2_folder'), iv2_rows_per_sec=cc.get('iv2_rows_per_sec', 1))
-    extra, ratio = {}, {}
-    if cc.get('train'):
-        assert have_coin, 'coin.train needs %s and %s (tools/coin_data.py)' % (cc.get('anno_file'), cc.get('iv2_folder'))
-        extra['coin'] = CoinCaptionDataset(True, ['train'], pad_omni=ds.omni, **common)
-        ratio['coin'] = cc.get('batch_ratio', 0.5)
-    for name, ec in (cfg.get('extra_train') or {}).items():
-        if ec.get('ratio', 0) > 0:
-            extra[name] = YouCook2CaptionDataset(True, cfg['train_split'], **dict(
-                cfg['dataset'], json_file=ec['json_file'], caption_emb_file=ec['caption_emb_file'],
-                iv2_folder=ec['iv2_folder'], iv2_rows_per_sec=ec.get('iv2_rows_per_sec', 1),
-                omni_emb_file=None, pad_omni=ds.omni))
-            ratio[name] = ec['ratio']
-    train_set, sampler = ds, RandomSampler(ds)
-    if extra:
-        offset = len(ds.pool_text)
-        for i, d in enumerate(extra.values()):
-            d.source, d.pool_offset = i + 1, offset
-            offset += len(d.pool_text)
-        r0 = 1 - sum(ratio.values())
-        assert r0 > 0, 'the extra sources take the whole batch: %s' % ratio
-        train_set = torch.utils.data.ConcatDataset([ds, *extra.values()])
-        w = torch.cat([torch.full((len(ds),), r0 / len(ds))]
-                      + [torch.full((len(d),), ratio[n] / len(d)) for n, d in extra.items()])
-        sampler = torch.utils.data.WeightedRandomSampler(w.double(), int(round(len(ds) / r0)), generator=rng)
-    dl = DataLoader(train_set, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                    sampler=sampler, collate_fn=trivial_batch_collator,
-                    worker_init_fn=worker_init_reset_seed, drop_last=True, generator=rng,
-                    persistent_workers=cfg['num_workers'] > 0)
-    dlv = DataLoader(dv, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                     sampler=SequentialSampler(dv), collate_fn=trivial_batch_collator)
-    ov = {}
-    if cc.get('eval', True) and have_coin:
-        for name, role in (('unseen', 'test_unseen'), ('seen', 'test_seen')):
-            d = CoinCaptionDataset(False, [role], **common)
-            ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                                   sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
-    # the other sources' validation sets, scored on segmentation whenever their files are here (ratio 0 too)
-    for name, ec in (cfg.get('extra_train') or {}).items():
-        if ec.get('eval', True) and os.path.exists(ec['json_file']) and os.path.isdir(ec['iv2_folder']):
-            d = YouCook2CaptionDataset(False, cfg['val_split'], **dict(
-                cfg['dataset'], json_file=ec['json_file'], caption_emb_file=ec['caption_emb_file'],
-                iv2_folder=ec['iv2_folder'], iv2_rows_per_sec=ec.get('iv2_rows_per_sec', 1), omni_emb_file=None))
-            if len(d):
-                ov[name] = (DataLoader(d, batch_size=cfg['batch_size'], num_workers=cfg['num_workers'],
-                                       sampler=SequentialSampler(d), collate_fn=trivial_batch_collator), d)
-    return ds, dv, dl, dlv, extra, ov
-
-
-def eval_only(a, model, dlv, dev, pool_raw, pool_text, ov=None):
-    """Score one checkpoint under several NMS / ranking settings, with all variants."""
-    ck = load_weights(model, a.eval)
-    print('Checkpoint   : %s (epoch %d)' % (a.eval, ck['epoch'] + 1), flush=True)
-    powers = a.iou_power.split(',') if a.iou_power else [str(model.iou_power)]
-    for power in powers:
-        model.iou_power = float(power)
-        for spec in a.nms.split(','):
-            kind, *rest = spec.split(':')
-            model.nms_cfg = {'soft': kind == 'soft', 'iou': float(rest[0]),
-                             'sigma': float(rest[1]) if len(rest) > 1 else 0.5}
-            m = evaluate(model, dlv, dev, pool_raw, pool_text, full=not a.fast)
-            m.update(ov_scores(model, ov or {}, dev))
-            add_seg_avg(m)
-            print('\niou_power %s  NMS %-14s' % (power, spec)
-                  + '  '.join('%s %.3f' % (k, v) for k, v in m.items()), flush=True)
-
-
-def apply_overrides(cfg, items):
-    """--set a.b.c=value overrides the config; values are parsed as YAML (numbers, bools, lists)."""
-    for it in items:
-        key, val = it.split('=', 1)
-        node, parts = cfg, key.split('.')
-        for k in parts[:-1]:
-            node = node.setdefault(k, {})
-        node[parts[-1]] = yaml.safe_load(val)
-        print('Override     : %s = %r' % (key, node[parts[-1]]), flush=True)
-
-
-def git_state():
-    """Commit hash and whether tracked source files have uncommitted changes.
-
-    Build artefacts (*.egg-info) are ignored: installing nms_1d_cpu rewrites them.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    run = lambda *c: subprocess.run(c, cwd=here, capture_output=True, text=True).stdout.strip()
-    try:
-        changed = [l for l in run('git', 'status', '--porcelain', '--untracked-files=no').splitlines()
-                   if '.egg-info/' not in l]
-        return {'commit': run('git', 'rev-parse', '--short', 'HEAD'),
-                'branch': run('git', 'rev-parse', '--abbrev-ref', 'HEAD'),
-                'dirty': bool(changed)}
-    except OSError:
-        return {'commit': 'unknown', 'branch': 'unknown', 'dirty': None}
-
-
-class RunRecord:
-    """Everything needed to compare and reproduce a run, saved after every epoch."""
-
-    def __init__(self, a, cfg, out_dir):
-        self.path = os.path.join(RUNS_DIR, '%s-%s.json' % (socket.gethostname(), a.output))
-        os.makedirs(RUNS_DIR, exist_ok=True)
-        self.data = {
-            'run': a.output, 'host': socket.gethostname(),
-            'gpu': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu',
-            'started': time.strftime('%Y-%m-%d %H:%M:%S'), 'finished': None,
-            'git': git_state(), 'argv': sys.argv, 'overrides': a.set, 'note': a.note,
-            'epochs': a.epochs, 'out_dir': out_dir,
-            'config': cfg, 'history': [], 'best': {}, 'final_eval': None,
-        }
-        self.save()
-
-    @classmethod
-    def load(cls, run):
-        rec = cls.__new__(cls)
-        rec.path = os.path.join(RUNS_DIR, '%s-%s.json' % (socket.gethostname(), run))
-        with open(rec.path) as f:
-            rec.data = json.load(f)
-        return rec
-
-    def save(self):
-        with open(self.path, 'w') as f:
-            json.dump(self.data, f, indent=1, default=str)
-
-
-def main(a):
-    # ======================================= LOAD CONFIG =======================================================
-    with open(a.config) as f:
-        cfg = yaml.safe_load(f)
-    apply_overrides(cfg, a.set)
-    dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    rng = fix_random_seed(cfg.get('init_rand_seed', 1234567891), include_cuda=True)
-    out_dir = os.path.join(cfg['output_folder'], a.output)
-
+def main():
+    # ======================================= SEED =======================================================
+    random.seed(C.SEED)
+    np.random.seed(C.SEED)
+    torch.manual_seed(C.SEED)
+    dev = torch.device('cuda')
 
     # ======================================= LOADER =======================================================
-    ds, dv, dl, dlv, extra, ov = build_loaders(cfg, rng) # dataset_train, dataset_val, loader_train, loader_val, _, _
-    
-    print('Data         : %d train / %d val videos' % (len(ds), len(dv)), flush=True)
-    for name, d in extra.items():
-        r = cfg['coin'].get('batch_ratio', 0.5) if name == 'coin' else cfg['extra_train'][name]['ratio']
-        print('%-12s : %d training videos, %d unique captions, %.0f%% of every batch' % (
-            name, len(d), len(d.pool_text), 100 * r), flush=True)
-    if extra:
-        print('Batches      : %d per epoch, YouCook2 the rest of every batch' % len(dl), flush=True)
-    for name, (_, d) in ov.items():
-        if hasattr(d, 'labels'):
-            print('COIN %-7s : %d videos (open-vocabulary scores, %d labels in the bank)' % (name, len(d), len(d.labels)),
-                  flush=True)
-        else:
-            print('%-12s : %d validation videos (segmentation)' % (name, len(d)), flush=True)
-    # the input width follows the feature source; stored in the run record's config
-    cfg['model']['input_dim_V'], cfg['model']['input_dim_A'] = ds.feat_dims
-    print('Features     : InternVideo2 %s + BEATs a768, %d row(s)/s, visual %d + audio %d channels' % (
-        '+'.join(ds.iv2_video_keys), ds.iv2_rows_per_sec, *ds.feat_dims), flush=True)
+    train_set = YouCook2Dataset('training', is_training=True)
+    val_set = YouCook2Dataset('validation', is_training=False)
+    train_loader = DataLoader(train_set, batch_size=C.BATCH_SIZE, num_workers=C.NUM_WORKERS,
+                              sampler=RandomSampler(train_set), collate_fn=trivial_batch_collator,
+                              worker_init_fn=worker_init_reset_seed, drop_last=True)
+    val_loader = DataLoader(val_set, batch_size=C.BATCH_SIZE, num_workers=C.NUM_WORKERS,
+                            sampler=SequentialSampler(val_set), collate_fn=trivial_batch_collator)
+    pool_text = train_set.pool_text
+    print('Data: %d train / %d val videos, %d unique train captions'
+          % (len(train_set), len(val_set), len(pool_text)))
 
-    if ds.omni:
-        cfg['model']['omni_dim'] = ds.omni_dim
-        use_omni_columns()
-    cfg['model']['clip_dim'] = ds.pool_train.shape[1]   # caption space (dataset.caption_space)
-    if cfg['model']['train_cfg'].get('loss_weight_other', 0) > 0:
-        use_other_column()
-    if cfg['model']['train_cfg'].get('loss_weight_o2o', 0) > 0:
-        _add_loss_columns(('o2o', 'o2o_loss', 6, '.3f'))
-    if cfg['model']['train_cfg'].get('loss_weight_ground', 0) > 0:
-        use_ground_columns()
-        
-        
     # ======================================= MODEL CALLED HERE =======================================================
-    model = EventCaptionTransformer(**cfg['model']).to(dev)
-    print('Parameters   : %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6), flush=True)
+    model = EventCaptionModel(torch.from_numpy(train_set.pool_emb)).to(dev)
+    print('Parameters: %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6))
 
-    # the caption pool comes from the TRAIN split only; val captions are never used. With other sources it
-    # also holds their training captions (COIN labels, ActivityNet / HT-Step sentences; pool_src 1, 2, ...);
-    # YouCook2 captioning is still scored against the YouCook2 captions only (pool_raw)
-    pool_raw = torch.from_numpy(ds.pool_train).to(dev)
-    joint, src = pool_raw, torch.zeros(len(pool_raw), dtype=torch.long, device=dev)
-    if extra:
-        assert ds.caption_space == 'iv2', 'other sources join the InternVideo2 caption space only'
-        joint = torch.cat([pool_raw] + [torch.from_numpy(d.pool_emb).to(dev) for d in extra.values()])
-        src = torch.cat([src] + [torch.full((len(d.pool_emb),), d.source, dtype=torch.long, device=dev)
-                                 for d in extra.values()])
-    other = next((d.other for d in (ds, *extra.values()) if d.other is not None), None)
-    model.set_caption_pool(joint, src, None if other is None else torch.from_numpy(other).to(dev))
-    if ds.caption_space != 'iv2':
-        model.pool_metric = torch.from_numpy(ds.pool_emb).to(dev)
-        print('Captions     : trained and picked in %s space (%d-d); metrics in InternVideo2 text space'
-              % (ds.caption_space, pool_raw.shape[1]), flush=True)
-    if ds.omni:
-        pad = len(joint) - len(ds.omni_text_pool)   # only YouCook2 captions have teacher vectors
-        model.set_omni_pool(torch.from_numpy(np.concatenate((ds.omni_text_pool, np.zeros((pad, ds.omni_dim), np.float16)))).to(dev),
-                            torch.from_numpy(np.concatenate((ds.omni_text_ok, np.zeros(pad, bool)))).to(dev),
-                            torch.from_numpy(ds.omni_av_pool).to(dev),
-                            torch.as_tensor(ds.av_text_idx, dtype=torch.long, device=dev))
-    print('Caption pool : %d unique train captions%s' % (
-        len(ds.pool_text), ''.join(' + %d %s' % (len(d.pool_text), n) for n, d in extra.items())), flush=True)
-    if any(n in ov for n in ('unseen', 'seen')):
-        use_ov_columns()
-    if ov:
-        use_seg_columns(list(ov))
-    if a.init:   # fine-tune: start from these weights (new modules keep their init)
-        sd = upgrade_state_dict(load_ckpt(a.init)['state_dict'])
-        miss, unused = model.load_state_dict(sd, strict=False)
-        print('Init         : %s (%d missing, %d unused keys%s)' % (
-            a.init, len(miss), len(unused), ': ' + ', '.join(sorted({k.split('.')[0] for k in miss + unused}))
-            if miss or unused else ''), flush=True)
-    if a.eval:
-        return eval_only(a, model, dlv, dev, pool_raw, ds.pool_text, ov)
-    if a.finalize:   # redo the final evaluation of a finished run, e.g. after a crash in it
-        rec = RunRecord.load(a.output)
-        return finalize(rec, model, dlv, dev, pool_raw, ds.pool_text, ov)
-    os.makedirs(out_dir, exist_ok=True)
-    rec = RunRecord(a, cfg, out_dir)
-    print('Output       : %s' % out_dir)
-    print('Run record   : %s (commit %s%s)' % (rec.path, rec.data['git']['commit'],
-                                               ', DIRTY' if rec.data['git']['dirty'] else ''), flush=True)
+    opt = build_optimizer(model)
+    n_epochs = C.EPOCHS + C.WARMUP_EPOCHS
+    warmup_steps = C.WARMUP_EPOCHS * len(train_loader)
+    total_steps = n_epochs * len(train_loader)
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, warmup_steps, total_steps))
+    ema = ModelEma(model)
+    os.makedirs(C.OUT_DIR, exist_ok=True)
 
-    opt = build_optimizer(model, cfg['opt'])
-    sch = make_scheduler(opt, cfg['opt'], len(dl), a.epochs)
-    ema = ModelEma(model, cfg['train_cfg']['ema_decay']) if cfg['train_cfg'].get('ema_decay', 0) > 0 else None
-    if ema is not None:
-        print('EMA         : decay %g, evaluated and saved instead of the raw weights' % ema.decay, flush=True)
-    net = ema.module if ema is not None else model   # the weights that are evaluated and saved
-    n_ep = a.epochs + cfg['opt']['warmup_epochs']
-    # metric -> (best value, epoch, checkpoint name): each metric keeps its own best checkpoint
-    best = {'R@0.5': (-1.0, 0, 'best_seg'), 'CIDEr': (-1.0, 0, 'best_cap')}
-    print_header()
-    for ep in range(n_ep):
+    # ======================================= TRAIN =======================================================
+    best = -1
+    for ep in range(n_epochs):
         t0 = time.time()
-        acc = {}   # sum of every loss over the epoch
-        for batch in dl:
-            for x in batch:
-                x['feats'] = {k: v.to(dev) for k, v in x['feats'].items()}
+        losses = {}
+        for batch in train_loader:
             L = model(batch)
-            opt.zero_grad(set_to_none=True)
+            opt.zero_grad()
             L['final_loss'].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['train_cfg']['clip_grad_l2norm'])
+            torch.nn.utils.clip_grad_norm_(model.parameters(), C.CLIP_GRAD)
             opt.step()
-            sch.step()   # the schedule steps every iteration, not every epoch
-            if ema is not None:
-                ema.update(model)
+            sched.step()
+            ema.update(model)
             for k, v in L.items():
-                acc[k] = acc.get(k, 0.0) + v.detach().item()
-        m = evaluate(net, dlv, dev, pool_raw, ds.pool_text)
-        m.update(ov_scores(net, ov, dev))
-        add_seg_avg(m)
-        if 'R@0.5 avg' in m and 'R@0.5 avg' not in best:   # every dataset scored: best mean R@0.5 too
-            best['R@0.5 avg'] = (-1.0, 0, 'best_seg_avg')
+                losses[k] = losses.get(k, 0.0) + v.item() / len(train_loader)
+
+        m = evaluate(ema.module, val_loader, pool_text)
         mark = ''
-        for key, (val, _, name) in best.items():
-            if m[key] > val:
-                best[key] = (m[key], ep, name)
-                mark += {'R@0.5': 'S', 'CIDEr': 'C'}.get(key, 'A')
-                torch.save({'epoch': ep, 'state_dict': net.state_dict(), 'metrics': m},
-                           os.path.join(out_dir, name + '.pth.tar'))
-        vals = dict(m, **{k: v / len(dl) for k, v in acc.items()})   # val metrics + mean train losses
-        print_row('%d/%d' % (ep + 1, n_ep), time.time() - t0, sch.get_last_lr()[0], vals, mark)
-        rec.data['history'].append(dict(vals, epoch=ep + 1, seconds=round(time.time() - t0, 1)))
-        rec.data['best'] = {k: {'value': v, 'epoch': e + 1, 'ckpt': n} for k, (v, e, n) in best.items()}
-        rec.save()
-        # early stop: no best (R@0.5, CIDEr, R@0.5 avg) has improved for `patience` epochs
-        if a.patience and ep - max(e for _, e, _ in best.values()) >= a.patience:
-            print('Early stop   : no new best %s for %d epochs' % (' / '.join(best), a.patience), flush=True)
-            rec.data['stopped_early'] = ep + 1
-            rec.save()
-            break
-    print(RULE)
-    for key, (val, ep, name) in best.items():
-        print('Best %-6s = %6.2f at epoch %d -> %s' % (
-            key, val, ep + 1, os.path.join(out_dir, name + '.pth.tar')), flush=True)
-
-    finalize(rec, model, dlv, dev, pool_raw, ds.pool_text, ov)
-
-
-def finalize(rec, model, dlv, dev, pool_raw, pool_text, ov=None):
-    """Full evaluation of the run's best captioning checkpoint, stored in the run record."""
-    load_weights(model, os.path.join(rec.data['out_dir'], 'best_cap.pth.tar'))
-    final = evaluate(model, dlv, dev, pool_raw, pool_text, full=True)
-    final.update(ov_scores(model, ov or {}, dev))
-    add_seg_avg(final)
-    rec.data['final_eval'] = dict(final, ckpt='best_cap')
-    rec.data['finished'] = rec.data.get('finished') or time.strftime('%Y-%m-%d %H:%M:%S')
-    rec.save()
-    print('Final eval   : ' + '  '.join('%s %.3f' % (k, v) for k, v in final.items()), flush=True)
+        if m['R@0.5'] > best:
+            best = m['R@0.5']
+            mark = '  <- best R@0.5, saved'
+            torch.save({'epoch': ep + 1, 'state_dict': ema.module.state_dict(), 'metrics': m},
+                       os.path.join(C.OUT_DIR, 'best.pth.tar'))
+        print('epoch %2d/%d  %4.0fs  loss %.3f | R@0.3 %.2f  R@0.5 %.2f  R@0.7 %.2f  mIoU %.2f | '
+              'txt_sim %.3f  CIDEr %.2f | G R1@0.5 %.2f%s'
+              % (ep + 1, n_epochs, time.time() - t0, losses['final_loss'], m['R@0.3'], m['R@0.5'], m['R@0.7'],
+                 m['mIoU'], m['txt_sim'], m['CIDEr'], m['G R1@0.5'], mark), flush=True)
+    print('Best R@0.5 = %.2f' % best)
 
 
 if __name__ == '__main__':
-    p = argparse.ArgumentParser()
-    p.add_argument('config'); p.add_argument('--output', default='ev1')
-    p.add_argument('--epochs', type=int, default=10,
-                   help='40 epochs overfit from epoch 7; 10 is enough')
-    p.add_argument('--eval', default='', help='only score this checkpoint, no training')
-    p.add_argument('--init', default='', help='start training from the weights of this checkpoint (fine-tune)')
-    p.add_argument('--patience', type=int, default=0,
-                   help='stop when neither best R@0.5 nor best CIDEr improved for this many epochs (0 = off)')
-    p.add_argument('--nms', default='soft:0.7:0.5',
-                   help='NMS settings to score with --eval, comma separated, e.g. soft:0.7:0.5,hard:0.5')
-    p.add_argument('--iou-power', default='',
-                   help='--eval: IoU-score weights to try, comma separated; empty keeps the config value')
-    p.add_argument('--fast', action='store_true', help='--eval: skip the slow variants')
-    p.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
-                   help='override the config, e.g. --set init_rand_seed=2 model.train_cfg.loss_weight_omni_av=0.5')
-    p.add_argument('--note', default='', help='free text stored in the run record')
-    p.add_argument('--finalize', action='store_true',
-                   help='only redo the final evaluation of the finished run --output (same --set as training)')
-    main(p.parse_args())
+    main()
