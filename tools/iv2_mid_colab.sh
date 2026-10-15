@@ -8,7 +8,9 @@ ROOT=${ROOT:-/content}
 NAME=${NAME:-colab}
 cd "$ROOT"
 [ -n "$HF_TOKEN" ] || export HF_TOKEN=$(cat "$ROOT/hf_token")
-pip install -q einops timm huggingface_hub >/dev/null 2>&1
+pip install -q einops timm >/dev/null 2>&1
+# old images (Kaggle: 0.14) ignore HF_TOKEN; stay below 1.0 for older transformers
+python -c "import huggingface_hub as h, sys; sys.exit(tuple(map(int, h.__version__.split('.')[:2])) < (0, 20))" || pip install -q "huggingface_hub>=0.20,<1.0" >/dev/null 2>&1
 [ -d InternVideo ] || git clone -q --depth 1 https://github.com/OpenGVLab/InternVideo
 mkdir -p tools
 for f in extract_internvideo2.py iv2_mid_hub.py; do
