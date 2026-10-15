@@ -29,6 +29,21 @@ for t in sorted(os.listdir(d + '/iv2_feats')):
 os.system('cp %s/teacher/omni_emb_full.npz data/youcookii/' % d)
 print('youcook2 features:', len(os.listdir('data/youcookii/iv2_feats')))
 PY
+  if [ -n "$IV2_MID" ]; then   # InternVideo2 middle-layer features (m20/m30/m35) and their training-set mean
+    python - <<'PY'
+import os
+from huggingface_hub import snapshot_download, HfApi
+d = snapshot_download('nguyenminh04/uniav-youcook2-data', repo_type='dataset', local_dir='/content/hf_yc',
+                      allow_patterns=['iv2_mid/*', 'iv2_mid_mean.npz'], token=os.environ['HF_TOKEN'])
+os.system('ln -sfn %s/iv2_mid data/youcookii/iv2_mid' % d)
+print('youcook2 iv2_mid:', len(os.listdir('data/youcookii/iv2_mid')))
+if os.path.exists(d + '/iv2_mid_mean.npz'):
+    os.system('cp %s/iv2_mid_mean.npz data/youcookii/' % d)
+else:
+    os.system('python tools/iv2_mid_mean.py --upload')
+PY
+  fi
+  [ -n "$YC_ONLY" ] && exit 0   # YouCook2-only runs: no COIN / ActivityNet / HT-Step (their features lack m* keys)
   python tools/coin_data.py fetch --cache /content/hf_coin
   python tools/extra_data.py fetch anet --cache /content/hf_anet
   python tools/extra_data.py fetch htstep --cache /content/hf_htstep
@@ -49,11 +64,19 @@ queue)
       ALL) ARGS="coin.train=true coin.batch_ratio=0.2 extra_train.anet.ratio=0.3 extra_train.htstep.ratio=0.1" ;;  # every training set
       E1) ARGS="train_cfg.ema_decay=0.999" ;;                               # localization options on R0
       E2) ARGS="dataset.center_sample_radius=1.5" ;;
+      # InternVideo2 middle layers (setup with IV2_MID=1 YC_ONLY=1); *_s2 = second seed
+      M35) ARGS="train_cfg.ema_decay=0.999 dataset.iv2_video_keys=[m35]" ;;
+      M35_s2) ARGS="train_cfg.ema_decay=0.999 dataset.iv2_video_keys=[m35] init_rand_seed=1234567892" ;;
+      VM35) ARGS="train_cfg.ema_decay=0.999 dataset.iv2_video_keys=[v768,m35]" ;;
+      VM35_s2) ARGS="train_cfg.ema_decay=0.999 dataset.iv2_video_keys=[v768,m35] init_rand_seed=1234567892" ;;
+      M30) ARGS="train_cfg.ema_decay=0.999 dataset.iv2_video_keys=[m30]" ;;
+      M20) ARGS="train_cfg.ema_decay=0.999 dataset.iv2_video_keys=[m20]" ;;
+      E1_s2) ARGS="train_cfg.ema_decay=0.999 init_rand_seed=1234567892" ;;
       *) echo "unknown run $run"; continue ;;
     esac
     echo "$(date +%H:%M:%S) start $run: $ARGS"
     python -u train.py configs/youcook2_event.yaml --output ov_$run --note "PLAN_openvocab $run" \
-      --set num_workers=4 $ARGS > /content/ov_logs/$run.log 2>&1 || echo "$(date +%H:%M:%S) $run exited with $?"
+      --epochs ${EPOCHS:-10} ${PATIENCE:+--patience $PATIENCE} --set num_workers=4 $ARGS > /content/ov_logs/$run.log 2>&1 || echo "$(date +%H:%M:%S) $run exited with $?"
     echo "$(date +%H:%M:%S) end $run"
   done
   ;;

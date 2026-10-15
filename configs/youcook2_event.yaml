@@ -46,6 +46,10 @@ dataset:
   iv2_video_keys: [v768]   # v768 = pooled vision, v512 = its projection into InternVideo2's text space
   iv2_l2norm: true
   iv2_rows_per_sec: 1      # 2 with iv2_folder ./data/youcookii/iv2_dense (tools/make_iv2_dense.py)
+  # m20/m30/m35 in iv2_video_keys: InternVideo2 middle blocks (tools/iv2_mid_hub.py), centred on the
+  # training-set mean of tools/iv2_mid_mean.py. YouCook2 only: no other dataset has them.
+  iv2_mid_folder: ./data/youcookii/iv2_mid
+  iv2_mid_mean: ./data/youcookii/iv2_mid_mean.npz
   center_sample_radius: 0.0  # > 0 (ActionFormer: 1.5): only points within this many strides of a step's centre are positive
   # feature augmentation of training items (YouCook2CaptionDataset._augment), all off by default
   aug_stretch: false     # true: the crop is resampled back to max_seq_len (with crop_ratio [0.6, 1.0]: speed jitter)

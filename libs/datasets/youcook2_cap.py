@@ -53,7 +53,8 @@ class YouCook2CaptionDataset(Dataset):
         max_buffer_len_factor, scale_factor, regression_range, backbone_arch, trunc_thresh,
         crop_ratio, num_classes, force_upsampling=True, omni_emb_file=None, feat_source='iv2',
         iv2_folder='./data/youcookii/iv2_feats', iv2_video_keys=('v768',), iv2_l2norm=True,
-        iv2_rows_per_sec=1, caption_space='iv2', center_sample_radius=0.0, pad_omni=False,
+        iv2_rows_per_sec=1, iv2_mid_folder='./data/youcookii/iv2_mid', iv2_mid_mean=None,
+        caption_space='iv2', center_sample_radius=0.0, pad_omni=False,
         aug_stretch=False, aug_modal_drop=0.0, aug_mask_spans=0, aug_mask_width=4, aug_noise=0.0, **legacy,
     ):
         unknown = set(legacy) - LEGACY_KEYS
@@ -66,6 +67,15 @@ class YouCook2CaptionDataset(Dataset):
         self.iv2_video_keys = list(iv2_video_keys)
         self.iv2_l2norm = iv2_l2norm
         self.iv2_rows_per_sec = iv2_rows_per_sec   # 2: tools/make_iv2_dense.py (iv2_folder: .../iv2_dense)
+        # m<k> keys: InternVideo2 block-k token means (tools/iv2_mid_hub.py), one file per video in iv2_mid_folder.
+        # Their rows share a large common direction (adjacent cosine ~0.99), so the training-set mean
+        # (tools/iv2_mid_mean.py, a fixed constant shipped with the model) is subtracted before the L2 norm.
+        self.iv2_mid_folder = iv2_mid_folder
+        self.iv2_mid_mean = {}
+        if any(k.startswith('m') for k in self.iv2_video_keys):
+            assert os.path.isdir(iv2_mid_folder), iv2_mid_folder
+            if iv2_mid_mean:
+                self.iv2_mid_mean = dict(np.load(iv2_mid_mean))
         self.force_upsampling = force_upsampling
         self.split = split
         self.is_training = is_training
@@ -196,7 +206,7 @@ class YouCook2CaptionDataset(Dataset):
     @property
     def feat_dims(self):
         """(visual, audio) channel counts of the model input."""
-        return sum(512 if k == 'v512' else 768 for k in self.iv2_video_keys), 768
+        return sum({'v512': 512, 'v768': 768}.get(k, 1408) for k in self.iv2_video_keys), 768
 
     def _load_features(self, vid):
         """Visual and audio rows (n, C), plus their step and window in frames.
@@ -204,13 +214,16 @@ class YouCook2CaptionDataset(Dataset):
         Row i is centred on i / rows_per_sec + 0.5 s: stride 1 / rows_per_sec s, window 1 s.
         """
         z = np.load(os.path.join(self.iv2_folder, vid + '.npz'))
-        parts = [z[k].astype(np.float32) for k in self.iv2_video_keys]
+        mid = (np.load(os.path.join(self.iv2_mid_folder, vid + '.npz'))
+               if any(k.startswith('m') for k in self.iv2_video_keys) else None)
+        parts = [(mid[k].astype(np.float32) - self.iv2_mid_mean.get(k, 0.0)) if k.startswith('m')
+                 else z[k].astype(np.float32) for k in self.iv2_video_keys]
         fa = z['a768'].astype(np.float32)
         if self.iv2_l2norm:   # raw norms differ widely: v768 ~54, a768 ~6, v512 is already 1
             parts = [p / np.maximum(np.linalg.norm(p, axis=1, keepdims=True), 1e-6) for p in parts]
             fa = fa / np.maximum(np.linalg.norm(fa, axis=1, keepdims=True), 1e-6)
-        fv = np.concatenate(parts, axis=1)
-        n = min(fv.shape[0], fa.shape[0])
+        n = min(min(len(p) for p in parts), fa.shape[0])
+        fv = np.concatenate([p[:n] for p in parts], axis=1)
         return fv[:n], fa[:n], self.default_fps // self.iv2_rows_per_sec, self.default_fps
 
     def _augment(self, d, feat_offset):
