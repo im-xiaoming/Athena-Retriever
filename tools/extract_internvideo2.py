@@ -13,6 +13,11 @@ centred on each second, mean-pooled to
   a768 : audio embedding
 Each video becomes <out>/<video_id>.npz (float16) with n_sec rows. Existing outputs are
 skipped, so the script resumes. Decoding runs in a thread pool ahead of the GPU.
+
+--mid-layers 20 30 35 writes only intermediate features instead (no audio, no pooling):
+  m<k> : mean over the patch tokens (CLS dropped) of the output of block k (0-based, of 40),
+         same windows and rows as v768. The InternVideo2 paper detects actions from a middle
+         layer rather than the text-aligned pooled vector.
 """
 import argparse
 import os
@@ -141,12 +146,10 @@ def decode(path, ffmpeg='ffmpeg'):
 
 @torch.no_grad()
 def video_features(enc, proj, frames, device, batch=32, shift=0):
-    n_sec = max(1, int(np.ceil(len(frames) / 2)))
-    last = len(frames) - 1
     # shift (in frames at 2 fps) moves every window; shift=1 gives windows centred on i + 1.0 s
-    idx = np.clip(np.arange(n_sec)[:, None] * 2 + shift + np.array([-1, 0, 1, 2])[None], 0, last)   # (n_sec, 4)
+    idx = window_index(len(frames), shift)                                                   # (n_sec, 4)
     v768, v512 = [], []
-    for s in range(0, n_sec, batch):
+    for s in range(0, len(idx), batch):
         clip = (frames[idx[s:s + batch]].astype(np.float32) / 255.0 - MEAN) / STD           # (B,4,H,W,3)
         x = torch.from_numpy(clip).permute(0, 4, 1, 2, 3).to(device).half()                 # (B,3,4,H,W)
         # x_vis_only skips the CLIP-distillation decoders, which only matter in training
@@ -154,6 +157,30 @@ def video_features(enc, proj, frames, device, batch=32, shift=0):
         v768.append(pooled.float().cpu())
         v512.append(F.normalize(proj(pooled).float(), dim=-1).cpu())
     return torch.cat(v768).numpy(), torch.cat(v512).numpy()
+
+
+def window_index(n_frames, shift=0):
+    """Frame indices (n_sec, 4) of each 2 s window; shift (in frames at 2 fps) moves every window."""
+    n_sec = max(1, int(np.ceil(n_frames / 2)))
+    return np.clip(np.arange(n_sec)[:, None] * 2 + shift + np.array([-1, 0, 1, 2])[None], 0, n_frames - 1)
+
+
+@torch.no_grad()
+def mid_features(enc, frames, device, layers, batch=32, shift=0):
+    """{'m<k>': (n_sec, 1408)} token means of block k; the forward stops after the deepest block asked for."""
+    idx = window_index(len(frames), shift)
+    got = {k: [] for k in layers}
+    hooks = [enc.blocks[k].register_forward_hook(
+        lambda m, inp, out, k=k: got[k].append(out[:, 1:].float().mean(dim=1).cpu())) for k in layers]
+    try:
+        for s in range(0, len(idx), batch):
+            clip = (frames[idx[s:s + batch]].astype(np.float32) / 255.0 - MEAN) / STD           # (B,4,H,W,3)
+            x = torch.from_numpy(clip).permute(0, 4, 1, 2, 3).to(device).half()                 # (B,3,4,H,W)
+            enc(x, None, False, x_vis_return_idx=max(layers) - enc.depth, x_vis_only=True)
+    finally:
+        for h in hooks:
+            h.remove()
+    return {'m%d' % k: torch.cat(v).numpy() for k, v in got.items()}
 
 
 @torch.no_grad()
@@ -174,7 +201,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--videos', required=True); p.add_argument('--out', required=True)
     p.add_argument('--repo', required=True); p.add_argument('--video-ckpt', required=True)
-    p.add_argument('--audio-ckpt', required=True)
+    p.add_argument('--audio-ckpt', default='', help='not needed with --mid-layers')
+    p.add_argument('--mid-layers', type=int, nargs='*', default=[],
+                   help='write only the token means of these blocks (m<k>), e.g. 20 30 35')
+    p.add_argument('--ffmpeg', default='ffmpeg')
     p.add_argument('--limit', type=int, default=0, help='only the first N videos (for timing)')
     p.add_argument('--workers', type=int, default=6, help='decode threads ahead of the GPU')
     p.add_argument('--shift', type=float, default=0.0, choices=(0.0, 0.5),
@@ -184,7 +214,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     dev = torch.device('cuda')
     enc, proj = build_video_model(a.repo, a.video_ckpt, dev)
-    beats = build_audio_model(a.repo, a.audio_ckpt, dev)
+    beats = None if a.mid_layers else build_audio_model(a.repo, a.audio_ckpt, dev)
     todo = sorted(f for f in os.listdir(a.videos) if f.endswith('.mp4')
                   and not os.path.exists(os.path.join(a.out, f[:-4] + '.npz')))
     if a.limit:
@@ -193,25 +223,34 @@ def main():
     t0, secs = time.time(), 0
     with ThreadPoolExecutor(a.workers) as ex:
         ahead = a.workers                  # bounded prefetch: decoded videos are ~200 MB each
-        futures = {i: ex.submit(decode, os.path.join(a.videos, todo[i])) for i in range(min(ahead, len(todo)))}
+        futures = {i: ex.submit(decode, os.path.join(a.videos, todo[i]), a.ffmpeg) for i in range(min(ahead, len(todo)))}
         for n, f in enumerate(todo, 1):
             frames, wav = futures.pop(n - 1).result()
             if n - 1 + ahead < len(todo):
-                futures[n - 1 + ahead] = ex.submit(decode, os.path.join(a.videos, todo[n - 1 + ahead]))
+                futures[n - 1 + ahead] = ex.submit(decode, os.path.join(a.videos, todo[n - 1 + ahead]), a.ffmpeg)
             if len(frames) == 0:
                 print('SKIP %s: no frames' % f, flush=True); continue
-            try:   # one bad video must not stop the others
-                v768, v512 = video_features(enc, proj, frames, dev, shift=int(a.shift * 2))
-                a768 = (audio_features(beats, wav, len(v768), dev, shift=a.shift) if len(wav)
-                        else np.zeros((len(v768), 768), np.float32))
-            except Exception as e:
-                print('FAIL %s: %r' % (f, e), flush=True); continue
-            np.savez(os.path.join(a.out, f[:-4] + '.npz'), v768=v768.astype(np.float16),
-                     v512=v512.astype(np.float16), a768=a768.astype(np.float16))
-            secs += len(v768)
+            if a.mid_layers:
+                try:
+                    mid = mid_features(enc, frames, dev, a.mid_layers, shift=int(a.shift * 2))
+                except Exception as e:
+                    print('FAIL %s: %r' % (f, e), flush=True); continue
+                np.savez(os.path.join(a.out, f[:-4] + '.npz'), **{k: v.astype(np.float16) for k, v in mid.items()})
+                n_rows = len(next(iter(mid.values())))
+            else:
+                try:   # one bad video must not stop the others
+                    v768, v512 = video_features(enc, proj, frames, dev, shift=int(a.shift * 2))
+                    a768 = (audio_features(beats, wav, len(v768), dev, shift=a.shift) if len(wav)
+                            else np.zeros((len(v768), 768), np.float32))
+                except Exception as e:
+                    print('FAIL %s: %r' % (f, e), flush=True); continue
+                np.savez(os.path.join(a.out, f[:-4] + '.npz'), v768=v768.astype(np.float16),
+                         v512=v512.astype(np.float16), a768=a768.astype(np.float16))
+                n_rows = len(v768)
+            secs += n_rows
             el = time.time() - t0
             print('%s %d/%d %s: %d s | %.1f video-s/s | ETA %.0f min' % (
-                time.strftime('%H:%M:%S'), n, len(todo), f, len(v768), secs / el,
+                time.strftime('%H:%M:%S'), n, len(todo), f, n_rows, secs / el,
                 (len(todo) - n) * el / n / 60), flush=True)
     print('EXTRACT_DONE', flush=True)
 
