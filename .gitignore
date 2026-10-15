@@ -2,3 +2,6 @@ data/youcookii/iv2_feats
 ckpt/
 __pycache__/
 *.pyc
+libs/utils/build/
+libs/utils/dist/
+libs/utils/*.egg-info/
