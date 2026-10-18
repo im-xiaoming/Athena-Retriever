@@ -153,30 +153,25 @@ def valid_one_epoch(
 ):
     """Chấm điểm tách bước và gán caption trên tập validation.
 
-    R@t      : tỉ lệ bước GT khớp với một trong top-k dự đoán (k = số bước GT của video) với IoU >= t
-    mIoU     : trung bình IoU tốt nhất của mỗi bước GT
-    txt_sim  : cosine (không gian text InternVideo2) giữa caption chọn cho bước đã khớp và caption GT
-    CIDEr    : độ đo caption thông dụng, dựa trên từ trùng nhau
-    G R1@0.5 : grounding, lấy từng caption GT làm câu hỏi, phải tìm ra đúng đoạn của nó với IoU >= 0.5
-    Phần caption chỉ chấm trên các bước GT có dự đoán khớp với IoU >= 0.3.
+    R@0.5 : tỉ lệ bước GT khớp với một trong top-k dự đoán (k = số bước GT của video) với IoU >= 0.5
+    CIDEr : độ đo caption thông dụng, dựa trên từ trùng nhau; chỉ chấm trên các bước GT
+            có dự đoán khớp với IoU >= 0.3
     """
     model.eval()
     pool_f = model.embed_head.embed_captions(model.pool_raw)
     pool_n = F.normalize(model.pool_raw, dim=-1)
     scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
 
-    best_ious, txt_sim, g_ious = [], [], []
+    best_ious = []
     gts_txt, hyp = {}, {}
     for video_list in val_loader:
         for x in video_list:
             x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
         for r, x in zip(model(video_list), video_list):
             gts = r['gt_segments']
-            g_ious += [iou(p, g) for p, g in zip(r['ground_segments'].tolist(), gts)]
             # giữ số dự đoán (điểm cao trước) bằng số bước GT của video
             k = min(len(gts), len(r['segments']))
             preds = r['segments'][:k].tolist()
-            cap_n = F.normalize(x['cap_emb'].to(device), dim=-1)
             for gi, gt in enumerate(gts):
                 vals = [iou(p, gt) for p in preds] or [0.0]
                 j = int(np.argmax(vals))   # dự đoán khớp với bước GT này nhất
@@ -184,12 +179,8 @@ def valid_one_epoch(
                 if vals[j] < 0.3:          # chỉ chấm caption ở các bước đã khớp
                     continue
                 i = mbr_pick(pool_f @ r['embeds'][j].to(device), pool_n, scale)
-                txt_sim.append(float(pool_n[i] @ cap_n[gi]))
                 gts_txt[len(gts_txt)] = [x['cap_text'][gi]]
                 hyp[len(hyp)] = [pool_text[i]]
 
-    best_ious = np.array(best_ious)
-    return {'R@0.3': 100 * np.mean(best_ious >= 0.3), 'R@0.5': 100 * np.mean(best_ious >= 0.5),
-            'R@0.7': 100 * np.mean(best_ious >= 0.7), 'mIoU': 100 * np.mean(best_ious),
-            'txt_sim': np.mean(txt_sim), 'CIDEr': Cider().compute_score(gts_txt, hyp)[0] * 100,
-            'G R1@0.5': 100 * np.mean(np.array(g_ious) >= 0.5)}
+    return {'R@0.5': 100 * np.mean(np.array(best_ious) >= 0.5),
+            'CIDEr': Cider().compute_score(gts_txt, hyp)[0] * 100}

@@ -5,3 +5,5 @@ __pycache__/
 libs/utils/build/
 libs/utils/dist/
 libs/utils/*.egg-info/
+*.ipynb
+data/youcookii/omni_emb_full.npz

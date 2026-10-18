@@ -1,5 +1,6 @@
 import torch
 from .data_utils import trivial_batch_collator, worker_init_reset_seed
+from typing import Literal
 
 datasets = {}
 def register_dataset(name):
@@ -16,7 +17,10 @@ def register_generator(name):
         return cls
     return decorator
 
-def make_dataset(name, is_training, split, **kwargs):
+
+# kwargs = dict(cfg['dataset'], scale_factor=cfg['model']['scale_factor'],
+#                     regression_range=cfg['model']['regression_range'], backbone_arch=cfg['model']['backbone_arch'])
+def make_dataset(name, is_training: bool, split: Literal['training', 'validation'], **kwargs):
    """
        Tạo dataset từ tên đã đăng ký
    """
@@ -32,7 +36,7 @@ def make_data_loader(dataset, is_training, generator, batch_size, num_workers, s
         batch_size=batch_size,
         num_workers=num_workers,
         sampler=sampler,
-        collate_fn=trivial_batch_collator,
+        collate_fn=trivial_batch_collator, # do nothing
         worker_init_fn=(worker_init_reset_seed if is_training else None),
         drop_last=is_training,
         generator=generator,

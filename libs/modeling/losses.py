@@ -1,5 +1,7 @@
 import torch
 from torch.nn import functional as F
+from typing import Tuple
+from torch import Tensor
 
 @torch.jit.script
 def sigmoid_focal_loss(
@@ -20,16 +22,16 @@ def sigmoid_focal_loss(
     gamma: số mũ của (1 - p_t), càng lớn thì mẫu dễ càng bị giảm trọng số
     reduction: 'none' | 'mean' | 'sum'
     """
-    inputs = inputs.float()
-    targets = targets.float()
-    p = torch.sigmoid(inputs)
-    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    p_t = p * targets + (1 - p) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
+    inputs = inputs.float() # (V,)
+    targets = targets.float() # (V,)
+    p = torch.sigmoid(inputs) # (V,)
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none") # (V,)
+    p_t = p * targets + (1 - p) * (1 - targets) # (V,)
+    loss = ce_loss * ((1 - p_t) ** gamma) # (V,)
 
     if alpha >= 0:
-        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-        loss = alpha_t * loss
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets) # (V,)
+        loss = alpha_t * loss # (V,)
 
     if reduction == "mean":
         loss = loss.mean()
@@ -46,7 +48,7 @@ def ctr_diou_loss_1d(
     reduction: str = 'none',
     class_aware: bool = False,
     eps: float = 1e-8,
-) -> torch.Tensor:
+) -> Tuple[Tensor, Tensor]:
     """
     Distance-IoU loss (Zheng và cộng sự, https://arxiv.org/abs/1911.08287)
 
@@ -60,14 +62,15 @@ def ctr_diou_loss_1d(
     reduction: 'none' | 'mean' | 'sum'
     eps: số nhỏ để tránh chia cho 0
     """
-    input_offsets = input_offsets.float()
-    target_offsets = target_offsets.float()
+    input_offsets = input_offsets.float() # (N, 2)
+    target_offsets = target_offsets.float() # (N, 2)
     # khoảng cách phải không âm
     assert (input_offsets >= 0.0).all(), "predicted offsets must be non-negative"
     assert (target_offsets >= 0.0).all(), "GT offsets must be non-negative"
 
     if class_aware:
-        mask = torch.logical_or((target_offsets[:, :, 0] > 0), (target_offsets[:, :, 1] > 0)) 
+        #                           (B, P)                              (B, P)
+        mask = torch.logical_or((target_offsets[:, :, 0] > 0), (target_offsets[:, :, 1] > 0)) # (B, P)
         input_offsets = input_offsets[mask]
         target_offsets = target_offsets[mask]
         
@@ -99,4 +102,4 @@ def ctr_diou_loss_1d(
     elif reduction == "sum":
         loss = loss.sum()
 
-    return loss
+    return loss, iouk

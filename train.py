@@ -33,21 +33,25 @@ def main():
                                     RandomSampler(train_dataset, generator=rng_generator))
     val_loader = make_data_loader(val_dataset, False, None, cfg['batch_size'], cfg['num_workers'],
                                   SequentialSampler(val_dataset))
-    print('Data: %d train / %d val videos, %d unique train captions'
-          % (len(train_dataset), len(val_dataset), len(train_dataset.pool_text)))
+    
+    # print('Data: %d train / %d val videos, %d unique train captions'
+    #       % (len(train_dataset), len(val_dataset), len(train_dataset.pool_text)))
 
     """3. tạo model, optimizer và scheduler"""
     # ======================================= MODEL CALLED HERE =======================================================
     model = make_multimodal_meta_arch('EventCaptionTransformer', **cfg['model'])
     model.to(device)
     # pool caption chỉ lấy từ tập TRAIN, caption của tập val không bao giờ được dùng
-    model.set_caption_pool(torch.from_numpy(train_dataset.pool_emb).to(device))
-    print('Parameters: %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6))
+    model.set_caption_pool(
+        torch.from_numpy(train_dataset.pool_emb).to(device), # (N, 512)
+        torch.from_numpy(train_dataset.pool_omni_emb).to(device) # (N, 3584)
+    )
+    # print('Parameters: %.1fM' % (sum(p.numel() for p in model.parameters()) / 1e6))
 
     optimizer = make_optimizer(model, cfg['opt'])
     scheduler = make_scheduler(optimizer, cfg['opt'], len(train_loader))
     model_ema = ModelEma(model, cfg['train_cfg']['ema_decay'])
-    model_ema.module.set_caption_pool(model.pool_raw)
+    model_ema.module.set_caption_pool(model.pool_raw, model.omni_pool_raw )
 
     """4. vòng lặp train / đánh giá"""
     max_epochs = cfg['opt']['epochs'] + cfg['opt']['warmup_epochs']
@@ -64,10 +68,9 @@ def main():
             mark = '  <- best R@0.5, saved'
             save_checkpoint({'epoch': epoch + 1, 'state_dict': model_ema.module.state_dict(), 'metrics': m},
                             ckpt_folder, 'model_best.pth.tar')
-        print('epoch %2d/%d  %4.0fs  loss %.3f | R@0.3 %.2f  R@0.5 %.2f  R@0.7 %.2f  mIoU %.2f | '
-              'txt_sim %.3f  CIDEr %.2f | G R1@0.5 %.2f%s'
-              % (epoch + 1, max_epochs, time.time() - start, losses['final_loss'], m['R@0.3'], m['R@0.5'],
-                 m['R@0.7'], m['mIoU'], m['txt_sim'], m['CIDEr'], m['G R1@0.5'], mark), flush=True)
+        print('epoch %2d/%d  %4.0fs  loss %.3f | R@0.5 %.2f  CIDEr %.2f%s'
+              % (epoch + 1, max_epochs, time.time() - start, losses['final_loss'], m['R@0.5'], m['CIDEr'], mark),
+              flush=True)
     print('Best R@0.5 = %.2f -> %s' % (best_r05, os.path.join(ckpt_folder, 'model_best.pth.tar')))
 
 

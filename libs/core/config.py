@@ -10,6 +10,7 @@ cfg = {
         'json_file': './data/youcookii/annotations/youcookii_annotations_trainval.json',
         # vector text InternVideo2 của mọi caption (512 chiều), key là "<video_id>#<chỉ số caption>"
         'caption_emb_file': './data/youcookii/caption_emb_iv2j.npz',
+        'omni_emb_file': './data/youcookii/omni_emb_full.npz',
         # <video_id>.npz: video InternVideo2 v768 + audio BEATs a768, mỗi giây một hàng
         'feat_folder': './data/youcookii/iv2_feats',
         'default_fps': 16,
@@ -29,6 +30,7 @@ cfg = {
         'embd_dim': 512,
         'embd_with_ln': True,
         'head_dim': 512,
+        'omni_head_dim': 3584,
         'regression_range': [[0, 4], [4, 8], [8, 16], [16, 32], [32, 64], [64, 10000]],
         'head_num_layers': 3,
         'head_kernel_size': 3,
@@ -41,6 +43,7 @@ cfg = {
             'loss_weight_reg': 1.0,
             'loss_weight_iou': 1.0,
             'loss_weight_emb': 0.2,
+            'loss_weight_omni_emb': 0.2,
             'loss_weight_span': 0.2,
             'loss_weight_ground': 1.0,
             'cls_prior_prob': 0.01,

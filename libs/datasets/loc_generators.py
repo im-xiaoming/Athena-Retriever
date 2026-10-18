@@ -1,7 +1,9 @@
+from __future__ import annotations
 import torch
 from torch import nn
 
 from .datasets import register_generator
+
 
 
 class BufferList(nn.Module):
@@ -25,23 +27,14 @@ class BufferList(nn.Module):
 
 @register_generator('point')
 class PointGenerator(nn.Module):
-    """
-        Sinh các "điểm" thời gian: những vị trí trên mỗi tầng pyramid mà các head đưa ra dự đoán.
-
-        Mỗi điểm là một hàng (t, cận dưới, cận trên, stride). t là vị trí của điểm trên lưới tầng 0
-        (bội số của stride của tầng). Cận dưới / cận trên giới hạn khoảng cách xa nhất từ điểm tới biên
-        của đoạn mà tầng này phụ trách, nên đoạn ngắn rơi vào tầng mịn, đoạn dài rơi vào tầng thô.
-        Các điểm được tạo một lần cho max_seq_len * max_buffer_len_factor bước, forward() chỉ cắt ra
-        số điểm đúng với độ dài thật.
-    """
     def __init__(
         self,
-        max_seq_len_ori,    # độ dài chuỗi tối đa để tạo sẵn điểm
-        max_buffer_len_factor,  # tạo sẵn cho max_seq_len_ori * hệ số này bước
-        fpn_levels,         # số tầng pyramid
-        scale_factor,       # hệ số giảm độ dài giữa hai tầng
-        regression_range,   # khoảng hồi quy của từng tầng (đơn vị bước)
-        max_div_factor,     # stride lớn nhất, độ dài phải chia hết cho số này
+        regression_range: list[list[int]],
+        max_seq_len_ori: int = 256,    # độ dài chuỗi tối đa để tạo sẵn điểm
+        max_buffer_len_factor: float = 1.0,  # tạo sẵn cho max_seq_len_ori * hệ số này bước
+        fpn_levels: int = 6,         # số tầng pyramid
+        scale_factor: int = 2,       # hệ số giảm độ dài giữa hai tầng
+        max_div_factor: int = 32,     # stride lớn nhất, độ dài phải chia hết cho số này
         use_offset=False    # có dời điểm vào giữa ô lưới không
     ):
         super().__init__()
@@ -67,26 +60,28 @@ class PointGenerator(nn.Module):
         # duyệt từng tầng pyramid
         for l in range(self.fpn_levels):
             stride = self.scale_factor ** l
-            reg_range = torch.as_tensor(
-                self.regression_range[l], dtype=torch.float)
-            fpn_stride = torch.as_tensor(stride, dtype=torch.float)
-            points = torch.arange(0, self.max_seq_len, stride)[:, None]
+            reg_range = torch.as_tensor(self.regression_range[l], dtype=torch.float32) # (2,)
+            fpn_stride = torch.as_tensor(stride, dtype=torch.float32)
+            points = torch.arange(0, self.max_seq_len, stride)[:, None] # (N, 1)
             # dời điểm nếu cần (mô hình hiện tại không dùng)
             if self.use_offset:
                 points += 0.5 * stride
             # ghép thêm khoảng hồi quy và stride vào mỗi điểm
-            reg_range = reg_range[None].repeat(points.shape[0], 1)
-            fpn_stride = fpn_stride[None].repeat(points.shape[0], 1)
+            #               (1, 2)          (N, 2)
+            reg_range = reg_range[None].repeat(points.shape[0], 1) # (N, 2)
+            #               (1, 1)          (N, 1)
+            fpn_stride = fpn_stride[None].repeat(points.shape[0], 1) # (N, 1)
             # kích thước: T x 4 (t, khoảng hồi quy, stride)
-            points_list.append(torch.cat((points, reg_range, fpn_stride), dim=1))
+            #                                       (N, 4)
+            points_list.append(torch.cat((points, reg_range, fpn_stride), dim=1)) # (N, 4)
 
         return BufferList(points_list)
 
-    def forward(self, fpn_strides, feats, is_training):
+    def forward(self, fpn_strides, feats, is_training) -> list[torch.Tensor]:
         """Trả về điểm của mọi tầng cho feats (C, T): list các tensor (T / stride, 4). Lúc train và với
         video ngắn thì luôn dùng max_seq_len; video dài hơn lúc suy luận được làm tròn lên bội số của stride lớn nhất."""
         pts_list = []
-        max_len = feats.shape[1]
+        max_len = feats.shape[1] # T
         if is_training:
             max_len = self.max_seq_len_ori
         else:
@@ -97,9 +92,9 @@ class PointGenerator(nn.Module):
                 stride = self.max_div_factor
                 max_len = (max_len + (stride - 1)) // stride * stride
 
-        feat_lens = [int(max_len/stride) for stride in fpn_strides]
+        feat_lens = [int(max_len/stride) for stride in fpn_strides] # [256, 128, 64, 32, 16, 8]
         for feat_len, buffer_pts in zip(feat_lens, self.buffer_points):
             pts = buffer_pts[:feat_len, :]
             pts_list.append(pts)
-        return pts_list 
+        return pts_list
 

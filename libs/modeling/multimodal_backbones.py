@@ -10,7 +10,7 @@ from .blocks import (get_sinusoid_encoding, TransformerBlock,
 @register_multimodal_backbone("convTransformer")
 class ConvTransformerBackbone(nn.Module):
     """
-        Backbone của UniAV: kết hợp conv với transformer, mỗi modality một luồng riêng.
+        kết hợp conv với transformer, mỗi modality một luồng riêng.
 
         Feature video (V) và audio (A) mỗi bên đi qua: conv embedding -> arch[1] - 1 block self-attention
         -> một block cross-modal ở độ phân giải gốc -> arch[2] block cross-modal, mỗi block giảm độ dài
@@ -28,7 +28,7 @@ class ConvTransformerBackbone(nn.Module):
         n_head,                # số head attention trong transformer
         n_embd_ks,             # kernel size của conv embedding
         max_len,               # độ dài chuỗi tối đa
-        arch = (2, 2, 5),      # (#conv, #transformer ở stem, #transformer ở nhánh pyramid)
+        arch = (2, 3, 5),      # (#conv, #transformer ở stem, #transformer ở nhánh pyramid)
         scale_factor = 2,      # hệ số giảm độ dài giữa hai tầng
         with_ln = False,       # có LayerNorm sau conv không
         attn_pdrop = 0.0,      # dropout trên ma trận attention
@@ -162,7 +162,7 @@ class ConvTransformerBackbone(nn.Module):
             x_A, mask_A = self.embd_A[idx](x_A, mask_A)
             x_A = self.relu(self.embd_norm_A[idx](x_A))
 
-        # lúc train: dùng position embedding độ dài cố định
+        # dùng position embedding độ dài cố định
         if self.use_abs_pe and self.training:
             pe = self.pos_embd
             # cộng pe vào x
@@ -180,7 +180,6 @@ class ConvTransformerBackbone(nn.Module):
             x_V = x_V + pe[:, :, :T] * mask_V.to(x_V.dtype)
             x_A = x_A + pe[:, :, :T] * mask_A.to(x_A.dtype)
 
-        # transformer ở stem
         for idx in range(len(self.self_att_V)):
             x_V, mask_V = self.self_att_V[idx](x_V, x_V, mask_V)
             x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A)
