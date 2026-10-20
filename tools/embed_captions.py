@@ -3,6 +3,8 @@
   python tools/embed_captions.py            # uniav-api-env, GPU: under a minute
   python tools/embed_captions.py --coin     # data/coin_label_emb_iv2.npz: the 749 COIN step labels
   python tools/embed_captions.py --joint    # *_iv2j.npz: YouCook2 captions, COIN labels and "other", one joint centring
+  python tools/embed_captions.py --joint data/youcookii/annotations/youcookii_annotations_yc2clean.json _yc2clean
+                                            # same, "training" captions of that annotation file only, *_iv2j_yc2clean.npz
 
 Every caption of the videos with InternVideo2 features (data/youcookii/iv2_feats), keyed
 "<video>#<segment index>". InternVideo2's text tower is aligned with its video tower, whose 512-d
@@ -53,7 +55,7 @@ def coin():
     print('done: %d labels -> %s' % (len(labels), out), flush=True)
 
 
-def joint():
+def joint(anno=None, tag=''):
     """One text space for YouCook2 + COIN (docs/PLAN_openvocab.md): every vector centred on
     mean_joint = (mean of the unique YouCook2 train captions + mean of the COIN labels of training videos) / 2,
     then re-normalised. Centring on the YouCook2 mean alone leaves non-cooking sentences bunched together
@@ -66,7 +68,7 @@ def joint():
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     enc = InternVideo2TextEncoder(CKPT, dev, torch.float32)
     encode = lambda xs: np.concatenate([enc(xs[i:i + 256]).cpu().numpy() for i in range(0, len(xs), 256)])
-    keys, caps, first = youcook2_captions()
+    keys, caps, first = youcook2_captions(anno)
     yc = encode(caps)
     with open(os.path.join(ROOT, 'data', 'coin', 'coin_anno.json')) as f:
         videos = json.load(f)['videos']
@@ -76,10 +78,10 @@ def joint():
     other = encode(['other'])[0]
     mean = 0.5 * yc[list(first.values())].mean(0) + 0.5 * cl[[i for i, l in enumerate(labels) if l in train_labels]].mean(0)
     norm = lambda x: (x - mean) / np.linalg.norm(x - mean, axis=-1, keepdims=True)
-    out1 = os.path.join(DATA, 'caption_emb_iv2j.npz')
+    out1 = os.path.join(DATA, 'caption_emb_iv2j%s.npz' % tag)
     np.savez_compressed(out1, keys=keys, emb=norm(yc).astype(np.float16), sentences=np.array(caps, dtype=str),
                         other=norm(other).astype(np.float32), mean=mean.astype(np.float32))
-    out2 = os.path.join(ROOT, 'data', 'coin', 'label_emb_iv2j.npz')
+    out2 = os.path.join(ROOT, 'data', 'coin', 'label_emb_iv2j%s.npz' % tag)
     np.savez_compressed(out2, labels=np.array(labels, dtype=str), emb=norm(cl).astype(np.float16),
                         other=norm(other).astype(np.float32), mean=mean.astype(np.float32))
     cos = lambda x: float((lambda e: (e @ e.T)[np.triu_indices(len(e), 1)].mean())(norm(x)))
@@ -87,10 +89,10 @@ def joint():
         cos(yc[list(first.values())][:3000]), cos(cl), out1, out2), flush=True)
 
 
-def youcook2_captions():
+def youcook2_captions(anno=None):
     """Every caption of the YouCook2 videos with features: keys "<video>#<i>", sentences, and the index
     of the first occurrence of every unique train caption (the dataset's caption pool)."""
-    with open(os.path.join(DATA, 'annotations', 'youcookii_annotations_trainval.json')) as f:
+    with open(anno or os.path.join(DATA, 'annotations', 'youcookii_annotations_trainval.json')) as f:
         db = json.load(f)['database']
     have = {f[:-4] for f in os.listdir(os.path.join(DATA, 'iv2_feats')) if f.endswith('.npz')}
     keys, caps = [], []
@@ -109,7 +111,7 @@ def main():
     if '--coin' in sys.argv:
         return coin()
     if '--joint' in sys.argv:
-        return joint()
+        return joint(*sys.argv[sys.argv.index('--joint') + 1:])   # optional: annotation file, output tag
     keys, caps, first = youcook2_captions()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     enc = InternVideo2TextEncoder(CKPT, dev, torch.float32)
