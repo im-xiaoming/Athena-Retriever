@@ -1,4 +1,4 @@
-# yc2-clean (Fushion/docs/UEMR_ATHENA_SACH_YC2.md): youcook2_event.yaml with only the data changed.
+# yc2-clean (docs/UEMR_ATHENA_SACH_YC2.md): youcook2_event.yaml with only the data changed.
 # Train on the 1002 trainsplit videos (the 104 dev videos relabelled subset "dev" in the annotation file),
 # pick best_seg / best_cap on dev, never touch validation; captions centred on the trainsplit mean.
 # Run as ov_E1 was run: --set train_cfg.ema_decay=0.999
