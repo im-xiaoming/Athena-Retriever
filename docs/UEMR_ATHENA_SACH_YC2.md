@@ -299,14 +299,37 @@ config không nhắc `validation`, code không dirty (commit lúc train ghi tron
 (cùng khoá, shape, config), ghi sha256, `<hash8>/athena_yc2clean.pth` và `SOURCE.json` (epoch + số dev của cả hai bộ trọng số) vào
 `MyDrive/…/Fushion/uemr/athena_sach/`. **Val không được chấm ở đâu trong phần A.**
 
-**Đang chờ:** người dùng push nhánh `chien`, chạy notebook, gửi log. Sau đó ghi ở đây: sha256, epoch được chọn và số dev (A.5).
+**Kết quả phần A (Colab A100, 2026-10-20, log trong `notebooks/athena_sach_yc2_A.ipynb`).** Mọi `assert` qua.
 
-### C.5 Quyết định B.3 (ghi trước khi chấm val; chưa chấm val với Athena mới)
-
-| Câu hỏi | Quyết định |
+| | |
 |---|---|
-| Chọn lại `final_protocol.json` trên dev sạch? | **Không**, giữ nguyên mọi khoá |
-| Context Fusion | train lại với Z mới, giữ cấu hình D3, dừng sớm theo dev như cũ |
-| Thứ tự chấm | dev trước, kiểm hợp lý, rồi val **một lần** |
-| θ hậu xử lý UniAV | **đề xuất:** áp lại quy tắc có sẵn trong protocol (`uniav.postprocess.theta`: trên dev, mean K_pred gần mean K_GT nhất, hoà → θ nhỏ hơn); 0,40 là giá trị của checkpoint cũ (`value_current_uniav`). Quy tắc chỉ dùng số đoạn trên dev, không nhìn val. **Chờ người dùng xác nhận** |
-| Đường dẫn | checkpoint ở `uemr/athena_sach/<hash8>/`; đầu ra UniAV ở `uemr/uniav_delivery_<hash8>/`; A-Z (`UNIAV_SOURCE = 'new'`) ghi theo hash đầu ra, không đụng `results/056d388e/` |
+| Checkpoint | `MyDrive/Colab Notebooks/code KL/Fushion/uemr/athena_sach/961f1a89/athena_yc2clean.pth` |
+| sha256 | `961f1a895f4b43c811d3e0cfa31448641989a0a0e39e421ed397682407643d58` (`hash8` `961f1a89`) |
+| Code | nhánh `chien`, commit `39d8161`, không dirty; môi trường Python 3.13, torch 2.11, numpy 2.1.3 |
+| Dữ liệu | train 1.002 video (== manifest trainsplit), 7.790 câu (≤ 16/video; manifest Omni 7.787), pool 7.512 câu duy nhất; dev 104 video (== `subset_videos.json`, == `dev_videos.txt`), 773 câu; train ∩ (dev ∪ val) = 0 |
+| Mean câu | encode lại file cũ: cos min 0,99989, lệch mean 3e-8 (tái lập được); mean sạch tính trên 7.512 câu (cũ 8.218), ‖Δmean‖ = 0,0008; file `caption_emb_iv2j_yc2clean.npz` sha256 `d7b067d7…` |
+| Teacher Omni | 7.483/7.512 vector câu, 7.787 vector clip, chỉ video train |
+| `state_dict_seg` | **epoch 8** (R@0.5 cao nhất trên dev): dev R@0.3 / 0.5 / 0.7 = 75,81 / 56,14 / 32,08, mIoU 52,11 |
+| `state_dict` | **epoch 10** (CIDEr cao nhất trên dev): dev CIDEr 89,90, R@0.5 54,59, G R1@0.5 45,80 |
+| Định dạng | cùng khoá, shape, config với `athena.pth`; caption pool 8.218 câu, mean mới |
+| Thời gian | train 12 epoch 18 phút |
+
+Ghi chú: tiêu đề cột trong log train in "(val)" là chữ cố định của `train.py`; số thực ra là dev (`val_split: [dev]`, log in
+`1002 train / 104 val videos`). Đường dev theo epoch: R@0.5 cao nhất ở epoch 8, CIDEr ở epoch 10, giống mẫu của `ov_E1` (7 và 10).
+
+### C.5 Quyết định phần B (ghi 2026-10-20, **trước** khi chạy A-Z với Athena mới; val chưa được chấm với `961f1a89`)
+
+Theo `Fushion/docs/UEMR_B_CHAY_LAI_AZ.md` việc 1:
+
+| # | Câu hỏi | Quyết định |
+|---|---|---|
+| 1 | Chọn lại `final_protocol.json` trên dev sạch? | **Không**, giữ nguyên mọi khoá |
+| 2 | Context Fusion | train lại với Z mới, giữ cấu hình D3 (`final_protocol.json` `fusion`, 3 seed 0/1/2), dừng sớm theo dev như cũ |
+| 3 | Context Fusion có vào phương pháp chính không? | **chỉ khi** R6 + CF (trung bình 3 seed D3) hơn R6 với **cận dưới CI 95% > 0** (bootstrap theo video, 1.000 lần, seed 0, gallery val 394). Không đạt → phương pháp chính là **R6 MaxSim** |
+| 4 | Thứ tự chấm | dev trước → kiểm các dòng không phụ thuộc UniAV → R6 → R6 + CF; val chấm **một lần** |
+| 5 | θ hậu xử lý UniAV | áp lại **quy tắc** của protocol (`uniav.postprocess.theta`: trên dev, mean K_pred gần mean K_GT nhất, hoà → θ nhỏ hơn, lưới 0,05–0,60). Đây là giữ nguyên `final_protocol.json`: quy tắc là khoá của protocol, còn 0,40 (`value_current_uniav`) là giá trị quy tắc cho ra với checkpoint cũ. Quy tắc chỉ dùng số đoạn trên dev (notebook chỉ đưa video dev vào bước quét θ) |
+| 6 | Đường dẫn | đầu ra UniAV: `uemr/uniav_cache/athena_961f1a89/` (498 gallery) và `athena_961f1a89_train/` (1.002 trainsplit); bảng: `uemr/results/961f1a89/`; cache Omni/partition/fusion theo hash nội dung đầu ra (cơ chế `'new'` có sẵn của A-Z). Không đụng `results/056d388e/` và cache của Athena cũ |
+
+**Điểm lệch so với đề bài, ghi trước khi chạy:** đề bài coi R3 (`uni_M`) là dòng không phụ thuộc Athena (phải trùng 18,02). Không đúng:
+R3 chia đều mỗi video thành **K_pred** đoạn, K_pred lấy từ UniAV (`final_protocol.json` `partitions.uses_uniav` có `uni_M`). Vì vậy notebook
+**assert** R0 8,32, R2 27,16, R7 37,52 (và R1_gt, `uni_M_gt`, `gt_shift`, cũng không phụ thuộc UniAV), còn R3 chỉ **in** số cũ/mới, không dừng.
