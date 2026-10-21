@@ -1,6 +1,6 @@
 #!/bin/bash
-# Colab side: extract features for the benchmark video shards (claims keep it from colliding with the PC).
-# Expects /content/hf_token and /content/coin_hub.py (uploaded by colab_dl_launch.sh).
+# Colab side: extract features for the HT-Step video shards (claims keep it from colliding with the PC).
+# Expects /content/hf_token and /content/htstep_hub.py (uploaded by colab_dl_launch.sh).
 cd /content
 export HF_TOKEN=$(cat /content/hf_token)
 pip install -q yt-dlp huggingface_hub >/dev/null 2>&1
@@ -14,9 +14,7 @@ for repo, f in (('OpenGVLab/InternVideo2-Stage2_1B-224p-f4', 'InternVideo2-stage
                 ('OpenGVLab/InternVideo2-Stage2-6B-Audio', 'audio_6b.pth')):
     print(hf_hub_download(repo, f, local_dir='/content/iv2_ckpt', token=os.environ['HF_TOKEN']), flush=True)
 PY
-mkdir -p tools && cp /content/coin_hub.py /content/extract_internvideo2.py tools/
-for ds in dcase unav100 anet htstep; do
-  python -u tools/coin_hub.py work --dataset $ds --name colab-t4 --tmp /content/work_$ds \
-    --repo /content/InternVideo --video-ckpt /content/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \
-    --audio-ckpt /content/iv2_ckpt/audio_6b.pth --workers 2 >> /content/work.log 2>&1
-done
+mkdir -p tools && cp /content/htstep_hub.py /content/extract_internvideo2.py tools/
+python -u tools/htstep_hub.py work --name colab-t4 --tmp /content/work_htstep \
+  --repo /content/InternVideo --video-ckpt /content/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \
+  --audio-ckpt /content/iv2_ckpt/audio_6b.pth --workers 2 >> /content/work.log 2>&1

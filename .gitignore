@@ -29,11 +29,6 @@ libs/utils/*.egg-info/
 ckpt/api/
 ckpt/internvideo2/
 /datasets/
-data/youcook2_cut/
-data/youcookii/omni_emb*.npz
-data/youcookii/iv2_*/
-data/youcookii/.cache/
-data/coin/iv2_feats/
 data/demo_videos/
 data/demo_cache/
 athena/index/
@@ -45,10 +40,4 @@ OV-AVEL/
 
 # YouTube login cookies (yt-dlp on the PC): local only
 cookies/
-data/anet/
 data/htstep/
-benchmark/*/onepeace_finetune_features_025s/
-benchmark/preds/
-data/dcase/
-data/unav100/
-ckpt/uniav/

@@ -22,7 +22,7 @@ Every size, layer and formula in detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECT
    (`tools/extract_internvideo2.py`); nothing of these encoders is trained.
 2. **Grid.** Every row is L2-normalised and the video is resampled to **256 steps**, whatever its length: one step is
    `duration / 256` seconds.
-3. **Backbone** (trained, 70.5M parameters with the heads). One ConvTransformer per stream (V, A): embedding convs,
+3. **Backbone** (trained, 66.3M parameters with the heads). One ConvTransformer per stream (V, A): embedding convs,
    2 self-attention blocks, then cross-attention blocks in which each stream attends over its own steps with the other
    stream's queries. The pyramid has 6 levels (256 down to 8 steps, 504 points); at each level V and A are concatenated
    (1024 channels). Each level predicts events of one length range.
@@ -38,7 +38,7 @@ Every size, layer and formula in detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECT
 ## Training losses
 
 $$\mathcal{L} = \mathcal{L}_{event} + 1\cdot\mathcal{L}_{reg} + 1\cdot\mathcal{L}_{iou} + 0.2\,\mathcal{L}_{emb}
-+ 0.2\,\mathcal{L}_{span} + 0.2\,\mathcal{L}_{omni\_txt} + 0.2\,\mathcal{L}_{omni\_av} + 1\cdot\mathcal{L}_{ground}$$
++ 0.2\,\mathcal{L}_{span} + 1\cdot\mathcal{L}_{ground}$$
 
 Weights are `model.train_cfg.loss_weight_*` in the config. Code: `losses()` in `libs/modeling/event_archs.py`,
 focal and DIoU in `libs/modeling/losses.py`.
@@ -54,11 +54,9 @@ Its targets are the distances to the event's start and end, in units of the leve
 | $\mathcal{L}_{iou}$ | positive points | binary cross-entropy of the IoU-quality logit against the true IoU of the (detached) predicted segment: the head learns how good its own boundaries are |
 | $\mathcal{L}_{emb}$ | positive points (up to 1024 per batch) | pool loss (below) of each point's embed vector, target = the caption of its event |
 | $\mathcal{L}_{span}$ | every GT event, twice | pool loss of `q` of the GT span and of a copy whose boundaries are moved by up to ±20 % of its length (predicted boundaries are never exact) |
-| $\mathcal{L}_{omni\_txt}$ | every GT event | teacher (OmniRetriever-7B, training only): `omni_proj(q)` in the 3584-d teacher space, pool loss against the teacher's caption vectors |
-| $\mathcal{L}_{omni\_av}$ | every GT event | teacher: cross-entropy over all teacher audio+video clip vectors, `omni_proj(q)` must pick its own clip |
 | $\mathcal{L}_{ground}$ | (sentence, point) pairs | focal loss of the ground head. Queries: each caption of the clip (positives = the points of its own event) and up to 2 captions of other videos in the batch with cosine < 0.7 to this video's captions (no positive point); divided by the number of positives |
 
-**Pool loss** (`pool_loss`), used by $\mathcal{L}_{emb}$, $\mathcal{L}_{span}$, $\mathcal{L}_{omni\_txt}$: a
+**Pool loss** (`pool_loss`), used by $\mathcal{L}_{emb}$ and $\mathcal{L}_{span}$: a
 cross-entropy of one vector $v$ against the **whole** caption pool $\{c_j\}$, not only the captions in the batch,
 because inference picks from that pool:
 
@@ -67,10 +65,7 @@ $$z_j = s\cos(v, c_j), \qquad y_j = (1-\alpha)\,[j = g] + \alpha\,\mathrm{softma
 
 $g$ is the true caption, $s$ a learned scale (starts at $1/0.07$, at most 100), $\alpha = 0.5$, $\tau = 0.02$. The
 soft target gives part of the mass to captions close to the true one, so a paraphrase is not punished like a wrong
-caption. With several datasets, a row only sees captions of its own dataset.
-
-Off by default: `loss_weight_other` (background steps pulled to the text "other") and `loss_weight_modal` (V-only and
-A-only vectors pulled to the fused one).
+caption.
 
 ## Inference
 
@@ -78,32 +73,23 @@ A-only vectors pulled to the fused one).
 2. Segment of a point $p$ on a level with stride $s$: $[p - l\cdot s,\; p + r\cdot s]$.
 3. Gaussian soft-NMS ($\sigma = 0.5$), at most 100 events; steps are converted back to seconds.
 4. Caption: `q` of each event against the caption pool, top 20, then the candidate that agrees most with the others
-   (minimum Bayes risk). A GPT-2 generator can write the caption from `q` instead (`tools/capgen/`).
+   (minimum Bayes risk).
 5. Grounding: the same score with the ground head instead of the event head, best point, its boundary-head segment.
 
 ## Training data
 
-| Source | Videos | Used for | Config |
-|---|---|---|---|
-| YouCook2 | 1,500 cooking videos, captioned steps | training + validation (main metrics) | `dataset` |
-| COIN | 5,180 videos, step labels of 180 tasks | training on seen tasks; test on seen and unseen tasks (open vocabulary) | `coin` |
-| ActivityNet Captions | 4,985 videos, captioned events | training | `extra_train.anet` |
-| HT-Step | 789 videos, captioned steps | training | `extra_train.htstep` |
-
-Every batch draws each source by its ratio (`coin.batch_ratio`, `extra_train.<name>.ratio`; YouCook2 takes the
-rest). Validation sets and the benchmark sets (DCASE, UnAV-100) are held out of every training set. Data pipeline and
-HF repositories: `docs/README.md`.
+[HT-Step](https://github.com/facebookresearch/htstep): instructional (mostly cooking) videos of HowTo100M with
+captioned steps. Training videos are a random sample of the train split; validation is the `val_seen` split, the
+only labelled one. Downloaded and extracted on several machines through HF (`tools/htstep_hub.py`), converted with
+`tools/htstep_data.py`. Data pipeline and HF repositories: `docs/README.md`.
 
 Optional feature augmentation for training items (`dataset.aug_*`, off by default): the random crop resampled back
 to 256 steps (speed jitter), dropping the audio or the visual stream, masking short spans, Gaussian noise.
 
 ## Results
 
-Every run, report and comparison: [`experiments/README.md`](experiments/README.md). Latest round (2026-10-11,
-all four training sources): `all_b16` YouCook2 R@0.5 54.0, CIDEr 90.7, grounding R1@0.5 45.7, COIN unseen-task
-accuracy 12.5; zero-shot on UnAV-100 class-agnostic mAP 23.0 (the original UniAV, trained on that set: 55.9), see
-[`docs/BENCHMARK.md`](docs/BENCHMARK.md). With the sentence as a third backbone stream (`model.text_stream: true`,
-run `all_text`): grounding R1@0.5 49.1, COIN unseen accuracy 14.2, R@0.5 54.6, CIDEr 88.5, at ~2.8x the training time.
+Run records and reports: [`experiments/README.md`](experiments/README.md). The reports up to 2026-10-15 are from the
+YouCook2 / COIN / ActivityNet period of the project; their code is in the git history.
 
 Notes for reading the numbers:
 - Seed noise: about ±1.5 R@0.5, ±2 CIDEr, ±0.003 `txt_sim`; smaller differences are noise.
@@ -117,14 +103,15 @@ Notes for reading the numbers:
 | Path | What |
 |---|---|
 | `train.py` | training and evaluation; writes `experiments/runs/<host>-<run>.json` per run |
-| `configs/youcook2_event.yaml` | the config; every option can be overridden with `--set key=value` |
-| `libs/datasets/youcook2_cap.py` | dataset: features, caption pool, teacher vectors, augmentation (other sources reuse it) |
-| `libs/datasets/coin_cap.py`, `benchmark.py` | COIN; benchmark sets (DCASE, UnAV-100) |
+| `configs/htstep_event.yaml` | the config; every option can be overridden with `--set key=value` |
+| `libs/datasets/step_captions.py` | dataset: features, caption pool, training targets, augmentation |
 | `libs/modeling/event_archs.py` | the model, its heads and losses, inference |
 | `libs/modeling/multimodal_backbones.py`, `blocks.py` | audio-visual ConvTransformer backbone |
+| `libs/utils/evaluation.py` | validation scores (segmentation, captioning, grounding); `seg_metrics.py` the standard metrics |
+| `libs/utils/train_utils.py`, `run_record.py`, `log_table.py` | optimizer, EMA, checkpoints; run records; the per-epoch log table |
 | `athena/` | inference API (video or stored features -> events with captions, search); see its README |
-| `tools/` | feature extraction, caption vectors, extra datasets, benchmark, API export, plots, caption generator |
-| `docs/` | architecture (+ draw.io diagram), data pipeline, benchmark, open-vocabulary plan, HF dataset cards |
+| `tools/` | HT-Step download / extraction hub, data conversion, feature extraction, Colab / Kaggle / PC workers, API export |
+| `docs/` | architecture (+ draw.io diagram), data pipeline, HF dataset cards |
 | `experiments/` | run records, results table, reports |
 
 ## Setup
@@ -136,27 +123,20 @@ pycocoevalcap (METEOR needs `java`). The 1-D NMS is a C++ extension; build it af
 cd libs/utils && python setup.py install --user && cd ../..
 ```
 
-Data (private HF datasets, see `docs/README.md`): YouCook2 features `nguyenminh04/uniav-youcook2-data`
-(`iv2_feats/` -> `data/youcookii/iv2_feats/`, `teacher/omni_emb_full.npz` -> `data/youcookii/`); the other sources with
-`tools/coin_data.py fetch` and `tools/extra_data.py fetch <name>`. On Colab, `tools/colab_ov.sh setup` fetches all of them.
+Data (private HF dataset `nguyenminh04/htstep-feats`, see `docs/README.md`): `python tools/htstep_data.py fetch`
+-> `data/htstep/` (features, annotations, caption vectors).
 
 ## Train and evaluate
 
 ```bash
-# YouCook2 only
-python train.py configs/youcook2_event.yaml --output yc2 --note 'baseline'
-# all training sources, as all_b16
-python train.py configs/youcook2_event.yaml --output all_b16 --epochs 15 --set batch_size=16 opt.learning_rate=0.0002 \
-  opt.clip_proj_lr=0.002 coin.train=true coin.batch_ratio=0.2 extra_train.anet.ratio=0.3 extra_train.htstep.ratio=0.1
-# score a checkpoint, summarise the runs, export for the API
-python train.py configs/youcook2_event.yaml --eval ckpt/yc2/best_cap.pth.tar
-python tools/summarize_runs.py && python tools/plot_runs.py
-python tools/export_api_ckpt.py yc2    # -> ckpt/api/athena_yc2.pth for athena
+python train.py configs/htstep_event.yaml --output ht1 --note 'baseline' --patience 3
+# score a checkpoint, summarise the runs
+python train.py configs/htstep_event.yaml --eval ckpt/ht1/best_cap.pth.tar
+python tools/summarize_runs.py
 ```
 
 `--epochs` counts the cosine epochs; 2 warm-up epochs come on top. Each run saves `best_seg.pth.tar` (best R@0.5) and
-`best_cap.pth.tar` (best CIDEr). About 20 minutes per YouCook2-only run on an RTX 3060; about 2.5 minutes per
-all-source epoch on an A100. `--set` values are parsed as YAML: write `0.0002`, not `2e-4`.
+`best_cap.pth.tar` (best CIDEr). About one minute per epoch (446 training videos) on an RTX 3060. `--set` values are parsed as YAML: write `0.0002`, not `2e-4`.
 
 ## Credits
 

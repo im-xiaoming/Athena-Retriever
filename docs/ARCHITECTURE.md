@@ -3,7 +3,7 @@
 Diagram: `docs/architecture.drawio` (editable in draw.io; PNG export `docs/architecture.png`). Losses with formulas: `README.md`.
 
 Source of truth: `libs/modeling/event_archs.py` (model, losses, inference), `libs/modeling/multimodal_backbones.py`
-(backbone), `athena/` (production wrapper), `configs/youcook2_event.yaml` (sizes and weights quoted below).
+(backbone), `athena/` (production wrapper), `configs/htstep_event.yaml` (sizes and weights quoted below).
 Sizes are for the default config: 256 steps, `embd_dim = head_dim = 512`, 4 attention heads.
 
 ## 1. Inputs
@@ -87,13 +87,10 @@ whose last layer starts at zero, so `q` begins as the span mean.
 
 ## 5. Text side and caption pool
 
-- **Caption pool:** the unique train captions (YouCook2 8,218; COIN step labels when COIN is used) as InternVideo2 text
-  vectors, centred on a joint mean (`caption_emb_iv2j.npz`; raw vectors have mean pairwise cosine 0.95). Each dataset has its own pool
-  rows (`pool_src`), plus an "other" text for background steps.
+- **Caption pool:** the unique train captions (HT-Step: 741 in the first 446 training videos) as InternVideo2 text
+  vectors, centred on the training-caption mean (`caption_emb_iv2j.npz`; raw vectors have mean pairwise cosine 0.95).
 - `text_proj: linear` (config default): `clip_proj` (Linear 512 -> 512, lr 1e-3) maps pool vectors into the event space.
   `text_proj: none`: the text vectors stay frozen and only the video side learns to land in them (OV-AVEL style).
-- **Teacher (training only, optional):** OmniRetriever-7B gives a 3584-d audio+video vector per GT clip and a text vector per
-  caption. `omni_proj` (512 -> 1024 -> 3584) maps `q` there. At inference its scores can be added.
 
 ## 6. Training losses (weights from the config)
 
@@ -104,11 +101,7 @@ whose last layer starts at zero, so `q` begins as the span mean.
 | `iou_loss` | BCE of the IoU-quality logit against the true IoU of the (detached) prediction | 1 |
 | `emb_loss` | per-step embedding at positive points vs the whole caption pool (`pool_loss`) | 0.2 |
 | `span_loss` | `q` of every GT span and of a copy jittered by up to 20% of its length vs the pool | 0.2 |
-| `omni_txt_loss` | `q` in the teacher space vs the teacher text pool | 0.2 |
-| `omni_av_loss` | `q` in the teacher space must pick its own GT clip among all clips | 0.2 |
 | `ground_loss` | focal; every caption of a video is a query for its own span; up to 2 captions of other videos (cosine < 0.7 to this video's captions) are queries with no span | 1 |
-| `other_loss` | background steps pulled to the "other" text | 0 (off) |
-| `modal_loss` | single-stream (V only, A only) vectors pulled to the fused vector and the caption | 0 (off) |
 
 **`pool_loss`:** cross-entropy of a vector against the *whole* frozen caption pool (video-to-text InfoNCE-like, no queue, no memory bank,
 no momentum encoder), logit scale learnable (init 1/0.07, clamp 100). Soft targets: `0.5` on the true caption and `0.5` spread by

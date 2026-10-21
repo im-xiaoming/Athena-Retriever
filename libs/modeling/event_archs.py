@@ -23,44 +23,14 @@ the mass goes to the true caption and the rest is spread by caption-caption
 similarity (in the caption space), so paraphrases of the same step are not punished
 like wrong captions.
 
-Optional OmniRetriever-7B teacher (omni_dim > 0), following the fusion-as-teacher
-idea of the OmniRetriever paper: the segment vector is projected into its
-3584-d space, then
-  - pulled toward the frozen audio+video vector the 7B model gives the GT clip
-  - contrasted with the caption pool in that space, with the same soft targets
-At inference the scores of both spaces are added.
-
-Open vocabulary (docs/PLAN_openvocab.md, after OV-AVEL, CVPR 2025):
-  text_proj: 'none'       captions and queries stay frozen InternVideo2 text vectors; only the video side
-                          learns to land in that space ('linear', the old default, trains clip_proj on them)
-  loss_weight_other: w    steps outside every event are pulled to the text "other" (OV-AVEL's background
-                          text), which also takes part as a negative for every other step and span
-  several datasets        each row of the pool loss only sees the captions of its own dataset (pool_src)
-
-Options (train_cfg), all off by default:
-  omni_target: 'tva'      the teacher target of a clip is its audio+video vector fused with the
-                          vector of its caption (T+V+A), instead of audio+video alone
-  loss_weight_modal: w    fusion-as-teacher inside the model (OmniRetriever's L_D): a segment
-                          vector from the video stream alone and one from the audio stream alone
-                          are each pulled toward the fused segment vector (stop-gradient) and
-                          toward the right caption of the pool
+text_proj: 'none' (after OV-AVEL, CVPR 2025): captions and queries stay frozen InternVideo2 text vectors;
+only the video side learns to land in that space ('linear', the default, trains clip_proj on them).
 
 Text as the third modality (model.text_stream: true, needs the ground head): the sentence enters
 the backbone as a stream next to V and A (TextBridge at every pyramid level), instead of only the
 ground head. A video alone runs with a learned null text token (event, boundary and embedding
 heads); every ground query runs the pyramid again with its sentence, and the ground head reads
 those features. The stem is shared, the bridges start closed (zero gates).
-
-One-to-one score (train_cfg.loss_weight_o2o: w > 0): a second event head trained so that, for every GT step,
-only the point whose predicted segment matches the step best is positive (target = that IoU); every other point,
-including the ones that predict a piece of the same step, is negative. The event head's targets are one-to-many
-(every point inside a step), so its score says "inside some step", not "this is the segment for the step", which
-is what picking the top K needs (YOLOv10's dual assignment, DETR's matching). At inference the ranking score uses
-sigmoid(o2o) instead of sigmoid(event) with weight test_cfg.o2o_weight (1: o2o only, 0: the event head only).
-
-Source token (model.source_token: n > 0, n = number of training sources): one learned vector per dataset (YouCook2 0,
-COIN 1, then the extra sources), added to the pyramid features read by the event and boundary heads, so each dataset
-can keep its own idea of what an event is and where it starts. Zero init; an item without 'source' uses 0 (YouCook2).
 """
 
 # in_dim=1024
@@ -309,8 +279,8 @@ class EventCaptionTransformer(nn.Module):
                  input_dim_A, n_head, embd_kernel_size, embd_dim, embd_with_ln,
                  head_dim, regression_range, head_num_layers, head_kernel_size,
                  head_with_ln, use_abs_pe, train_cfg, test_cfg, max_seq_len,
-                 nmax=16, clip_dim=1536, omni_dim=0, text_proj='linear', pyramid_attn='cross',
-                 text_stream=False, source_token=0, boundary_bins=0):
+                 nmax=16, clip_dim=512, text_proj='linear', pyramid_attn='cross',
+                 text_stream=False, boundary_bins=0):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
         assert len(self.fpn_strides) == len(regression_range)
@@ -335,22 +305,12 @@ class EventCaptionTransformer(nn.Module):
         self.max_pts = train_cfg.get('emb_max_points', 1024)
         self.w_iou = train_cfg.get('loss_weight_iou', 1.0)
         self.iou_power = test_cfg.get('iou_power', 0.5)
-        self.w_omni_txt = train_cfg.get('loss_weight_omni_txt', 0.2)
-        self.w_omni_av = train_cfg.get('loss_weight_omni_av', 0.2)
-        self.omni_target = train_cfg.get('omni_target', 'av')
-        self.w_modal = train_cfg.get('loss_weight_modal', 0.0) # idea of L_D from OmniRetriever
         # grounding: every caption of a video is a query for its own span; captions of other videos
         # in the batch (not close to any caption of this video) are queries with no span
         self.w_ground = train_cfg.get('loss_weight_ground', 0.0)
         self.ground_neg = train_cfg.get('ground_neg_per_video', 2)
         self.ground_neg_max_cos = train_cfg.get('ground_neg_max_cos', 0.7)
-        self.w_other = train_cfg.get('loss_weight_other', 0.0)
-        # one-to-one score head (see the module docstring); o2o_weight mixes it into the ranking score
-        self.w_o2o = train_cfg.get('loss_weight_o2o', 0.0)
-        self.o2o_min_iou = train_cfg.get('o2o_min_iou', 0.3)
-        self.o2o_weight = test_cfg.get('o2o_weight', 1.0)
-        self.pool_raw = self.pool_src = self.other_raw = None
-        self.omni_dim = omni_dim
+        self.pool_raw = None
         # text as the third backbone stream: only the ground head feeds it sentences
         self.text_stream = text_stream
         assert not text_stream or self.w_ground > 0, 'text_stream needs loss_weight_ground > 0'
@@ -363,56 +323,22 @@ class EventCaptionTransformer(nn.Module):
             proj_pdrop=train_cfg['dropout'], path_pdrop=train_cfg['droppath'], use_abs_pe=use_abs_pe,
             pyramid_attn=pyramid_attn, text_dim=clip_dim if text_stream else 0)
         D = embd_dim * 2 # 512 * 2
-        # one vector per training source for the event and boundary heads (0 = off)
-        self.src_emb = nn.Embedding(source_token, D) if source_token > 0 else None
-        if self.src_emb is not None:
-            nn.init.zeros_(self.src_emb.weight)
         self.event_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, train_cfg['cls_prior_prob'])
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
                                        head_num_layers, head_kernel_size, head_with_ln, bins=boundary_bins)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, clip_dim, text_proj)
-        if self.w_o2o > 0:
-            self.o2o_head = EventHead(D, head_dim, head_num_layers, head_kernel_size,
-                                      head_with_ln, train_cfg['cls_prior_prob'])
         self.seg_ctx = SegmentContext(head_dim)
         if self.w_ground > 0:
             assert clip_dim == 512, 'the ground head takes InternVideo2 text queries (caption_space iv2)'
             self.ground_head = GroundHead(D, head_dim, clip_dim, head_num_layers, head_kernel_size,
                                           head_with_ln, train_cfg['cls_prior_prob'])
-        if self.w_modal > 0:   # single-stream students, training only
-            self.modal_proj = nn.ModuleDict({m: nn.Linear(embd_dim, head_dim) for m in ('v', 'a')})
-        if omni_dim > 0:
-            self.omni_proj = nn.Sequential(
-                nn.Linear(head_dim, head_dim * 2),
-                nn.GELU(),
-                nn.Linear(head_dim * 2, omni_dim)
-            )
-            self.omni_logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-    def set_caption_pool(self, pool_raw, pool_src=None, other=None):
-        """Train caption pool (N, clip_dim) in the caption space, the negative set during training.
-        pool_src (N,) dataset of every caption (rows only see their own dataset); other (clip_dim,)
-        the text "other" for background steps (loss_weight_other)."""
+    def set_caption_pool(self, pool_raw):
+        """Train caption pool (N, clip_dim) in the caption space, the negative set during training."""
         self.pool_raw = pool_raw
         self.pool_n = F.normalize(pool_raw, dim=-1)
-        self.pool_src = pool_src
-        self.other_raw = other
-        assert self.w_other == 0 or other is not None, 'loss_weight_other needs the "other" text vector'
-
-    def set_omni_pool(self, text_pool, text_ok, av_pool, av_text_idx=None):
-        """Teacher pools: caption vectors (N, d) aligned with the caption pool, and the
-        audio+video vector of every GT clip (K, d); av_text_idx (K,) is each clip's caption."""
-        self.omni_text = F.normalize(text_pool.float(), dim=-1)
-        self.omni_text_ok = text_ok
-        self.omni_av = F.normalize(av_pool.float(), dim=-1)
-        if self.omni_target == 'tva':
-            assert av_text_idx is not None
-            self.omni_av = F.normalize(self.omni_av + self.omni_text[av_text_idx], dim=-1)
-
-    def omni_embed(self, q):
-        return F.normalize(self.omni_proj(q), dim=-1)
 
     @property
     def device(self):
@@ -457,26 +383,16 @@ class EventCaptionTransformer(nn.Module):
         
         # RETURN PYRIMID FEATURE
         fV, fA, msk = self.backbone(V, A, masks) # fV = fA = (B, C, T_l), l ∈ [0, 5]
-        
-        self._streams0 = (fV[0], fA[0])   # level-0 streams, for the single-stream students
-        
+
         feats = [torch.cat((v, a), dim=1) for v, a in zip(fV, fA)]           # per level (B, 2 * embd_dim[512], T_l), len(feats) = 6
-        
-        # event and boundary heads read the features plus the token of the item's dataset
-        fe = feats
-        if self.src_emb is not None:
-            e = self.src_emb(torch.as_tensor([x.get('source', 0) for x in video_list], device=feats[0].device))
-            fe = [f + e[:, :, None] for f in feats]
 
         # Event Head
         #                   tuple(tensor(B, T_l, 1))
-        ev = torch.cat(self.event_head(fe, msk), dim=1).squeeze(-1)      # (B, P), P = point = 504
-        
+        ev = torch.cat(self.event_head(feats, msk), dim=1).squeeze(-1)   # (B, P), P = point = 504
+
         # Bounding Head
         # tuple(tensor(B, T_l, 2)), tuple(tensor(B, T_l, 1))
-        bd, qu = self.bound_head(fe, msk)
-        # one-to-one score, read by losses and inference
-        self._o2o = (torch.cat(self.o2o_head(fe, msk), dim=1).squeeze(-1) if self.w_o2o > 0 else None)   # (B, P)
+        bd, qu = self.bound_head(feats, msk)
         bd = torch.cat(bd, dim=1)                                        # (B, P, 2)
         qu = torch.cat(qu, dim=1).squeeze(-1)                            # (B, P)
         
@@ -491,39 +407,19 @@ class EventCaptionTransformer(nn.Module):
             return self.losses(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
         return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
 
-    def pool_loss(self, q, gt_idx, pool_f, log_scale=None, col_ok=None, src=None, other_f=None):
+    def pool_loss(self, q, g, pool_f):
         """Cross-entropy over the whole pool with soft targets.
 
-        q (M, D) normalised queries, gt_idx (M,) index of the true caption in the pool, or -1 for a
-        background step whose target is the "other" text. col_ok (N,) marks which pool captions are
-        usable; src (M,) the dataset of every row, which then only sees captions of that dataset
-        (pool_src); other_f (D,) the "other" text, an extra last column every row sees.
+        q (M, D) normalised queries, g (M,) index of the true caption in the pool.
         """
-        log_scale = self.embed_head.logit_scale if log_scale is None else log_scale
-        cols = pool_f if other_f is None else torch.cat((pool_f, other_f[None]))
-        logit = log_scale.exp().clamp(max=100) * (q @ cols.t())
-        bg = gt_idx < 0
-        assert other_f is not None or not bg.any(), 'background rows need the "other" text'
-        g = gt_idx.clamp(min=0)
+        logit = self.embed_head.logit_scale.exp().clamp(max=100) * (q @ pool_f.t())
         rows = torch.arange(len(g), device=q.device)
         with torch.no_grad():
-            # ok (M, N): which pool captions each row may see (its own dataset, usable columns)
-            ok = torch.ones(len(g), len(pool_f), dtype=torch.bool, device=q.device)
-            if src is not None and self.pool_src is not None:
-                ok = self.pool_src[None] == src[:, None]
-            if col_ok is not None:
-                ok = ok & col_ok[None]
             # soft target: soft_alpha spread over the captions similar to the true one (softmax of
             # caption-caption cosine / soft_tau, in the caption space), the rest on the true caption
-            sim = (self.pool_n[g] @ self.pool_n.t() / self.soft_tau).masked_fill(~ok, float('-inf'))
+            sim = self.pool_n[g] @ self.pool_n.t() / self.soft_tau
             tgt = self.soft_alpha * F.softmax(sim, dim=-1)
             tgt[rows, g] += 1 - self.soft_alpha
-            if other_f is not None:   # extra "other" column: the whole target of background rows
-                tgt = torch.cat((tgt, tgt.new_zeros(len(g), 1)), 1)
-                tgt[bg] = 0
-                tgt[bg, -1] = 1
-                ok = torch.cat((ok, ok.new_ones(len(g), 1)), 1)
-        logit = logit.masked_fill(~ok, -1e4)   # hidden columns get (almost) zero probability
         return -(tgt * F.log_softmax(logit, dim=-1)).sum(-1).mean()
 
     def losses(self, video_list, valid, ev, bd, qu, em, raw0, len0):
@@ -558,9 +454,7 @@ class EventCaptionTransformer(nn.Module):
         # 3. per-step embedding: contrast against the whole caption pool
         assert self.pool_raw is not None, 'call set_caption_pool before training'
         cap_pool = torch.stack([x['cap_pool_idx'] for x in video_list]).to(dev)  # (B,NMAX)
-        vsrc = torch.as_tensor([x.get('source', 0) for x in video_list], device=dev)   # (B,)
         pool_f = self.embed_head.embed_captions(self.pool_raw)                  # (N, D)
-        other_f = self.embed_head.embed_captions(self.other_raw[None])[0] if self.w_other > 0 else None
         if n_pos == 0:
             em_loss = 0 * em.sum()
         else:
@@ -569,20 +463,11 @@ class EventCaptionTransformer(nn.Module):
                 sel = torch.randperm(bi.numel(), device=dev)[:self.max_pts]
                 bi, pi = bi[sel], pi[sel]
             gt = cap_pool[bi, gt_cls[bi, pi].argmax(-1)]
-            em_loss = self.pool_loss(em[bi, pi], gt, pool_f, src=vsrc[bi], other_f=other_f)
-        # 3b. background steps toward the text "other" (OV-AVEL)
-        if self.w_other > 0:
-            bi, pi = (valid & ~is_event).nonzero(as_tuple=True)
-            if bi.numel() > self.max_pts:
-                sel = torch.randperm(bi.numel(), device=dev)[:self.max_pts]
-                bi, pi = bi[sel], pi[sel]
-            other_loss = (self.pool_loss(em[bi, pi], torch.full_like(bi, -1), pool_f, src=vsrc[bi], other_f=other_f)
-                          if bi.numel() else 0 * em.sum())
+            em_loss = self.pool_loss(em[bi, pi], gt, pool_f)
         # 4. span embedding: mean over the GT span, plus a jittered copy so the model
         #    copes with predicted boundaries that are slightly off at inference.
-        #    Collected per span: qs segment vectors, gs pool index of its caption, avs index of its
-        #    teacher clip vector, ss dataset id, zs single-stream (video / audio only) vectors
-        qs, gs, avs, ss, zs = [], [], [], [], {'v': [], 'a': []}
+        #    Collected per span: qs segment vectors, gs pool index of its caption
+        qs, gs = [], []
         for b, x in enumerate(video_list):
             seg = x['segments'].to(dev).float()
             if seg.numel() == 0:
@@ -592,88 +477,22 @@ class EventCaptionTransformer(nn.Module):
             j = self.span_jitter * w[:, None] * (2 * torch.rand_like(seg) - 1)
             for sg in (seg, seg + j):
                 qs.append(self.seg_ctx(raw0[b], L, sg))
-                if self.w_modal > 0:
-                    for m, f in zip(('v', 'a'), self._streams0):
-                        zs[m].append(F.normalize(self.modal_proj[m](span_mean(f[b], L, sg)), dim=-1))
                 gs.append(cap_pool[b, x['labels'].to(dev)])
-                ss.append(vsrc[b].expand(len(seg)))
-                if self.omni_dim > 0:
-                    avs.append(x['cap_av_idx'].to(dev)[x['labels'].to(dev)])
         out = {'ev_loss': ev_loss, 'reg_loss': rg_loss, 'iou_loss': iou_loss,
                'emb_loss': em_loss}
-        if self.w_other > 0:
-            out['other_loss'] = other_loss
         if qs:
-            qs, gs, ss = torch.cat(qs), torch.cat(gs), torch.cat(ss)
-            span_loss = self.pool_loss(qs, gs, pool_f, src=ss, other_f=other_f)
+            span_loss = self.pool_loss(torch.cat(qs), torch.cat(gs), pool_f)
         else:
             span_loss = 0 * raw0.sum()
         out['span_loss'] = span_loss
         total = (ev_loss + self.w_reg * rg_loss + self.w_iou * iou_loss
                  + self.w_emb * em_loss + self.w_span * span_loss)
-        if self.w_other > 0:
-            total = total + self.w_other * other_loss
-        # fusion-as-teacher inside the model: each stream alone toward the fused vector and the caption
-        if self.w_modal > 0 and len(gs):
-            teacher = qs.detach()
-            scale = self.embed_head.logit_scale.exp().clamp(max=100)
-            ml = 0
-            for m in ('v', 'a'):
-                z = torch.cat(zs[m])
-                ml = ml + F.cross_entropy(scale * z @ teacher.t(), torch.arange(len(z), device=dev))
-                ml = ml + self.pool_loss(z, gs, pool_f, src=ss)
-            out['modal_loss'] = ml / 2
-            total = total + self.w_modal * out['modal_loss']
-        # 5. OmniRetriever teacher: captions in its space, and the GT clip as target
-        if self.omni_dim > 0:
-            zero = 0 * raw0.sum()
-            ot, oa = zero, zero
-            if len(gs):
-                so = self.omni_embed(qs)
-                rk = self.omni_text_ok[gs]          # skip spans whose caption has no teacher vector
-                if rk.any():
-                    ot = self.pool_loss(so[rk], gs[rk], self.omni_text, self.omni_logit_scale,
-                                        self.omni_text_ok)
-                ai = torch.cat(avs)
-                ok = ai >= 0                         # spans whose clip has a teacher vector
-                if ok.any():
-                    la = self.omni_logit_scale.exp().clamp(max=100) * (so[ok] @ self.omni_av.t())
-                    oa = F.cross_entropy(la, ai[ok])
-            out['omni_txt_loss'], out['omni_av_loss'] = ot, oa
-            total = total + self.w_omni_txt * ot + self.w_omni_av * oa
-        # 5b. one-to-one score: per GT step only its best-matching point is positive
-        if self.w_o2o > 0:
-            out['o2o_loss'] = self.o2o_loss(video_list, valid, bd)
-            total = total + self.w_o2o * out['o2o_loss']
-        # 6. grounding: each caption finds its own span, other videos' captions find none
+        # 5. grounding: each caption finds its own span, other videos' captions find none
         if self.w_ground > 0:
             out['ground_loss'] = self.ground_loss(video_list, gt_cls, cap_pool, valid)
             total = total + self.w_ground * out['ground_loss']
         out['final_loss'] = total
         return out
-
-    def o2o_loss(self, video_list, valid, bd):
-        """Focal loss of the one-to-one head. For every GT step, the valid point whose predicted segment (boundary
-        head, detached) has the highest IoU with it is the only positive, with target = that IoU (none when below
-        o2o_min_iou); all other points are negatives. Normalised by the number of positives."""
-        oo = self._o2o
-        tgt = torch.zeros_like(oo)
-        with torch.no_grad():
-            for b, x in enumerate(video_list):
-                seg = x['segments'].to(oo.device).float()
-                if seg.numel() == 0:
-                    continue
-                pts = torch.cat(x['points'], dim=0).to(oo.device)        # (P, 4): t, range lo, range hi, stride
-                left = pts[:, 0] - bd[b, :, 0] * pts[:, 3]
-                right = pts[:, 0] + bd[b, :, 1] * pts[:, 3]
-                inter = (torch.min(right[:, None], seg[None, :, 1]) - torch.max(left[:, None], seg[None, :, 0])).clamp(min=0)
-                union = (right - left)[:, None] + (seg[:, 1] - seg[:, 0])[None] - inter
-                iou = (inter / union.clamp(min=1e-6)).masked_fill(~valid[b][:, None], 0)   # (P, N)
-                val, best = iou.max(0)                                    # best point of each step
-                keep = val >= self.o2o_min_iou
-                tgt[b, best[keep]] = torch.max(tgt[b, best[keep]], val[keep])
-        n = max(int((tgt > 0).sum()), 1)
-        return sigmoid_focal_loss(oo[valid], tgt[valid], reduction='sum') / n
 
     def ground(self, vid, query):
         """Ground-head logits (Q, P) on the last forward pass; vid (Q,) batch index of each query,
@@ -719,26 +538,19 @@ class EventCaptionTransformer(nn.Module):
         """Segment with event score times boundary-quality score, and return the embeddings.
 
         One dict per video: segments (K, 2) and ground_segments (one per GT caption, or None) in
-        seconds; scores (K,); embeds (K, D) segment vectors, embeds_pt the single-point vectors,
-        embeds_omni the teacher-space ones; embeds_gt / embeds_gt_omni the vectors of the GT spans;
-        gt_segments, gt_text the GT steps in seconds and their captions.
+        seconds; scores (K,); embeds (K, D) segment vectors, embeds_pt the single-point vectors;
+        embeds_gt the vectors of the GT spans; gt_segments, gt_text the GT steps in seconds and their captions.
         """
         from ..utils import batched_nms
         a = self.iou_power
         prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
-        # candidates are picked by the event-head score (score_thresh is calibrated for it); with the
-        # one-to-one head they are ranked by its score (o2o_weight 1) or a mix of both
-        rank = prob
-        if self._o2o is not None:
-            w = self.o2o_weight
-            rank = (ev.sigmoid().pow(1 - w) * self._o2o.sigmoid().pow(w)).pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
         out = []
         for b, v in enumerate(video_list):
             pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, range lo, range hi, stride
             keep = (prob[b] > self.test_score_thresh).nonzero(as_tuple=True)[0]
             if keep.numel() == 0:
                 keep = prob[b].topk(1).indices
-            sc = rank[b][keep]
+            sc = prob[b][keep]
             k = min(self.test_max_seg * 5, keep.numel())
             sc, order = sc.topk(k)
             keep = keep[order]
@@ -765,13 +577,11 @@ class EventCaptionTransformer(nn.Module):
                 span = self.seg_ctx(raw0[b], int(len0[b]), segs.to(raw0.device))
             else:
                 span = emb.to(raw0.device)
-            omni = self.omni_embed(span).cpu() if self.omni_dim > 0 else None
             span = span.cpu()
             st, nf, fps = v['feat_stride'], v['feat_num_frames'], v['fps']
             # vectors of the GT spans themselves, to score captioning apart from segmentation
             gseg = v['segments'].to(raw0.device).float()
             gemb = self.seg_ctx(raw0[b], int(len0[b]), gseg)
-            gomni = self.omni_embed(gemb).cpu() if self.omni_dim > 0 else None
             segs = (segs * st + 0.5 * nf) / fps   # grid units -> seconds (see the dataset's __getitem__)
             segs = segs.clamp(min=0.0, max=float(v['duration']))
             gr = None
@@ -785,7 +595,6 @@ class EventCaptionTransformer(nn.Module):
                 gr = torch.stack((gpt[:, 0] - go[:, 0] * gpt[:, 3], gpt[:, 0] + go[:, 1] * gpt[:, 3]), -1).cpu()
                 gr = ((gr * st + 0.5 * nf) / fps).clamp(min=0.0, max=float(v['duration']))
             out.append({'video_id': v['video_id'], 'segments': segs, 'ground_segments': gr,
-                        'scores': scores, 'embeds': span, 'embeds_pt': emb,
-                        'embeds_omni': omni, 'embeds_gt': gemb.cpu(), 'embeds_gt_omni': gomni,
+                        'scores': scores, 'embeds': span, 'embeds_pt': emb, 'embeds_gt': gemb.cpu(),
                         'gt_segments': v['segments_sec'], 'gt_text': v['cap_text']})
         return out

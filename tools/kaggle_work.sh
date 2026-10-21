@@ -1,8 +1,8 @@
 #!/bin/bash
-# Kaggle side (notebook with GPU T4 x2, Internet on): extract features for the benchmark shards, one worker per GPU.
+# Kaggle side (notebook with GPU T4 x2, Internet on): extract features for the HT-Step shards, one worker per GPU.
 # Claims on HF keep it from colliding with the PC and Colab. Set the secret HF_TOKEN (Add-ons > Secrets) first.
 # Run in a notebook cell:
-#   !git clone -q https://github.com/<user>/UniAV /kaggle/working/UniAV   # or upload tools/coin_hub.py + extract_internvideo2.py
+#   !git clone -q https://github.com/<user>/UniAV /kaggle/working/UniAV   # or upload tools/htstep_hub.py + extract_internvideo2.py
 #   import os; from kaggle_secrets import UserSecretsClient; os.environ['HF_TOKEN'] = UserSecretsClient().get_secret('HF_TOKEN')
 #   !bash /kaggle/working/UniAV/tools/kaggle_work.sh
 set -e
@@ -18,10 +18,8 @@ for repo, f in (('OpenGVLab/InternVideo2-Stage2_1B-224p-f4', 'InternVideo2-stage
 PY
 HUB=${HUB:-$W/UniAV/tools}
 for g in 0 1; do
-  (for ds in dcase unav100; do
-     CUDA_VISIBLE_DEVICES=$g python -u $HUB/coin_hub.py work --dataset $ds --name kaggle-$g --tmp $W/work_${ds}_$g \
-       --repo $W/InternVideo --video-ckpt $W/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \
-       --audio-ckpt $W/iv2_ckpt/audio_6b.pth --workers 2
-   done) > $W/work_$g.log 2>&1 &
+  CUDA_VISIBLE_DEVICES=$g python -u $HUB/htstep_hub.py work --name kaggle-$g --tmp $W/work_$g \
+    --repo $W/InternVideo --video-ckpt $W/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \
+    --audio-ckpt $W/iv2_ckpt/audio_6b.pth --workers 2 > $W/work_$g.log 2>&1 &
 done
 wait

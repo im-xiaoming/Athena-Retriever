@@ -1,4 +1,4 @@
-"""Dense InternVideo2 features for uncut YouCook2 videos: one video and one audio vector per second.
+"""Dense InternVideo2 features for uncut videos: one video and one audio vector per second.
 
   python tools/extract_internvideo2.py --videos /content/yc2_videos --out /content/iv2_feats \\
       --repo /content/InternVideo --video-ckpt /content/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \\
