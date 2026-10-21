@@ -10,8 +10,8 @@ Every setting is in CONFIG below; any of them can be overridden on the command l
 The videos of chunk C are <videos>/C/<id>.mp4, as written by download_hf.py (shards already on HF) and
 download_videos.py (from YouTube); a chunk is taken once its folder has a .complete file (the downloaders
 write it), so the extractor can run beside them with --wait; chunks not downloaded are listed and skipped. With --upload, each
-finished chunk goes to HF as <feats>/htstep_feats_C.tar (its .npz + failed.txt) in
-nguyenminh04/htstep-feats, where htstep_hub.py counts it as done.
+finished chunk goes to HF as feats/htstep_feats_C.tar (its .npz + failed.txt) in the model's
+repo (MODELS: nguyenminh04/htstep-feats-k400 for k400_f16).
 
 Two video models (CONFIG['model']):
   k400_f16   InternVideo2-Stage1-1B fine-tuned on K710 then K400, 16 frames per window (4 fps, ~4 s)
@@ -78,12 +78,11 @@ CONFIG = {
 }
 
 # frames: frames per window (fixed by the checkpoint); fps: decoding rate, so a window spans frames / fps seconds;
-# feats: folder of the uploaded chunks in REPO
+# repo: HF dataset that receives the chunks as feats/htstep_feats_<chunk>.tar (a separate repo per model)
 MODELS = {
-    'k400_f16': {'ckpt': '1B_ft_k710_ft_k400_f16.pth', 'frames': 16, 'fps': 4, 'feats': 'feats_k400'},
-    'stage2_f4': {'ckpt': 'InternVideo2-stage2_1b-224p-f4.pt', 'frames': 4, 'fps': 2, 'feats': 'feats'},
+    'k400_f16': {'ckpt': '1B_ft_k710_ft_k400_f16.pth', 'frames': 16, 'fps': 4, 'repo': 'nguyenminh04/htstep-feats-k400'},
+    'stage2_f4': {'ckpt': 'InternVideo2-stage2_1b-224p-f4.pt', 'frames': 4, 'fps': 2, 'repo': 'nguyenminh04/htstep-feats'},
 }
-REPO = 'nguyenminh04/htstep-feats'
 
 MEAN = np.array([0.485, 0.456, 0.406], np.float32)   # ImageNet normalisation, as in InternVideo2
 STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -280,9 +279,9 @@ def upload_chunk(chunk, ids, failed, cfg):
         data = '\n'.join(failed).encode()
         info.size = len(data)
         t.addfile(info, io.BytesIO(data))
-    path = '%s/htstep_feats_%s.tar' % (MODELS[cfg['model']]['feats'], chunk)
-    HfApi(token=hf_token()).upload_file(path_or_fileobj=tar, path_in_repo=path, repo_id=REPO, repo_type='dataset',
-                                        commit_message='%s (extract_features.py)' % path)
+    path = 'feats/htstep_feats_%s.tar' % chunk
+    HfApi(token=hf_token()).upload_file(path_or_fileobj=tar, path_in_repo=path, repo_id=MODELS[cfg['model']]['repo'],
+                                        repo_type='dataset', commit_message='%s (extract_features.py)' % path)
     os.remove(tar)
     open(os.path.join(cfg['out'], '.uploaded', chunk), 'w').close()   # a rerun does not upload it again
     print('UPLOADED %s' % path, flush=True)
