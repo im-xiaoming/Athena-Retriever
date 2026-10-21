@@ -1,8 +1,10 @@
 #!/bin/bash
-# Colab side: extract features for the HT-Step video shards (claims keep it from colliding with the PC).
-# Expects /content/hf_token and /content/htstep_hub.py (uploaded by colab_dl_launch.sh).
+# Colab side: this machine's share of the HT-Step pipeline (download + k400_f16 extraction + upload to HF), from its CSV.
+# Expects /content/hf_token and the pipeline files flat in /content (uploaded by colab_dl_launch.sh). CSV=... picks another share.
 cd /content
+mkdir -p tools/pipeline && mv -f run.sh extract_features.py download_videos.py download_hf.py shards_part1_colab.csv tools/pipeline/
 export HF_TOKEN=$(cat /content/hf_token)
+CSV=${CSV:-tools/pipeline/shards_part1_colab.csv}
 pip install -q yt-dlp huggingface_hub >/dev/null 2>&1
 command -v deno >/dev/null || curl -fsSL https://deno.land/install.sh | sh >/dev/null 2>&1
 export PATH=$HOME/.deno/bin:$PATH
@@ -10,11 +12,8 @@ export PATH=$HOME/.deno/bin:$PATH
 python - <<'PY'
 import os
 from huggingface_hub import hf_hub_download
-for repo, f in (('OpenGVLab/InternVideo2-Stage2_1B-224p-f4', 'InternVideo2-stage2_1b-224p-f4.pt'),
+for repo, f in (('OpenGVLab/InternVideo2-Stage1-1B-224p-K400', '1B_ft_k710_ft_k400_f16.pth'),
                 ('OpenGVLab/InternVideo2-Stage2-6B-Audio', 'audio_6b.pth')):
-    print(hf_hub_download(repo, f, local_dir='/content/iv2_ckpt', token=os.environ['HF_TOKEN']), flush=True)
+    print(hf_hub_download(repo, f, local_dir='/content/ckpt/internvideo2', token=os.environ['HF_TOKEN']), flush=True)
 PY
-mkdir -p tools && cp /content/htstep_hub.py /content/extract_internvideo2.py tools/
-python -u tools/htstep_hub.py work --name colab-t4 --tmp /content/work_htstep \
-  --repo /content/InternVideo --video-ckpt /content/iv2_ckpt/InternVideo2-stage2_1b-224p-f4.pt \
-  --audio-ckpt /content/iv2_ckpt/audio_6b.pth --workers 2 >> /content/work.log 2>&1
+SMALL_DISK=1 VIDEOS=/content/videos OUT=/content/feats LOGS=/content/logs PY=python bash tools/pipeline/run.sh $CSV

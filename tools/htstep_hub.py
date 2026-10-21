@@ -14,14 +14,16 @@ Download (Colab and Kaggle can download from YouTube without cookies; the PC nee
   PC     : python tools/htstep_hub.py plan --retry --first 2000
            dl/plan_retry.json: the 'retry' ids and transient failures of the fetched chunks; run it with
            fetch --plan dl/plan_retry.json, with cookies.
-Extraction:
-  worker : HF_TOKEN=... python tools/htstep_hub.py work --name colab-t4 \\
-               --repo /content/InternVideo --video-ckpt .../InternVideo2-stage2_1b-224p-f4.pt \\
+Extraction (--model picks the features; each model has its own feats and claims folders):
+  worker : HF_TOKEN=... python tools/htstep_hub.py work --name colab-t4 --model k400_f16 \\
+               --repo /content/InternVideo --video-ckpt .../1B_ft_k710_ft_k400_f16.pth \\
                --audio-ckpt .../audio_6b.pth
-           claims a shard nobody is working on (claims/NNNN__<name>), extracts it with
-           tools/extract_internvideo2.py, uploads feats/htstep_feats_NNNN.tar (one .npz per video +
-           failed.txt), then takes the next one; exits when videos/DONE exists and every shard is done.
-  status : python tools/htstep_hub.py status
+           claims a shard nobody is working on (<claims>/NNNN__<name>), extracts it, uploads
+           <feats>/htstep_feats_NNNN.tar (one .npz per video + failed.txt), then takes the next one;
+           exits when videos/DONE exists and every shard is done.
+             k400_f16  : tools/pipeline/extract_features.py, k768 + a768 -> feats_k400/, claims_k400/
+             stage2_f4 : tools/extract_internvideo2.py, v768 + v512 + a768 -> feats/, claims/ (the first features)
+  status : python tools/htstep_hub.py status [--model k400_f16]
 
 Any number of workers can run (Kaggle 2x T4: two processes with CUDA_VISIBLE_DEVICES=0 / 1 and
 different --name). A claim older than --stale hours is considered dead and can be taken over.
@@ -44,6 +46,9 @@ SHARD = 100
 VFMT = 'videos/%s_videos_%04d.tar'     # path of video shard k in VREPO
 FORMAT = 'bv*[height<=360][ext=mp4]+ba[ext=m4a]/b[height<=360]/bv*+ba/b'   # 360p keeps shards small
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# extraction model -> (features folder, claims folder, extractor script) in REPO
+MODELS = {'stage2_f4': ('feats', 'claims', 'extract_internvideo2.py'),
+          'k400_f16': ('feats_k400', 'claims_k400', 'pipeline/extract_features.py')}
 
 
 def hub():
@@ -61,18 +66,20 @@ def log(*a):
     print(time.strftime('%m-%d %H:%M:%S'), *a, flush=True)
 
 
-def state(api):
-    """Shards uploaded, shards finished, claims {shard: [(worker, age_h), ...] oldest first}, DONE flag."""
+def state(api, model='stage2_f4'):
+    """Shards uploaded, shards finished with this model, its claims {shard: [(worker, age_h), ...] oldest
+    first}, DONE flag."""
+    fdir, cdir, _ = MODELS[model]
     files = set(api.list_repo_files(REPO, repo_type='dataset'))
     vfiles = files if VREPO == REPO else set(api.list_repo_files(VREPO, repo_type='dataset'))
     vpat = re.escape(VFMT).replace(re.escape('%s'), PFX).replace(re.escape('%04d'), r'(\d+)')
     shards = sorted(int(m.group(1)) for f in vfiles for m in [re.match(vpat + '$', f)] if m)
-    done = {int(m.group(1)) for f in files for m in [re.match(r'feats/%s_feats_(\d+)\.tar$' % PFX, f)] if m}
+    done = {int(m.group(1)) for f in files for m in [re.match(r'%s/%s_feats_(\d+)\.tar$' % (fdir, PFX), f)] if m}
     claims = {}
-    if any(f.startswith('claims/') for f in files):
+    if any(f.startswith(cdir + '/') for f in files):
         now = datetime.now(timezone.utc)
-        for e in api.list_repo_tree(REPO, path_in_repo='claims', repo_type='dataset', expand=True):
-            m = re.match(r'claims/(\d+)__(.+)$', e.path)
+        for e in api.list_repo_tree(REPO, path_in_repo=cdir, repo_type='dataset', expand=True):
+            m = re.match(r'%s/(\d+)__(.+)$' % cdir, e.path)
             if m and e.last_commit is not None:
                 age = (now - e.last_commit.date).total_seconds() / 3600
                 claims.setdefault(int(m.group(1)), []).append((m.group(2), age))
@@ -261,8 +268,9 @@ def work(a):
     api = hub()
     tmp = a.tmp or '/tmp/htstep_work_%s' % a.name
     os.makedirs(tmp, exist_ok=True)
+    fdir, cdir, script = MODELS[a.model]
     while True:
-        shards, done, claims, finished = state(api)
+        shards, done, claims, finished = state(api, a.model)
         free = [k for k in shards if k not in done and owner(claims, k, a.stale) in (None, a.name)]
         if not free:
             if finished and set(shards) <= done:
@@ -270,10 +278,10 @@ def work(a):
             log('nothing free (%d uploaded, %d done, %d claimed); waiting' % (len(shards), len(done), len(claims)))
             time.sleep(300); continue
         k = free[0]
-        api.upload_file(path_or_fileobj=('%s %d' % (a.name, time.time())).encode(), path_in_repo='claims/%04d__%s' % (k, a.name),
+        api.upload_file(path_or_fileobj=('%s %d' % (a.name, time.time())).encode(), path_in_repo='%s/%04d__%s' % (cdir, k, a.name),
                         repo_id=REPO, repo_type='dataset', commit_message='claim %04d %s' % (k, a.name))
         time.sleep(5)   # two workers claiming the same shard at once: the older claim wins
-        _, done, claims, _ = state(api)
+        _, done, claims, _ = state(api, a.model)
         if k in done or owner(claims, k, a.stale) != a.name:
             log('shard %04d taken by %s, next' % (k, owner(claims, k, a.stale))); continue
         log('shard %04d: downloading' % k)
@@ -283,9 +291,12 @@ def work(a):
         with tarfile.open(src) as t:
             t.extractall(vids)
         os.remove(src)
-        cmd = [sys.executable, '-u', os.path.join(ROOT, 'tools', 'extract_internvideo2.py'), '--videos', vids,
-               '--out', out, '--repo', a.repo, '--video-ckpt', a.video_ckpt, '--audio-ckpt', a.audio_ckpt,
-               '--workers', str(a.workers)]
+        cmd = [sys.executable, '-u', os.path.join(ROOT, 'tools', script), '--videos', vids, '--out', out,
+               '--repo', a.repo, '--audio-ckpt', a.audio_ckpt]
+        if a.model == 'stage2_f4':
+            cmd += ['--video-ckpt', a.video_ckpt, '--workers', str(a.workers)]
+        else:   # extract_features.py finds the checkpoint by its file name in --ckpt-dir; no CSV: every .mp4 of the shard
+            cmd += ['--csv', '', '--model', a.model, '--ckpt-dir', os.path.dirname(a.video_ckpt), '--decode-ahead', str(a.workers)]
         failed, t0 = [], time.time()
         with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as p:
             for line in p.stdout:
@@ -301,16 +312,17 @@ def work(a):
                 t.add(os.path.join(out, f), arcname=f)
             info = tarfile.TarInfo('failed.txt'); data = '\n'.join(failed).encode(); info.size = len(data)
             t.addfile(info, io.BytesIO(data))
-        api.upload_file(path_or_fileobj=tar, path_in_repo='feats/%s_feats_%04d.tar' % (PFX, k), repo_id=REPO,
-                        repo_type='dataset', commit_message='feats %04d (%s)' % (k, a.name))
+        api.upload_file(path_or_fileobj=tar, path_in_repo='%s/%s_feats_%04d.tar' % (fdir, PFX, k), repo_id=REPO,
+                        repo_type='dataset', commit_message='%s %04d (%s)' % (fdir, k, a.name))
         log('shard %04d done by %s: %d videos, %d failed, %.0f min' % (k, a.name, len(npz), len(failed),
                                                                        (time.time() - t0) / 60))
         subprocess.run(['rm', '-rf', vids, out, tar])
 
 
 def status(a):
-    shards, done, claims, finished = state(hub())
-    log('%d shards uploaded%s, %d done' % (len(shards), ' (all: DONE)' if finished else '', len(done)))
+    shards, done, claims, finished = state(hub(), a.model)
+    log('%d shards uploaded%s, %d done with %s' % (len(shards), ' (all: DONE)' if finished else '', len(done),
+                                                   a.model))
     for k in sorted(claims):
         if k not in done:
             w, age = claims[k][0]
@@ -323,7 +335,9 @@ if __name__ == '__main__':
     p.add_argument('--n', type=int, default=900, help='plan: train videos')
     p.add_argument('--public', action='store_true', help='plan: create the repos public')
     p.add_argument('--name', default='worker'); p.add_argument('--tmp', default='')
-    p.add_argument('--stale', type=float, default=6.0, help='hours after which a claim is dead')
+    p.add_argument('--model', default='k400_f16', choices=sorted(MODELS), help='work / status: features to extract')
+    p.add_argument('--stale', type=float, default=0, help='hours after which a claim is dead '
+                   '(default: 24 for work with k400_f16, 6 for stage2_f4, 2 for fetch)')
     p.add_argument('--repo', default=''); p.add_argument('--video-ckpt', default='')
     p.add_argument('--audio-ckpt', default=''); p.add_argument('--workers', type=int, default=4)
     p.add_argument('--first', type=int, default=1000, help='plan: number of the first chunk')
@@ -337,6 +351,6 @@ if __name__ == '__main__':
     p.add_argument('--reverse', action='store_true', help='fetch: take chunks from the end (fewer claim races)')
     p.add_argument('--no-done', dest='write_done', action='store_false', help='fetch: never write videos/DONE')
     a = p.parse_args()
-    if a.cmd == 'fetch' and a.stale == 6.0:
-        a.stale = 2.0   # a download chunk takes minutes to an hour
+    if not a.stale:   # a download chunk takes minutes to an hour, a k400_f16 shard up to ~10 h on a T4
+        a.stale = 2.0 if a.cmd == 'fetch' else 24.0 if a.model == 'k400_f16' else 6.0
     {'work': work, 'status': status, 'plan': plan, 'fetch': fetch}[a.cmd](a)
