@@ -1,10 +1,7 @@
 import math
 import warnings
 
-try:
-    from torch.optim.lr_scheduler import LRScheduler as _LRScheduler
-except ImportError:  # torch < 2.0
-    from torch.optim.lr_scheduler import _LRScheduler
+from torch.optim.lr_scheduler import LRScheduler as _LRScheduler
 
 
 class LinearWarmupCosineAnnealingLR(_LRScheduler):

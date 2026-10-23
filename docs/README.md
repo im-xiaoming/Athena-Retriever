@@ -9,7 +9,7 @@ using any number of machines at once. Nothing here trains a model.
 |---|---|---|
 | `nguyenminh04/htstep-videos` (`videos/htstep_videos_NNNN.tar`, `videos/manifest.json`) | `nguyenminh04/htstep-feats` (`feats/htstep_feats_NNNN.tar`) | chunks from 1000 (first plan: 1,005 videos, val_seen + about 900 train), retry chunks from 2000 and 4000 |
 
-Dataset cards: `docs/hf_cards/`. Tokens (`HF_TOKEN`, ...) live in `.env`; never print or commit it.
+Tokens (`HF_TOKEN`, ...) live in `.env`; never print or commit it.
 
 ## Flow
 
@@ -61,4 +61,4 @@ reads.
 ## Other docs
 
 - `ARCHITECTURE.md`: model architecture, losses, inference.
-- `../experiments/RESULTS.md`, `../experiments/NOTES.md`: runs and lessons. `../athena/README.md`: inference API.
+- `../experiments/RESULTS.md`, `../experiments/NOTES.md`: runs and lessons.

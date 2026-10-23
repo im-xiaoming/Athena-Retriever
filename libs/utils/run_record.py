@@ -30,14 +30,11 @@ def git_state():
     Build artefacts (*.egg-info) are ignored: installing nms_1d_cpu rewrites them.
     """
     run = lambda *c: subprocess.run(c, cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    try:
-        changed = [l for l in run('git', 'status', '--porcelain', '--untracked-files=no').splitlines()
-                   if '.egg-info/' not in l]
-        return {'commit': run('git', 'rev-parse', '--short', 'HEAD'),
-                'branch': run('git', 'rev-parse', '--abbrev-ref', 'HEAD'),
-                'dirty': bool(changed)}
-    except OSError:
-        return {'commit': 'unknown', 'branch': 'unknown', 'dirty': None}
+    changed = [l for l in run('git', 'status', '--porcelain', '--untracked-files=no').splitlines()
+               if '.egg-info/' not in l]
+    return {'commit': run('git', 'rev-parse', '--short', 'HEAD'),
+            'branch': run('git', 'rev-parse', '--abbrev-ref', 'HEAD'),
+            'dirty': bool(changed)}
 
 
 class RunRecord:

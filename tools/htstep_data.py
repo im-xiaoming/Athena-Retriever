@@ -43,8 +43,7 @@ def raw_anno():
 
 def build(a):
     import torch
-    sys.path.insert(0, ROOT)
-    from athena.encoders.internvideo2_text import InternVideo2TextEncoder
+    from iv2_text import InternVideo2TextEncoder
     os.makedirs(OUT, exist_ok=True)
     db = {}
     for vid, v in sorted(raw_anno().items()):

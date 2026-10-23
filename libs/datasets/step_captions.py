@@ -1,14 +1,14 @@
-"""HT-Step dataset for event segmentation + captioning (files of tools/extra_data.py).
+"""HT-Step dataset for event segmentation + captioning (files of tools/htstep_data.py).
 
   - each segment's label is the CAPTION INDEX within the video (0..N-1), not a global class id
   - every sample carries its captions' text vectors (NMAX, 512) and a validity mask (NMAX,)
   - num_classes = NMAX, the maximum number of captions in one video
 so label_points produces gt_cls_labels (P, NMAX) unchanged.
 
-Input features: InternVideo2 video (iv2_video_keys, v768 and/or v512) + BEATs audio a768, one row
+Input features: InternVideo2 video (iv2_video_keys, e.g. k768 or v768) + BEATs audio a768, one row
 per second, from tools/extract_internvideo2.py, resampled to max_seq_len steps.
 
-Captions: InternVideo2 text vectors (caption_emb_file, 512-d, tools/extra_data.py build), in the
+Captions: InternVideo2 text vectors (caption_emb_file, 512-d, tools/htstep_data.py build), in the
 space of the v512 video projection: the space the model is trained in, picks captions in and the
 txt_sim metric is measured in.
 """
@@ -138,7 +138,7 @@ class StepCaptionDataset(Dataset):
     @property
     def feat_dims(self):
         """(visual, audio) channel counts of the model input."""
-        return sum({'v512': 512, 'v768': 768}.get(k, 1408) for k in self.iv2_video_keys), 768
+        return sum(int(k[1:]) for k in self.iv2_video_keys), 768
 
     def _load_features(self, vid):
         """Visual and audio rows (n, C), plus their step and window in frames.

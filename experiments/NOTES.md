@@ -2,7 +2,6 @@
 
 Lessons from each change and what to combine next. The results table is in
 `RESULTS.md` (generated). Every run's config, commit and metrics are in `runs/`.
-From 2026-10-11 each training round has its own report in `reports/` (index: `README.md`).
 
 ## How to read the numbers
 

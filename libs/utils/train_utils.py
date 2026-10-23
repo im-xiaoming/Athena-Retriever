@@ -105,18 +105,12 @@ def load_ckpt(path):
     if not hasattr(np, '_core'):
         sys.modules.setdefault('numpy._core', np.core)
         sys.modules.setdefault('numpy._core.multiarray', np.core.multiarray)
-    try:
-        return torch.load(path, map_location='cpu', weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location='cpu')
+    return torch.load(path, map_location='cpu', weights_only=False)
 
 
 def load_weights(model, path):
     """Load a training checkpoint into the model (older layouts are upgraded); returns the checkpoint."""
     ck = load_ckpt(path)
     sd = upgrade_state_dict(ck['state_dict'])
-    if hasattr(model, 'ground_head') and not any(k.startswith('ground_head.') for k in sd):
-        raise SystemExit('%s has no ground head (trained before it existed): add '
-                         '--set model.train_cfg.loss_weight_ground=0' % path)
     model.load_state_dict(sd)
     return ck

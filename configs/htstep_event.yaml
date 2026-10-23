@@ -7,7 +7,7 @@ train_split:
 val_split:
 - validation
 dataset:
-  # HT-Step in YouCook2's file formats (tools/extra_data.py build / fetch)
+  # HT-Step annotations and caption vectors (tools/htstep_data.py build / fetch)
   json_file: ./data/htstep/annotations.json
   # InternVideo2 text vectors of the captions: the caption space, and the space of the txt_sim metric
   # and of the consensus pick

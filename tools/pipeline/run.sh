@@ -14,6 +14,6 @@ mkdir -p "$LOGS"; TAG=$(basename "$CSV" .csv)
 EXTRA_HF=""; EXTRA_EX=""
 [ -n "$SMALL_DISK" ] && { EXTRA_HF="--max-ahead 3"; EXTRA_EX="--delete-videos"; }
 nohup $PY -u tools/pipeline/download_hf.py --csv "$CSV" --out "$VIDEOS" --jobs 2 $EXTRA_HF > "$LOGS/$TAG.hf.log" 2>&1 &
-nohup $PY -u tools/pipeline/download_videos.py --csv "$CSV" --out "$VIDEOS" --jobs 4 "$@" > "$LOGS/$TAG.yt.log" 2>&1 &
+[ -z "$NO_YT" ] && nohup $PY -u tools/pipeline/download_videos.py --csv "$CSV" --out "$VIDEOS" --jobs 4 "$@" > "$LOGS/$TAG.yt.log" 2>&1 &
 nohup $PY -u tools/pipeline/extract_features.py --csv "$CSV" --videos "$VIDEOS" --out "$OUT" --upload --wait $EXTRA_EX $EX_ARGS > "$LOGS/$TAG.extract.log" 2>&1 &
 echo "started $TAG; logs in $LOGS/$TAG.{hf,yt,extract}.log"

@@ -18,8 +18,7 @@ OUT = os.path.join(ROOT, 'experiments', 'RESULTS.md')
 COLS = [('R@0.5', 'R@0.5', '%.2f'), ('R@0.7', 'R@0.7', '%.2f'), ('mIoU', 'mIoU', '%.2f'),
         ('CIDEr', 'CIDEr', '%.1f'), ('METEOR', 'METEOR', '%.2f'),
         ('txt_sim', 'txt_sim', '%.3f'), ('ret_sim (old)', 'ret_sim', '%.3f'), ('top1 (old)', 'ret_sim[top1]', '%.3f'),
-        ('G R1@0.5', 'G R1@0.5', '%.2f'), ('COIN unseen Acc', 'unseen/Acc', '%.2f'), ('COIN unseen F1', 'unseen/F1', '%.2f'),
-        ('COIN unseen G R1@0.5', 'unseen/G R1@0.5', '%.2f'), ('best seg R@0.5', None, '%.2f')]
+        ('G R1@0.5', 'G R1@0.5', '%.2f'), ('best seg R@0.5', None, '%.2f')]
 
 
 def load():
@@ -31,8 +30,7 @@ def load():
         r['best seg R@0.5'] = (d.get('best') or {}).get('R@0.5', {}).get('value')
         r.update(run=d['run'], host=d.get('host', '?'), commit=(d.get('git') or {}).get('commit', '?'),
                  dirty=(d.get('git') or {}).get('dirty'), overrides=' '.join(d.get('overrides') or []) or '-',
-                 note=d.get('note') or '', finished=d.get('finished') or 'running',
-                 teacher='yes' if (d.get('config') or {}).get('dataset', {}).get('omni_emb_file') else 'no')
+                 note=d.get('note') or '', finished=d.get('finished') or 'running')
         rows.append(r)
     return rows
 
@@ -48,18 +46,18 @@ def main():
              'Run-to-run noise (seed only): R@0.5 about 1.5, CIDEr about 2, ret_sim / txt_sim about 0.003.',
              '`txt_sim` (from 2026-10-05) is caption similarity in InternVideo2 text space; `ret_sim (old)` is the',
              'same in ONE-PEACE space, used before. The two are not comparable.',
-             '`G R1@0.5` (YouCook2 grounding) and the COIN columns exist from 2026-10-07 (grounding head, COIN test sets).',
+             '`G R1@0.5` (grounding head) exists from 2026-10-07.',
              'Reports per training round, with comparisons and the benchmark: `experiments/README.md`.', ''
-             '| run | host | commit | teacher | overrides | ' + ' | '.join(h for h, _, _ in COLS) + ' | note |',
-             '|' + '---|' * (6 + len(COLS))]
+             '| run | host | commit | overrides | ' + ' | '.join(h for h, _, _ in COLS) + ' | note |',
+             '|' + '---|' * (5 + len(COLS))]
     for r in rows:
         cells = []
         for h, _, fmt in COLS:
             v = r[h]
             cells.append('-' if v is None else (fmt % v) + ('*' if v == best[h] else ''))
         commit = r['commit'] + ('+dirty' if r['dirty'] else '')
-        lines.append('| %s | %s | %s | %s | `%s` | %s | %s |' % (
-            r['run'], r['host'], commit, r['teacher'], r['overrides'], ' | '.join(cells), r['note']))
+        lines.append('| %s | %s | %s | `%s` | %s | %s |' % (
+            r['run'], r['host'], commit, r['overrides'], ' | '.join(cells), r['note']))
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     open(OUT, 'w').write('\n'.join(lines) + '\n')
     print('\n'.join(lines))

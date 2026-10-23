@@ -1,4 +1,4 @@
-# Athena Retriever: event segmentation, captioning and grounding
+# HT-Step event segmentation, captioning and grounding
 
 Finds the steps (events) of a video, describes each one, and finds the span a sentence describes. Built on the
 backbone of [UniAV](https://arxiv.org/abs/2404.03179) (audio-visual ConvTransformer, itself based on ActionFormer),
@@ -12,7 +12,7 @@ with no classification layer: events are class agnostic and are named by caption
 
 ## Architecture
 
-![Athena architecture](docs/architecture.png)
+![Architecture](docs/architecture.png)
 
 Editable diagram: [`docs/architecture.drawio`](docs/architecture.drawio) (open it in draw.io / diagrams.net).
 Every size, layer and formula in detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -88,8 +88,8 @@ to 256 steps (speed jitter), dropping the audio or the visual stream, masking sh
 
 ## Results
 
-Run records and reports: [`experiments/README.md`](experiments/README.md). The reports up to 2026-10-15 are from the
-YouCook2 / COIN / ActivityNet period of the project; their code is in the git history.
+Run records: [`experiments/README.md`](experiments/README.md). The records up to 2026-10-15 are from the
+YouCook2 / COIN / ActivityNet period of the project; their code and reports are in the git history.
 
 Notes for reading the numbers:
 - Seed noise: about ±1.5 R@0.5, ±2 CIDEr, ±0.003 `txt_sim`; smaller differences are noise.
@@ -109,14 +109,13 @@ Notes for reading the numbers:
 | `libs/modeling/multimodal_backbones.py`, `blocks.py` | audio-visual ConvTransformer backbone |
 | `libs/utils/evaluation.py` | validation scores (segmentation, captioning, grounding); `seg_metrics.py` the standard metrics |
 | `libs/utils/train_utils.py`, `run_record.py`, `log_table.py` | optimizer, EMA, checkpoints; run records; the per-epoch log table |
-| `athena/` | inference API (video or stored features -> events with captions, search); see its README |
-| `tools/` | HT-Step download / extraction hub, data conversion, feature extraction, Colab / Kaggle / PC workers, API export |
-| `docs/` | architecture (+ draw.io diagram), data pipeline, HF dataset cards |
+| `tools/` | HT-Step download / extraction hub, data conversion, feature extraction, Colab / Kaggle / PC workers |
+| `docs/` | architecture (+ draw.io diagram), data pipeline |
 | `experiments/` | run records, results table, reports |
 
 ## Setup
 
-Training: Python 3.8+, PyTorch 1.11+ (also runs on 2.x), numpy, pyyaml, pandas, h5py, tensorboard,
+Training: Python 3.8+, PyTorch 1.13+, numpy, pyyaml, pandas, h5py, tensorboard,
 pycocoevalcap (METEOR needs `java`). The 1-D NMS is a C++ extension; build it after every PyTorch change:
 
 ```bash

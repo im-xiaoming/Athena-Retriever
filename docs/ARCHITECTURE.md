@@ -1,9 +1,9 @@
-# Athena architecture
+# Architecture
 
 Diagram: `docs/architecture.drawio` (editable in draw.io; PNG export `docs/architecture.png`). Losses with formulas: `README.md`.
 
 Source of truth: `libs/modeling/event_archs.py` (model, losses, inference), `libs/modeling/multimodal_backbones.py`
-(backbone), `athena/` (production wrapper), `configs/htstep_event.yaml` (sizes and weights quoted below).
+(backbone), `configs/htstep_event.yaml` (sizes and weights quoted below).
 Sizes are for the default config: 256 steps, `embd_dim = head_dim = 512`, 4 attention heads.
 
 ## 1. Inputs
@@ -40,7 +40,7 @@ audio  ─> BEATs         (frozen) ─> a768 (T x 768) ─┤ L2 norm, resample 
                                     or text written by a GPT-2 generator (optional)
 ```
 
-Three ways to use it (`athena.query`):
+Three ways to use it:
 
 | Input | Path |
 |---|---|
@@ -67,7 +67,7 @@ A each read T (`X = X + tanh(g_X) * Attn(q = X, k = v = [sink, T])`; the learned
 `g_X` starts at 0 so the bridges start closed). A video alone runs with a learned null token (event, boundary and
 embed heads); every ground query reruns the pyramid with its sentence, sharing the stem, and the ground head reads
 those features. Cost: 102M parameters instead of 70.5M, ~7.4 GB peak in training at batch 4 instead of 2.5 GB, and a
-sentence-only search has to rerun the pyramid of every stored video. The athena API does not load these checkpoints.
+sentence-only search has to rerun the pyramid of every stored video.
 
 Regression ranges per level (in steps): [0,4], [4,8], [8,16], [16,32], [32,64], [64,inf). A point is positive for a
 ground-truth segment when its centre lies inside it and the segment length fits the level's range.

@@ -21,17 +21,12 @@ libs/utils/build/
 libs/utils/dist/
 libs/utils/*.egg-info/
 
-# notebooks (the Colab demo is kept)
+# notebooks
 *.ipynb
-!athena/demo_colab.ipynb
 
 # models, features and data (on HF, see docs/README.md)
-ckpt/api/
 ckpt/internvideo2/
 /datasets/
-data/demo_videos/
-data/demo_cache/
-athena/index/
 
 # third-party code and papers cloned next to the repo
 InternVideo/
