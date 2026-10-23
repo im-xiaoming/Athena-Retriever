@@ -1,0 +1,136 @@
+# UEMR 2 fold A (Fushion uemr2/folds.py, seed 0): youcook2_event_yc2clean.yaml with only json_file changed
+# yc2-clean (docs/UEMR_ATHENA_SACH_YC2.md): youcook2_event.yaml with only the data changed.
+# Train on the 1002 trainsplit videos (the 104 dev videos relabelled subset "dev" in the annotation file),
+# pick best_seg / best_cap on dev, never touch validation; captions centred on the trainsplit mean.
+# Run as ov_E1 was run: --set train_cfg.ema_decay=0.999
+output_folder: ./ckpt
+init_rand_seed: 1234567891
+num_workers: 2
+batch_size: 4
+train_split:
+- training
+val_split:
+- dev
+dataset:
+  json_file: ./data/youcookii/annotations/youcookii_annotations_yc2clean_foldA.json
+  # InternVideo2 text vectors of the captions (tools/embed_captions.py): the space of the txt_sim
+  # metric and of the consensus pick, and the caption space unless caption_space is omni
+  # *_iv2j.npz: centred on the joint YouCook2 + COIN mean, with the "other" text (embed_captions.py --joint)
+  caption_emb_file: ./data/youcookii/caption_emb_iv2j_yc2clean.npz
+  default_fps: 16
+  max_seq_len: 256
+  max_buffer_len_factor: 1.0
+  scale_factor: 2
+  regression_range:
+  - - 0
+    - 4
+  - - 4
+    - 8
+  - - 8
+    - 16
+  - - 16
+    - 32
+  - - 32
+    - 64
+  - - 64
+    - 10000
+  backbone_arch:
+  - 2
+  - 3
+  - 5
+  trunc_thresh: 0.5
+  crop_ratio:
+  - 0.9
+  - 1.0
+  num_classes: 16
+  force_upsampling: true
+  # input features: InternVideo2 + BEATs from tools/extract_internvideo2.py, one row per second.
+  # The model input width is set from iv2_video_keys by train.py
+  feat_source: iv2
+  iv2_folder: ./data/youcookii/iv2_feats
+  iv2_video_keys: [v768]   # v768 = pooled vision, v512 = its projection into InternVideo2's text space
+  iv2_l2norm: true
+  iv2_rows_per_sec: 1      # 2 with iv2_folder ./data/youcookii/iv2_dense (tools/make_iv2_dense.py)
+  center_sample_radius: 0.0  # > 0 (ActionFormer: 1.5): only points within this many strides of a step's centre are positive
+  # caption space: iv2 (InternVideo2 text) | omni (teacher text)
+  caption_space: iv2
+  # OmniRetriever-7B teacher vectors (tools/omni_youcook2.py, HF teacher/omni_emb_full.npz).
+  # Every run since omni100 uses it; set to null to train without the teacher
+  omni_emb_file: ./data/youcookii/omni_emb_full.npz
+# COIN (docs/PLAN_openvocab.md, tools/coin_data.py fetch + anno): seen-task training videos join the train
+# set when train is true; the test sets give the open-vocabulary scores whenever the files are there
+coin:
+  train: false
+  eval: false            # yc2-clean: COIN test scores are not needed and never pick a checkpoint
+  batch_ratio: 0.5       # share of every batch drawn from COIN
+  anno_file: ./data/coin/coin_anno.json
+  label_emb_file: ./data/coin/label_emb_iv2j.npz
+  iv2_folder: ./data/coin/iv2_feats
+model:
+  backbone_type: convTransformer
+  backbone_arch:
+  - 2
+  - 3
+  - 5
+  scale_factor: 2
+  input_dim_V: 768     # set by train.py from the features
+  input_dim_A: 768
+  n_head: 4
+  embd_kernel_size: 3
+  embd_dim: 512
+  embd_with_ln: true
+  head_dim: 512
+  regression_range:
+  - - 0
+    - 4
+  - - 4
+    - 8
+  - - 8
+    - 16
+  - - 16
+    - 32
+  - - 32
+    - 64
+  - - 64
+    - 10000
+  head_num_layers: 3
+  head_kernel_size: 3
+  head_with_ln: true
+  use_abs_pe: true
+  max_seq_len: 256
+  nmax: 16
+  clip_dim: 512        # set by train.py from the caption space
+  text_proj: linear    # none: caption / query vectors stay frozen InternVideo2 text vectors (OV-AVEL)
+  pyramid_attn: cross  # self: every backbone block attends within its own stream (OV-AVEL Table A9)
+  train_cfg:
+    loss_weight_reg: 1.0
+    loss_weight_emb: 0.2
+    cls_prior_prob: 0.01
+    init_loss_norm: 400
+    loss_weight_span: 0.2
+    # ground head: a sentence finds its own span (video + text queries); 0 = no head
+    loss_weight_ground: 1.0
+    # steps outside every event pulled to the text "other" (OV-AVEL); 0 = off
+    loss_weight_other: 0.0
+    dropout: 0.0
+    droppath: 0.1
+  test_cfg:
+    score_thresh: 0.05
+    duration_thresh: 0.05
+    max_seg_num: 100
+    iou_power: 0.3
+train_cfg:
+  clip_grad_l2norm: 1.0
+  ema_decay: 0.0       # > 0 (e.g. 0.999): evaluate and save an exponential moving average of the weights
+opt:
+  type: AdamW
+  momentum: 0.9
+  weight_decay: 0.0001
+  learning_rate: 0.0001
+  clip_proj_lr: 0.001
+  epochs: 10
+  warmup: true
+  warmup_epochs: 2
+  schedule_type: cosine
+  schedule_steps: []
+  schedule_gamma: 0.1
