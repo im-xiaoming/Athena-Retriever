@@ -172,14 +172,14 @@ def valid_one_epoch(
             # giữ số dự đoán (điểm cao trước) bằng số bước GT của video
             k = min(len(gts), len(r['segments']))
             preds = r['segments'][:k].tolist()
-            for gi, gt in enumerate(gts):
+            for i, gt in enumerate(gts):
                 vals = [iou(p, gt) for p in preds] or [0.0]
                 j = int(np.argmax(vals))   # dự đoán khớp với bước GT này nhất
                 best_ious.append(vals[j])
                 if vals[j] < 0.3:          # chỉ chấm caption ở các bước đã khớp
                     continue
                 i = mbr_pick(pool_f @ r['embeds'][j].to(device), pool_n, scale)
-                gts_txt[len(gts_txt)] = [x['cap_text'][gi]]
+                gts_txt[len(gts_txt)] = [x['cap_text'][i]]
                 hyp[len(hyp)] = [pool_text[i]]
 
     return {'R@0.5': 100 * np.mean(np.array(best_ious) >= 0.5),

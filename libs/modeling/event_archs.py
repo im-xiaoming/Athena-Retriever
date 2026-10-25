@@ -80,11 +80,13 @@ class EmbedHead(nn.Module):
         ks=3,           # kernel size
         with_ln=True,   # LayerNorm sau mỗi conv
         clip_dim=512,   # kích thước vector caption (text InternVideo2)
+        omi_feats_dim=3584
     ):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
         self.vis_proj = MaskedConv1D(feat_dim, feat_dim, ks, stride=1, padding=ks // 2)
+        self.omni_vis_proj = MaskedConv1D(feat_dim, omi_feats_dim, ks, stride=1, padding=ks // 2)
         self.clip_proj = Linear(clip_dim, feat_dim) # 512 -> 512 : captions
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
@@ -96,15 +98,18 @@ class EmbedHead(nn.Module):
         """Trả về vector đã chuẩn hóa của mọi bước, và feature thô của tầng 0 (tầng mịn nhất)
         để lấy trung bình theo đoạn."""
         res, raw0 = tuple(), None
+        omni_res = tuple()
         for x, m in zip(fpn_feats, fpn_masks):
             for i in range(len(self.head)):
                 x, _ = self.head[i](x, m)
                 x = self.act(self.norm[i](x))
-            x, _ = self.vis_proj(x, m)
+            x1, _ = self.vis_proj(x, m)
+            x2, _ = self.omni_vis_proj(x, m)
             if raw0 is None:
-                raw0 = x                                       # (B, D, T0)
-            res += (F.normalize(x, dim=1).permute(0, 2, 1),)   # (B, T_l, D)
-        return res, raw0
+                raw0 = x1                                       # (B, D, T0)
+            res += (F.normalize(x1, dim=1).permute(0, 2, 1),)   # (B, T_l, D)
+            omni_res += (F.normalize(x2, dim=1).permute(0, 2, 1))
+        return res, omni_res, raw0
 
     def embed_captions(
         self,
@@ -112,40 +117,6 @@ class EmbedHead(nn.Module):
     ):
         return F.normalize(self.clip_proj(cap), dim=-1) # (N, 512)
 
-
-class OmniEmbedHead(nn.Module):
-    def __init__(
-        self,
-        in_dim,         # số kênh của feature pyramid đầu vào
-        feat_dim,       # số kênh bên trong head, cũng là kích thước D của vector mỗi bước
-        n_layers=3,     # số lớp conv
-        ks=3,           # kernel size
-        with_ln=True,   # LayerNorm sau mỗi conv
-        clip_dim=3584,   # kích thước vector caption (text InternVideo2)
-    ):
-        super().__init__()
-        self.act = nn.ReLU()
-        self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
-        self.vis_proj = MaskedConv1D(feat_dim, feat_dim, ks, stride=1, padding=ks // 2)
-        self.clip_proj = Linear(clip_dim, feat_dim) # 512 -> 512 : captions
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-    def forward(
-        self,
-        fpn_feats,  # list 6 tầng, mỗi tầng (B, C, T_l)
-        fpn_masks,  # list 6 tầng, mỗi tầng (B, 1, T_l) kiểu bool
-    ):
-        res = tuple()
-        for x, m in zip(fpn_feats, fpn_masks):
-            for i in range(len(self.head)):
-                x, _ = self.head[i](x, m)
-                x = self.act(self.norm[i](x))
-            x, _ = self.vis_proj(x, m)                                     # (B, D, T0)
-            res += (F.normalize(x, dim=1).permute(0, 2, 1),)   # (B, T_l, D)
-        return res
-
-    def embed_captions(self, cap):
-        return F.normalize(self.clip_proj(cap), dim=-1) # (N, 3584)
 
 
 # raw (512, 256) level 0, not normalized
@@ -262,7 +233,8 @@ class EventCaptionTransformer(nn.Module):
         test_cfg,            # thiết lập lúc suy luận: ngưỡng, số đoạn tối đa, NMS
         max_seq_len,         # số bước của mọi video (256)
         nmax=16,             # số caption tối đa trong một video
-        clip_dim=512,        # kích thước vector caption
+        clip_dim=512,        # kích thước vector caption,
+        omi_feats_dim=3584
     ):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
@@ -286,8 +258,7 @@ class EventCaptionTransformer(nn.Module):
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
                                        head_num_layers, head_kernel_size, head_with_ln)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
-                                    head_with_ln, clip_dim)
-        self.omni_embed_head = OmniEmbedHead(D, omni_head_dim, head_num_layers, head_kernel_size, head_with_ln, omni_head_dim)
+                                    head_with_ln, clip_dim, omi_feats_dim)
         self.seg_ctx = SegmentContext(head_dim)
         
     def set_caption_pool(
@@ -311,7 +282,7 @@ class EventCaptionTransformer(nn.Module):
         """Gộp các video trong batch thành tensor (B, C=768, T) và mask (B, 1, T).
         T luôn bằng max_seq_len: video bị cắt lúc train sẽ được padding cho đủ."""
 
-        fv = [x['feats']['visual'] for x in video_list] # x['feats']['visual'] = (C, T)
+        fv = [x['feats']['visual'] for x in video_list] # x['feats']['visual'] = (C, T')
         fa = [x['feats']['audio'] for x in video_list]
         lens = torch.as_tensor([f.shape[-1] for f in fv]) # T are different because of data agumnetation
         max_len = self.max_seq_len
@@ -349,12 +320,8 @@ class EventCaptionTransformer(nn.Module):
         qu = torch.cat(qu, dim=1).squeeze(-1)                            # (B, P)
 
         # Embedding Head
-        em, raw0 = self.embed_head(feats, msk) # tuple((B, T_l, D)), (B, D, T0)
+        em, omni_em, raw0 = self.embed_head(feats, msk) # tuple((B, T_l, D)), (B, D, T0)
         em = torch.cat(em, dim=1)                                        # (B, P, D)
-        
-        # Omni Embedding Head
-        omni_em = self.omni_embed_head(feats, msk)
-        omni_em = torch.cat(omni_em, dim=1)
         
         #       (B, 1, T)
         len0 = msk[0].squeeze(1).sum(-1)                                 # (B,)
@@ -455,10 +422,11 @@ class EventCaptionTransformer(nn.Module):
         """
         t = self.test_cfg
         a = t['iou_power']
-        prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float()
+        prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float() # (B, P)
         out = []
         for b, v in enumerate(video_list):
             pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, cận dưới, cận trên của khoảng hồi quy, stride
+            #          (P,)
             keep = (prob[b] > t['score_thresh']).nonzero(as_tuple=True)[0]
             if keep.numel() == 0:
                 keep = prob[b].topk(1).indices

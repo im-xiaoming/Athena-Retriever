@@ -172,7 +172,7 @@ class YouCook2Dataset(Dataset):
             points, data_dict['segments'], data_dict['labels'], self.num_classes)
         data_dict['points'] = points
 
-        # ma trận caption của video, padding cho đủ NMAX
+        # ma trận caption của video, padding cho đủ NMAX (16)
         emb = np.zeros((self.num_classes, 512), dtype=np.float32)
         emb_ = np.zeros((self.num_classes, 3584))
         pidx = np.full((self.num_classes,), -1, dtype=np.int64)
