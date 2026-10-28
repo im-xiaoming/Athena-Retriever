@@ -1,10 +1,5 @@
 chunk,plan,n_videos,ok,failed,retry,failed_page_reload,video_shard,video_gb,in_manifest,feats_shard,feats_mb,status,fetched_by,claims
-3029,plan_full,100,0,100,0,0,,,,,,all_failed,colab,colab
-3041,plan_full,100,0,100,0,82,,,,,,all_failed,colab,colab
-3050,plan_full,100,0,100,0,94,,,,,,all_failed,colab,colab pc3
-3070,plan_full,100,0,100,0,88,,,,,,all_failed,colab,colab
 3081,plan_full,100,0,100,0,51,,,,,,all_failed,colab,colab
-3088,plan_full,100,86,14,0,0,videos/htstep_videos_3088.tar,1.94,True,,,downloaded,pc2,pc2
 3099,plan_full,100,0,100,0,88,,,,,,all_failed,colab,colab
 3107,plan_full,100,71,12,17,0,videos/htstep_videos_3107.tar,1.59,True,,,downloaded,colab,colab
 4006,plan_retry2,100,84,16,0,0,videos/htstep_videos_4006.tar,1.89,True,,,downloaded,r3,r3

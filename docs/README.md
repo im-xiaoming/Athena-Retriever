@@ -46,7 +46,7 @@ Rules that make machines interchangeable:
 
 | Machine | Role | How |
 |---|---|---|
-| PC (WSL, RTX 3060 12 GB) | fetch + work | ffmpeg in `~/.local/ffbin`, worker env `uniav-api-env`; `tools/pc_work.sh` extracts |
+| PC (WSL, RTX 3060 12 GB) | fetch + work | ffmpeg in `~/.local/ffbin`, worker env `uniav-api-env`; `tools/pipeline/run.sh <csv>` downloads and extracts |
 | Colab T4 | fetch + work | `tools/colab_dl_extract.sh` runs on the VM (installs yt-dlp, deno, checkpoints, starts the worker); `tools/colab_dl_launch.sh` retries session creation; `tools/colab_keepalive.sh` keeps it alive; `tools/colab_watchdog.sh` relaunches a dead job. `HOME=~/colabN` selects the Colab account |
 | Kaggle 2x T4 | work | `tools/kaggle_work.sh`, one worker per GPU |
 

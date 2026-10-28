@@ -62,6 +62,7 @@ CONFIG = {
     'upload': False,                       # upload each finished chunk to HF (needs HF_TOKEN)
     'delete_videos': False,                # with upload: delete the chunk's videos once uploaded (small disks)
     'wait': False,                         # keep waiting for chunks still downloading (run it beside the downloaders)
+    'skip_ids': '',                        # text file, one video id per line: already extracted elsewhere, never extract again
     # ---- paths ----
     'videos': 'htstep_videos',             # <videos>/<chunk>/<id>.mp4; file name without .mp4 = video id
     'out': 'iv2_feats',                    # output folder of .npz files
@@ -302,7 +303,8 @@ def main(cfg):
     dev = torch.device('cuda')
     spec = MODELS[cfg['model']]
     os.makedirs(os.path.join(cfg['out'], '.uploaded'), exist_ok=True)
-    done = lambda v: os.path.exists(os.path.join(cfg['out'], v + '.npz'))
+    skip = set(open(cfg['skip_ids']).read().split()) if cfg['skip_ids'] else set()
+    done = lambda v: v in skip or os.path.exists(os.path.join(cfg['out'], v + '.npz'))   # skipped ids are extracted elsewhere
     uploaded = lambda c: os.path.exists(os.path.join(cfg['out'], '.uploaded', c))
     import_upstream(cfg['repo'])
     load = load_k400_f16 if cfg['model'] == 'k400_f16' else load_stage2_f4

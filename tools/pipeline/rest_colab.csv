@@ -1,5 +1,4 @@
 chunk,plan,n_videos,ok,failed,retry,failed_page_reload,video_shard,video_gb,in_manifest,feats_shard,feats_mb,status,fetched_by,claims
-4010,plan_retry2,100,89,11,0,0,videos/htstep_videos_4010.tar,2.05,True,,,downloaded,r2,r2
 4014,plan_retry2,100,90,10,0,0,videos/htstep_videos_4014.tar,2.2,True,,,downloaded,r1,r1
 4016,plan_retry2,100,87,13,0,0,videos/htstep_videos_4016.tar,2.13,True,,,downloaded,r3,r3
 4018,plan_retry2,100,88,12,0,0,videos/htstep_videos_4018.tar,2.03,True,,,downloaded,r2,r2
@@ -17,21 +16,6 @@ chunk,plan,n_videos,ok,failed,retry,failed_page_reload,video_shard,video_gb,in_m
 4009,plan_retry2,100,88,12,0,0,videos/htstep_videos_4009.tar,1.94,True,,,downloaded,r3,r3
 4011,plan_retry2,100,90,10,0,0,videos/htstep_videos_4011.tar,2.46,True,,,downloaded,r1,r1
 4013,plan_retry2,100,88,12,0,0,videos/htstep_videos_4013.tar,2.34,True,,,downloaded,r2,r2
-4015,plan_retry2,100,84,16,0,0,videos/htstep_videos_4015.tar,1.96,True,,,downloaded,r2,r2
-4017,plan_retry2,100,90,10,0,0,videos/htstep_videos_4017.tar,2.4,True,,,downloaded,r1,r1
-4019,plan_retry2,100,86,14,0,0,videos/htstep_videos_4019.tar,2.02,True,,,downloaded,r3,r3
-4021,plan_retry2,100,88,12,0,0,videos/htstep_videos_4021.tar,2.16,True,,,downloaded,r2,r2
-4023,plan_retry2,100,83,17,0,0,videos/htstep_videos_4023.tar,2.07,True,,,downloaded,r1,r1
-4025,plan_retry2,100,79,21,0,0,videos/htstep_videos_4025.tar,2.06,True,,,downloaded,r1,r1
-4027,plan_retry2,100,85,15,0,0,videos/htstep_videos_4027.tar,2.12,False,,,downloaded,r2,r2 r3
-4029,plan_retry2,100,84,16,0,0,videos/htstep_videos_4029.tar,1.83,False,,,downloaded,r3,r3
-4031,plan_retry2,100,84,16,0,0,videos/htstep_videos_4031.tar,2.21,False,,,downloaded,r1,r1
-4033,plan_retry2,100,72,28,0,0,videos/htstep_videos_4033.tar,1.64,False,,,downloaded,r2,r2
-4035,plan_retry2,100,87,13,0,0,videos/htstep_videos_4035.tar,2.42,False,,,downloaded,r2,r2
-4037,plan_retry2,100,85,15,0,0,videos/htstep_videos_4037.tar,2.35,False,,,downloaded,r2,r2
-4039,plan_retry2,100,85,15,0,0,videos/htstep_videos_4039.tar,2.03,False,,,downloaded,r1,r1
-4041,plan_retry2,100,88,12,0,0,videos/htstep_videos_4041.tar,2.5,False,,,downloaded,r1,r1
-4043,plan_retry2,100,90,10,0,0,videos/htstep_videos_4043.tar,2.25,False,,,downloaded,r1,r1
 4046,plan_retry2,100,,,,,,,,,,claimed,,r2
 4048,plan_retry2,100,,,,,,,,,,todo,,
 4050,plan_retry2,100,,,,,,,,,,todo,,
