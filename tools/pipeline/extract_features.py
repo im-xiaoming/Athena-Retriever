@@ -62,6 +62,7 @@ CONFIG = {
     'upload': False,                       # upload each finished chunk to HF (needs HF_TOKEN)
     'delete_videos': False,                # with upload: delete the chunk's videos once uploaded (small disks)
     'wait': False,                         # keep waiting for chunks still downloading (run it beside the downloaders)
+    'upload_every': 0,                     # with upload: also upload the chunk's npz so far (partial tar) every N extracted videos; 0 = off
     'skip_ids': '',                        # text file, one video id per line: already extracted elsewhere, never extract again
     # ---- paths ----
     'videos': 'htstep_videos',             # <videos>/<chunk>/<id>.mp4; file name without .mp4 = video id
@@ -268,8 +269,9 @@ def chunk_list(cfg):
     return ready, waiting
 
 
-def upload_chunk(chunk, ids, failed, cfg):
-    """<feats>/htstep_feats_<chunk>.tar on HF: the chunk's .npz files + failed.txt."""
+def upload_chunk(chunk, ids, failed, cfg, partial=False):
+    """<feats>/htstep_feats_<chunk>.tar on HF: the chunk's .npz files + failed.txt.
+    partial: chunk not finished; add partial.txt (ids still missing), no .uploaded marker. The final upload overwrites it."""
     from huggingface_hub import HfApi
     tar = os.path.join(cfg['out'], '.htstep_feats_%s.tar' % chunk)
     with tarfile.open(tar, 'w') as t:
@@ -280,12 +282,19 @@ def upload_chunk(chunk, ids, failed, cfg):
         data = '\n'.join(failed).encode()
         info.size = len(data)
         t.addfile(info, io.BytesIO(data))
+        if partial:
+            miss = '\n'.join(sorted(v for v in ids if not os.path.exists(os.path.join(cfg['out'], v + '.npz'))
+                                    and v not in cfg['skip'] and not any(v in f for f in failed))).encode()
+            info = tarfile.TarInfo('partial.txt')
+            info.size = len(miss)
+            t.addfile(info, io.BytesIO(miss))
     path = 'feats/htstep_feats_%s.tar' % chunk
     HfApi(token=hf_token()).upload_file(path_or_fileobj=tar, path_in_repo=path, repo_id=MODELS[cfg['model']]['repo'],
                                         repo_type='dataset', commit_message='%s (extract_features.py)' % path)
     os.remove(tar)
-    open(os.path.join(cfg['out'], '.uploaded', chunk), 'w').close()   # a rerun does not upload it again
-    print('UPLOADED %s' % path, flush=True)
+    if not partial:
+        open(os.path.join(cfg['out'], '.uploaded', chunk), 'w').close()   # a rerun does not upload it again
+    print('UPLOADED %s%s' % (path, ' (partial)' if partial else ''), flush=True)
 
 
 def hf_token():
@@ -303,7 +312,7 @@ def main(cfg):
     dev = torch.device('cuda')
     spec = MODELS[cfg['model']]
     os.makedirs(os.path.join(cfg['out'], '.uploaded'), exist_ok=True)
-    skip = set(open(cfg['skip_ids']).read().split()) if cfg['skip_ids'] else set()
+    skip = cfg['skip'] = set(open(cfg['skip_ids']).read().split()) if cfg['skip_ids'] else set()
     done = lambda v: v in skip or os.path.exists(os.path.join(cfg['out'], v + '.npz'))   # skipped ids are extracted elsewhere
     uploaded = lambda c: os.path.exists(os.path.join(cfg['out'], '.uploaded', c))
     import_upstream(cfg['repo'])
@@ -359,6 +368,8 @@ def main(cfg):
                         continue
                     np.savez(os.path.join(cfg['out'], vid + '.npz'), **{k: v.astype(np.float16) for k, v in feats.items()})
                     secs += n_sec
+                    if cfg['upload'] and cfg['upload_every'] and count % cfg['upload_every'] == 0:
+                        upload_chunk(chunk, paths, failed.values(), cfg, partial=True)
                     el = time.time() - t0
                     print('%d/%d %s/%s: %d s | %.1f video-s per s | ETA %.0f min' % (
                         count, n_todo, chunk, vid, n_sec, secs / el, (n_todo - count) * el / count / 60), flush=True)
