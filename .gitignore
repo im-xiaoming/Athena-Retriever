@@ -1,9 +1,21 @@
-data/youcookii/iv2_feats
-ckpt/
+# secrets and local settings
+.env
+.claude/
+cookies/
+
+# generated
 __pycache__/
 *.pyc
-libs/utils/build/
-libs/utils/dist/
-libs/utils/*.egg-info/
+*.log
+*.tar
 *.ipynb
-data/youcookii/omni_emb_full.npz
+logs/
+logs_pipe/
+
+# data, features and checkpoints (on HF, see README.md)
+data/
+ckpt/
+
+# third-party code cloned next to the repo
+InternVideo/
+OmniRetreiver/

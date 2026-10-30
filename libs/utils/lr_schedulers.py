@@ -1,13 +1,13 @@
 import math
 import warnings
 
-from torch.optim.lr_scheduler import _LRScheduler
+from torch.optim.lr_scheduler import LRScheduler
 
 
-class LinearWarmupCosineAnnealingLR(_LRScheduler):
+class LinearWarmupCosineAnnealingLR(LRScheduler):
     """
-    Learning rate tăng tuyến tính từ warmup_start_lr lên base_lr trong warmup_epochs bước đầu, sau đó giảm
-    theo hình cosine từ base_lr xuống eta_min. Gọi step() sau mỗi iteration (không phải mỗi epoch).
+    The learning rate rises linearly from warmup_start_lr to base_lr over the first warmup_epochs steps, then
+    follows a cosine from base_lr down to eta_min. Call step() after every iteration (not every epoch).
     """
 
     def __init__(
@@ -20,21 +20,21 @@ class LinearWarmupCosineAnnealingLR(_LRScheduler):
         last_epoch = -1,
     ):
         """
-        optimizer: optimizer cần điều chỉnh learning rate
-        warmup_epochs: số bước warm-up
-        max_epochs: tổng số bước
-        warmup_start_lr: learning rate lúc bắt đầu warm-up
-        eta_min: learning rate nhỏ nhất ở cuối
+        optimizer: the optimizer whose learning rate is scheduled
+        warmup_epochs: warm-up steps
+        max_epochs: total steps
+        warmup_start_lr: learning rate at the start of the warm-up
+        eta_min: smallest learning rate, at the end
         """
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.warmup_start_lr = warmup_start_lr
         self.eta_min = eta_min
 
-        super(LinearWarmupCosineAnnealingLR, self).__init__(optimizer, last_epoch)
+        super().__init__(optimizer, last_epoch)
 
     def get_lr(self):
-        """Tính learning rate theo dạng nối tiếp (dựa vào learning rate của bước trước)."""
+        """Recursive form of the learning rate (from the learning rate of the previous step)."""
         if not self._get_lr_called_within_step:
             warnings.warn(
                 "To get the last learning rate computed by the scheduler, "
@@ -67,7 +67,7 @@ class LinearWarmupCosineAnnealingLR(_LRScheduler):
         ]
 
     def _get_closed_form_lr(self):
-        """Công thức đóng, dùng khi gọi step() có truyền epoch."""
+        """Closed form, used when step() is called with an epoch."""
         if self.last_epoch < self.warmup_epochs:
             return [
                 self.warmup_start_lr + self.last_epoch * (base_lr - self.warmup_start_lr) / (self.warmup_epochs - 1)

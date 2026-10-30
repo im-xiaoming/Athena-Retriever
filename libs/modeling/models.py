@@ -12,7 +12,7 @@ def register_multimodal_meta_arch(name):
         return cls
     return decorator
 
-# các hàm tạo đối tượng từ tên đã đăng ký
+# build the registered objects by name
 def make_multimodal_backbone(name, **kwargs):
     multimodal_backbone = multimodal_backbones[name](**kwargs)
     return multimodal_backbone

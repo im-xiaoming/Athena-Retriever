@@ -15,14 +15,14 @@ from ..utils import batched_nms
 
 
 def _conv_stack(
-    in_dim,     # số kênh của feature pyramid đầu vào (2 * embd_dim: luồng video + luồng audio)
-    feat_dim,   # số kênh bên trong head
-    n_layers,   # số lớp của head, tính cả conv đầu ra (nên ở đây chỉ tạo n_layers - 1 lớp)
-    ks,         # kernel size của conv
-    with_ln,    # có LayerNorm sau mỗi conv không
+    in_dim,     # channels of the input feature pyramid (2 * embd_dim: video stream + audio stream)
+    feat_dim,   # channels inside the head
+    n_layers,   # layers of the head, output conv included (so n_layers - 1 are built here)
+    ks,         # conv kernel size
+    with_ln,    # LayerNorm after every conv
 ): # not change T
-    """Phần thân chung của các head: n_layers - 1 lớp MaskedConv1D, mỗi lớp có LayerNorm đi kèm.
-    ReLU và conv đầu ra do từng head tự thêm."""
+    """Shared body of the heads: n_layers - 1 MaskedConv1D layers, each with its LayerNorm.
+    Each head adds its own ReLU and output conv."""
     head, norm = nn.ModuleList(), nn.ModuleList()
     for i in range(n_layers - 1):
         head.append(MaskedConv1D(in_dim if i == 0 else feat_dim, feat_dim, ks,
@@ -41,12 +41,12 @@ class EventHead(nn.Module):
 
     def __init__(
         self,
-        in_dim,           # số kênh của feature pyramid đầu vào
-        feat_dim,         # số kênh bên trong head
-        n_layers=3,       # số lớp conv, tính cả conv đầu ra
+        in_dim,           # channels of the input feature pyramid
+        feat_dim,         # channels inside the head
+        n_layers=3,       # conv layers, output conv included
         ks=3,             # kernel size
-        with_ln=True,     # LayerNorm sau mỗi conv
-        prior_prob=0.01,  # xác suất "là event" lúc khởi tạo: bias đầu ra = -log((1 - p) / p)
+        with_ln=True,     # LayerNorm after every conv
+        prior_prob=0.01,  # probability of "event" at init: output bias = -log((1 - p) / p)
     ):
         super().__init__()
         self.act = nn.ReLU()
@@ -56,8 +56,8 @@ class EventHead(nn.Module):
 
     def forward(
         self,
-        fpn_feats,  # list 6 tầng, mỗi tầng (B, C, T_l)
-        fpn_masks,  # list 6 tầng, mỗi tầng (B, 1, T_l) kiểu bool, True = bước thật (không phải padding)
+        fpn_feats,  # 6 levels, each (B, C, T_l)
+        fpn_masks,  # 6 levels, each (B, 1, T_l) bool, True = real step (not padding)
     ):
         res = tuple()
         for x, m in zip(fpn_feats, fpn_masks):
@@ -70,33 +70,36 @@ class EventHead(nn.Module):
 
 
 class EmbedHead(nn.Module):
-    """Mỗi bước thời gian ra một vector đã chuẩn hóa L2, nằm cùng không gian với caption đã chiếu."""
+    """One L2-normalised vector per time step, in the same space as the projected captions.
+    With omi_feats_dim > 0 a second projection puts every step in the OmniRetriever caption space too."""
 
     def __init__(
         self,
-        in_dim,         # số kênh của feature pyramid đầu vào
-        feat_dim,       # số kênh bên trong head, cũng là kích thước D của vector mỗi bước
-        n_layers=3,     # số lớp conv
+        in_dim,         # channels of the input feature pyramid
+        feat_dim,       # channels inside the head, also the size D of every step vector
+        n_layers=3,     # conv layers
         ks=3,           # kernel size
-        with_ln=True,   # LayerNorm sau mỗi conv
-        clip_dim=512,   # kích thước vector caption (text InternVideo2)
+        with_ln=True,   # LayerNorm after every conv
+        clip_dim=512,   # size of the caption vectors (InternVideo2 text)
         omi_feats_dim=3584
     ):
         super().__init__()
         self.act = nn.ReLU()
         self.head, self.norm = _conv_stack(in_dim, feat_dim, n_layers, ks, with_ln)
         self.vis_proj = MaskedConv1D(feat_dim, feat_dim, ks, stride=1, padding=ks // 2)
-        self.omni_vis_proj = MaskedConv1D(feat_dim, omi_feats_dim, ks, stride=1, padding=ks // 2)
+        self.omni_vis_proj = None
+        if omi_feats_dim > 0:
+            self.omni_vis_proj = MaskedConv1D(feat_dim, omi_feats_dim, ks, stride=1, padding=ks // 2)
         self.clip_proj = Linear(clip_dim, feat_dim) # 512 -> 512 : captions
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(
         self,
-        fpn_feats,  # list 6 tầng, mỗi tầng (B, C, T_l)
-        fpn_masks,  # list 6 tầng, mỗi tầng (B, 1, T_l) kiểu bool
+        fpn_feats,  # 6 levels, each (B, C, T_l)
+        fpn_masks,  # 6 levels, each (B, 1, T_l) bool
     ):
-        """Trả về vector đã chuẩn hóa của mọi bước, và feature thô của tầng 0 (tầng mịn nhất)
-        để lấy trung bình theo đoạn."""
+        """Returns the normalised vectors of every step (and of the omni projection, empty without it),
+        and the raw features of level 0 (the finest) for the span averages."""
         res, raw0 = tuple(), None
         omni_res = tuple()
         for x, m in zip(fpn_feats, fpn_masks):
@@ -104,11 +107,12 @@ class EmbedHead(nn.Module):
                 x, _ = self.head[i](x, m)
                 x = self.act(self.norm[i](x))
             x1, _ = self.vis_proj(x, m)
-            x2, _ = self.omni_vis_proj(x, m)
             if raw0 is None:
                 raw0 = x1                                       # (B, D, T0)
             res += (F.normalize(x1, dim=1).permute(0, 2, 1),)   # (B, T_l, D)
-            omni_res += (F.normalize(x2, dim=1).permute(0, 2, 1))
+            if self.omni_vis_proj is not None:
+                x2, _ = self.omni_vis_proj(x, m)
+                omni_res += (F.normalize(x2, dim=1).permute(0, 2, 1),)
         return res, omni_res, raw0
 
     def embed_captions(
@@ -122,14 +126,14 @@ class EmbedHead(nn.Module):
 # raw (512, 256) level 0, not normalized
 
 def span_mean(
-    raw,     # (D, T) feature tầng 0 của một video, chưa chuẩn hóa
-    length,  # số bước thật (không tính padding) của video
-    segs,    # (N, 2) các đoạn (đầu, cuối), đơn vị là bước của tầng 0
+    raw,     # (D, T) level-0 features of one video, not normalised
+    length,  # real steps (padding excluded) of the video
+    segs,    # (N, 2) segments (start, end), in level-0 steps
 ):
-    """Trung bình feature trên từng đoạn.
+    """Mean of the features over every segment.
 
-    Dùng tổng cộng dồn (cumsum) nên không phải lặp qua từng đoạn. Đoạn ngắn hơn một bước
-    thì vẫn lấy ít nhất một bước.
+    Uses a cumulative sum, so there is no loop over the segments. A segment shorter than one step
+    still takes at least one step.
     """
     cs = F.pad(raw.cumsum(-1), (1, 0))                         # (D, T+1)
     lo = segs[:, 0].floor().clamp(min=0, max=length - 1).long()
@@ -139,11 +143,11 @@ def span_mean(
 
 
 class SegmentContext(nn.Module):
-    """Vector của một đoạn, có thêm ngữ cảnh của cả video.
+    """Vector of one segment, with the context of the whole video.
 
-    Đầu vào gồm trung bình trên đoạn, trung bình trên cả video (đang nấu món gì) và vị trí
-    tương đối của đoạn (bước đầu hay bước cuối của công thức). Lớp cuối khởi tạo bằng 0,
-    nên lúc đầu kết quả đúng bằng trung bình trên đoạn.
+    The input is the mean over the segment, the mean over the whole video (which task it is) and the
+    relative position of the segment (first or last step of the task). The last layer starts at 0,
+    so at first the output is exactly the segment mean.
     """
 
     def __init__(self, dim: int = 512):
@@ -158,9 +162,9 @@ class SegmentContext(nn.Module):
 
     def forward(
         self,
-        raw,     # (D, T) feature tầng 0 của một video
-        length,  # số bước thật của video
-        segs,    # (N, 2) các đoạn, đơn vị bước
+        raw,     # (D, T) level-0 features of one video
+        length,  # real steps of the video
+        segs,    # (N, 2) segments, in steps
     ):
         span = span_mean(raw, length, segs)                          # (N, D)
         glob = raw[:, :length].mean(-1).expand_as(span)              # (N, D)
@@ -169,17 +173,17 @@ class SegmentContext(nn.Module):
 
 
 class BoundaryHead(nn.Module):
-    """Ở mỗi bước: khoảng cách tới điểm đầu và điểm cuối của event chứa nó (tính theo stride của tầng,
-    luôn >= 0), và một logit IoU-quality (đoạn dự đoán từ bước này tốt cỡ nào, dùng để xếp hạng)."""
+    """At every step: distances to the start and end of the event holding it (in strides of the level,
+    always >= 0), and an IoU-quality logit (how good the segment predicted from this step is, for ranking)."""
 
     def __init__(
         self,
-        in_dim,          # số kênh của feature pyramid đầu vào
-        feat_dim,        # số kênh bên trong head
-        fpn_levels=6,    # số tầng pyramid: mỗi tầng có một hệ số scale riêng cho khoảng cách
-        n_layers=3,      # số lớp conv
+        in_dim,          # channels of the input feature pyramid
+        feat_dim,        # channels inside the head
+        fpn_levels=6,    # pyramid levels: each level has its own scale for the distances
+        n_layers=3,      # conv layers
         ks=3,            # kernel size
-        with_ln=True,    # LayerNorm sau mỗi conv
+        with_ln=True,    # LayerNorm after every conv
     ):
         super().__init__()
         self.act = nn.ReLU()
@@ -187,13 +191,13 @@ class BoundaryHead(nn.Module):
         self.scale = nn.ModuleList([Scale() for _ in range(fpn_levels)])
         self.out = MaskedConv1D(feat_dim, 2, ks, stride=1, padding=ks // 2)
         torch.nn.init.constant_(self.out.conv.bias, 1.0)
-        # đoán IoU giữa đoạn dự đoán từ bước này và đoạn GT, dùng để xếp hạng
+        # predicted IoU between the segment from this step and the GT segment, for ranking
         self.iou_out = MaskedConv1D(feat_dim, 1, ks, stride=1, padding=ks // 2)
 
     def forward(
         self,
-        fpn_feats,  # list 6 tầng, mỗi tầng (B, C, T_l)
-        fpn_masks,  # list 6 tầng, mỗi tầng (B, 1, T_l) kiểu bool
+        fpn_feats,  # 6 levels, each (B, C, T_l)
+        fpn_masks,  # 6 levels, each (B, 1, T_l) bool
     ):
         res, qual = tuple(), tuple()
         for l, (x, m) in enumerate(zip(fpn_feats, fpn_masks)):
@@ -210,31 +214,30 @@ class BoundaryHead(nn.Module):
 
 @register_multimodal_meta_arch("EventCaptionTransformer")
 class EventCaptionTransformer(nn.Module):
-    """Tách các bước của video rồi gán caption cho từng bước. Không có lớp phân loại."""
+    """Finds the steps of a video and picks a caption for each. No classification layer."""
 
     def __init__(
         self,
-        backbone_arch,       # (#conv, #transformer ở stem, #transformer ở nhánh pyramid), ví dụ (2, 3, 5)
-        scale_factor,        # hệ số giảm độ dài giữa hai tầng pyramid
-        input_dim_V,         # số kênh feature video (768)
-        input_dim_A,         # số kênh feature audio (768)
-        n_head,              # số head attention trong backbone
-        embd_kernel_size,    # kernel size của các conv embedding trong backbone
-        embd_dim,            # số kênh mỗi luồng của backbone (512); các head đọc cả hai luồng: 2 * embd_dim
-        embd_with_ln,        # LayerNorm sau các conv embedding
-        head_dim,            # số kênh trong mọi head, cũng là kích thước D của vector bước / đoạn
-        omni_head_dim,
-        regression_range,    # mỗi tầng phụ trách những đoạn có khoảng cách xa nhất tới biên nằm trong khoảng này
-        head_num_layers,     # số lớp conv của mỗi head
-        head_kernel_size,    # kernel size của các head
-        head_with_ln,        # LayerNorm trong các head
-        use_abs_pe,          # cộng position embedding dạng sin trong backbone
-        train_cfg,           # trọng số các loss, dropout, droppath, cls_prior_prob
-        test_cfg,            # thiết lập lúc suy luận: ngưỡng, số đoạn tối đa, NMS
-        max_seq_len,         # số bước của mọi video (256)
-        nmax=16,             # số caption tối đa trong một video
-        clip_dim=512,        # kích thước vector caption,
-        omi_feats_dim=3584
+        backbone_arch,       # (#conv, #transformer in the stem, #transformer in the pyramid branch), e.g. (2, 3, 5)
+        scale_factor,        # length ratio between two pyramid levels
+        input_dim_V,         # video feature channels (768)
+        input_dim_A,         # audio feature channels (768)
+        n_head,              # attention heads in the backbone
+        embd_kernel_size,    # kernel size of the embedding convs in the backbone
+        embd_dim,            # channels per backbone stream (512); the heads read both streams: 2 * embd_dim
+        embd_with_ln,        # LayerNorm after the embedding convs
+        head_dim,            # channels in every head, also the size D of the step / segment vectors
+        omni_head_dim,       # size of the OmniRetriever caption vectors (3584), 0 = no omni head
+        regression_range,    # each level handles the segments whose largest distance to a boundary falls in this range
+        head_num_layers,     # conv layers of every head
+        head_kernel_size,    # kernel size of the heads
+        head_with_ln,        # LayerNorm in the heads
+        use_abs_pe,          # add a sinusoid position embedding in the backbone
+        train_cfg,           # loss weights, dropout, droppath, cls_prior_prob
+        test_cfg,            # inference settings: thresholds, maximum segments, NMS
+        max_seq_len,         # steps of every video (256)
+        nmax=16,             # at most this many captions per video
+        clip_dim=512,        # size of the caption vectors,
     ):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
@@ -258,13 +261,13 @@ class EventCaptionTransformer(nn.Module):
         self.bound_head = BoundaryHead(D, head_dim, len(self.fpn_strides),
                                        head_num_layers, head_kernel_size, head_with_ln)
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
-                                    head_with_ln, clip_dim, omi_feats_dim)
+                                    head_with_ln, clip_dim, omni_head_dim)
         self.seg_ctx = SegmentContext(head_dim)
-        
+
     def set_caption_pool(
         self,
-        pool_raw,  # (N, clip_dim) vector InternVideo2 của các caption khác nhau trong tập train
-        omni_pool_raw
+        pool_raw,  # (N, clip_dim) InternVideo2 vectors of the distinct training captions
+        omni_pool_raw=None,  # (N, omni_head_dim) their OmniRetriever vectors, None = no omni head
     ):
         self.pool_raw = pool_raw # pool_emb
         self.omni_pool_raw = omni_pool_raw
@@ -276,11 +279,11 @@ class EventCaptionTransformer(nn.Module):
     @torch.no_grad()
     def preprocessing(
         self,
-        video_list,        # list B dict, mỗi dict là một video (YouCook2Dataset.__getitem__)
-        padding_val=0.0,   # giá trị điền vào các bước padding
+        video_list,        # B dicts, one per video (HTStepDataset.__getitem__)
+        padding_val=0.0,   # value of the padding steps
     ):
-        """Gộp các video trong batch thành tensor (B, C=768, T) và mask (B, 1, T).
-        T luôn bằng max_seq_len: video bị cắt lúc train sẽ được padding cho đủ."""
+        """Stack the videos of the batch into (B, C=768, T) tensors and a (B, 1, T) mask.
+        T is always max_seq_len: videos cropped during training are padded."""
 
         fv = [x['feats']['visual'] for x in video_list] # x['feats']['visual'] = (C, T')
         fa = [x['feats']['audio'] for x in video_list]
@@ -322,36 +325,27 @@ class EventCaptionTransformer(nn.Module):
         # Embedding Head
         em, omni_em, raw0 = self.embed_head(feats, msk) # tuple((B, T_l, D)), (B, D, T0)
         em = torch.cat(em, dim=1)                                        # (B, P, D)
-        
+        omni_em = torch.cat(omni_em, dim=1) if omni_em else None         # (B, P, 3584)
+
         #       (B, 1, T)
         len0 = msk[0].squeeze(1).sum(-1)                                 # (B,)
         #                         (B, T)
         fpn_masks = torch.cat([m.squeeze(1) for m in msk], dim=1)        # (B, P)
-        self._fpn = (feats, msk, em)                                     # để ground head dùng lại
         if self.training:
             return self.losses(video_list, fpn_masks, ev, bd, qu, em, omni_em, raw0, len0)
         return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
 
-    def ground(
-        self,
-        vid,    # (Q,) chỉ số trong batch của video mà mỗi câu hỏi tới
-        query,  # (Q, 512) vector caption
-    ):
-        """Logit (Q, P) của ground head, dùng feature của lần forward gần nhất."""
-        feats, msk, em = self._fpn
-        return self.ground_head(feats, msk, vid, query, self.embed_head.embed_captions(query), em)
-
     def losses(
         self,
-        video_list,  # list B dict, mỗi dict là một video
-        valid,       # (B, P) bool, True ở các điểm thuộc bước thật (không phải padding)
-        ev,          # (B, P) logit của event head
-        bd,          # (B, P, 2) khoảng cách dự đoán tới điểm đầu / cuối, tính theo stride
-        qu,          # (B, P) logit IoU-quality
-        em,          # (B, P, D) embedding đã chuẩn hóa của mọi bước
+        video_list,  # B dicts, one per video
+        valid,       # (B, P) bool, True at points of real steps (not padding)
+        ev,          # (B, P) event head logits
+        bd,          # (B, P, 2) predicted distances to the start / end, in strides
+        qu,          # (B, P) IoU-quality logits
+        em,          # (B, P, D) normalised embedding of every step
         omni_em,     # (B, P, D)
-        raw0,        # (B, D, T) feature tầng 0 của embedding head, chưa chuẩn hóa (để lấy trung bình đoạn)
-        len0,        # (B,) số bước thật ở tầng 0 của mỗi video
+        raw0,        # (B, D, T) level-0 features of the embedding head, not normalised (for the span means)
+        len0,        # (B,) real level-0 steps of every video
     ):
         dev = ev.device
         w = self.train_cfg
@@ -372,30 +366,32 @@ class EventCaptionTransformer(nn.Module):
 
         # IoU-quality
         iou_loss = F.binary_cross_entropy_with_logits(qu[pos], iouk)
-        
+
         # InfoNCE Loss
         pool_f = self.embed_head.embed_captions(self.pool_raw)          # (N, 512)
         scale = self.embed_head.logit_scale.exp().clamp(max=100)
         ri, ci = pos.nonzero(as_tuple=True)
-  
+
         gt = cap_pool[ri, gt_cls[ri, ci].argmax(-1)] # (N',)
         #                                   (N', 512)    (512, N)
         emb_loss = F.cross_entropy(scale * em[ri, ci] @ pool_f.t(), gt)
         #                                       cosin matrix
         # Omni
-        pool_o = self.omni_embed_head.embed_captions(self.omni_pool_raw)
-        scale_o = self.omni_embed_head.logit_scale.exp().clamp(max=100)
-        omni_emb_loss = F.cross_entropy(scale_o * omni_em[ri, ci] @ pool_o.t(), gt)
-        
-        
-        # 5. embedding cả đoạn: vector của mỗi đoạn GT phải chọn đúng caption của nó trong cả pool
+        # the OmniRetriever caption vectors are not projected: the steps are projected into their space
+        omni_emb_loss = torch.zeros((), device=dev)
+        if omni_em is not None:
+            pool_o = F.normalize(self.omni_pool_raw, dim=-1)                # (N, 3584)
+            omni_emb_loss = F.cross_entropy(scale * omni_em[ri, ci] @ pool_o.t(), gt)
+
+
+        # 5. span embedding: the vector of every GT segment must pick its own caption out of the whole pool
         qs, gs = [], []
         for i, x in enumerate(video_list):
             #                       (D, T)
             qs.append(self.seg_ctx(raw0[i], int(len0[i]), x['segments'].to(dev).float()))
             gs.append(cap_pool[i, x['labels'].to(dev)])
         span_loss = F.cross_entropy(scale * torch.cat(qs) @ pool_f.t(), torch.cat(gs))
-        
+
 
         total = (ev_loss + w['loss_weight_reg'] * rg_loss + w['loss_weight_iou'] * iou_loss
                  + w['loss_weight_emb'] * emb_loss + w['loss_weight_omni_emb'] * omni_emb_loss
@@ -407,44 +403,44 @@ class EventCaptionTransformer(nn.Module):
     @torch.no_grad()
     def inference(
         self,
-        video_list,  # list B dict, mỗi dict là một video
-        valid,       # (B, P) bool, True ở các điểm thuộc bước thật
-        ev,          # (B, P) logit của event head
-        bd,          # (B, P, 2) khoảng cách dự đoán tới điểm đầu / cuối, tính theo stride
-        qu,          # (B, P) logit IoU-quality
-        em,          # (B, P, D) embedding đã chuẩn hóa của mọi bước
-        raw0,        # (B, D, T) feature tầng 0 của embedding head (để tính vector đoạn)
-        len0,        # (B,) số bước thật ở tầng 0 của mỗi video
+        video_list,  # B dicts, one per video
+        valid,       # (B, P) bool, True at points of real steps
+        ev,          # (B, P) event head logits
+        bd,          # (B, P, 2) predicted distances to the start / end, in strides
+        qu,          # (B, P) IoU-quality logits
+        em,          # (B, P, D) normalised embedding of every step
+        raw0,        # (B, D, T) level-0 features of the embedding head (for the segment vectors)
+        len0,        # (B,) real level-0 steps of every video
     ):
-        """Điểm của một đoạn = điểm event nhân điểm IoU-quality. Trả về mỗi video một dict:
-        segments (K, 2) tính bằng giây, xếp từ tốt đến kém; embeds (K, D) vector của các đoạn;
-        gt_segments, gt_text là các bước GT (giây) và caption của chúng.
+        """Score of a segment = event score times IoU-quality score. Returns one dict per video:
+        segments (K, 2) in seconds, best first; embeds (K, D) the segment vectors;
+        gt_segments, gt_text the GT steps (seconds) and their captions.
         """
         t = self.test_cfg
         a = t['iou_power']
         prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float() # (B, P)
         out = []
         for b, v in enumerate(video_list):
-            pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, cận dưới, cận trên của khoảng hồi quy, stride
+            pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, regression range low, high, stride
             #          (P,)
             keep = (prob[b] > t['score_thresh']).nonzero(as_tuple=True)[0]
             if keep.numel() == 0:
                 keep = prob[b].topk(1).indices
             sc, order = prob[b][keep].topk(min(t['max_seg_num'] * 5, keep.numel()))
             keep = keep[order]
-            # đoạn của một điểm: từ t - (khoảng cách tới đầu) * stride tới t + (khoảng cách tới cuối) * stride
+            # segment of a point: from t - (distance to start) * stride to t + (distance to end) * stride
             p, o = pts[keep], bd[b][keep]
             segs = torch.stack((p[:, 0] - o[:, 0] * p[:, 3], p[:, 0] + o[:, 1] * p[:, 3]), -1).cpu()
             scores = sc.cpu()
             ok = (segs[:, 1] - segs[:, 0]) > t['duration_thresh']
             segs, scores = segs[ok], scores[ok]
-            # soft-NMS không phân lớp: mọi đoạn chung một nhãn giả
+            # class-agnostic soft-NMS: every segment shares one dummy label
             segs, scores, _ = batched_nms(segs, scores, torch.arange(len(segs)), 0.7, 0.001,
                                           t['max_seg_num'], use_soft_nms=True, sigma=t['nms_sigma'])
-            # vector của đoạn = trung bình trên cả đoạn, tính khi đoạn còn ở đơn vị bước
+            # vector of the segment = mean over the whole segment, computed while it is still in steps
             span = self.seg_ctx(raw0[b], int(len0[b]), segs.to(raw0.device)).cpu()
 
-            # đổi từ đơn vị bước sang giây (xem __getitem__ của dataset)
+            # steps to seconds (see __getitem__ of the dataset)
             st, nf, fps = v['feat_stride'], v['feat_num_frames'], v['fps']
             segs = ((segs * st + 0.5 * nf) / fps).clamp(min=0.0, max=float(v['duration']))
             out.append({'video_id': v['video_id'], 'segments': segs, 'scores': scores, 'embeds': span,

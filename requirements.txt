@@ -1,0 +1,9 @@
+# training (Python 3.13)
+torch==2.14.1
+numpy
+# data tools (tools/)
+huggingface_hub
+transformers    # tools/iv2_text.py
+timm            # tools/pipeline/extract_features.py (InternVideo2 model code)
+einops
+yt-dlp          # tools/pipeline/download_videos.py

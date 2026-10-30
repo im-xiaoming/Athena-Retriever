@@ -1,4 +1,3 @@
-from __future__ import annotations
 import torch
 from torch import nn
 
@@ -8,15 +7,15 @@ from .datasets import register_generator
 
 class BufferList(nn.Module):
     """
-    Giống nn.ParameterList nhưng dành cho buffer
+    Like nn.ParameterList, but for buffers
 
-    Lấy từ https://github.com/facebookresearch/detectron2/blob/master/detectron2/modeling/anchor_generator.py
+    Taken from https://github.com/facebookresearch/detectron2/blob/master/detectron2/modeling/anchor_generator.py
     """
 
     def __init__(self, buffers):
         super().__init__()
         for i, buffer in enumerate(buffers):
-            # buffer không lưu vào checkpoint
+            # the buffers are not saved in the checkpoint
             self.register_buffer(str(i), buffer, persistent=False)
 
     def __len__(self):
@@ -30,56 +29,56 @@ class PointGenerator(nn.Module):
     def __init__(
         self,
         regression_range: list[list[int]],
-        max_seq_len_ori: int = 256,    # độ dài chuỗi tối đa để tạo sẵn điểm
-        max_buffer_len_factor: float = 1.0,  # tạo sẵn cho max_seq_len_ori * hệ số này bước
-        fpn_levels: int = 6,         # số tầng pyramid
-        scale_factor: int = 2,       # hệ số giảm độ dài giữa hai tầng
-        max_div_factor: int = 32,     # stride lớn nhất, độ dài phải chia hết cho số này
-        use_offset=False    # có dời điểm vào giữa ô lưới không
+        max_seq_len_ori: int = 256,    # maximum sequence length the points are precomputed for
+        max_buffer_len_factor: float = 1.0,  # precompute max_seq_len_ori * this factor steps
+        fpn_levels: int = 6,         # number of pyramid levels
+        scale_factor: int = 2,       # length ratio between two levels
+        max_div_factor: int = 32,     # largest stride, lengths must be divisible by it
+        use_offset=False    # shift the points to the middle of their grid cell
     ):
         super().__init__()
-        # kiểm tra số tầng và độ dài chia hết
+        # check the number of levels and divisibility
         assert len(regression_range) == fpn_levels
-        max_seq_len = max_seq_len_ori * max_buffer_len_factor 
+        max_seq_len = max_seq_len_ori * max_buffer_len_factor
         assert max_seq_len % scale_factor**(fpn_levels - 1) == 0
 
-        # lưu tham số
-        self.max_seq_len_ori = max_seq_len_ori  
-        self.max_seq_len = max_seq_len 
+        # save the parameters
+        self.max_seq_len_ori = max_seq_len_ori
+        self.max_seq_len = max_seq_len
         self.fpn_levels = fpn_levels
         self.scale_factor = scale_factor
         self.regression_range = regression_range
         self.use_offset = use_offset
-        self.max_div_factor = max_div_factor  
+        self.max_div_factor = max_div_factor
 
-        # tạo sẵn toàn bộ điểm
+        # precompute all the points
         self.buffer_points = self._generate_points()
 
     def _generate_points(self):
         points_list = []
-        # duyệt từng tầng pyramid
+        # loop over the pyramid levels
         for l in range(self.fpn_levels):
             stride = self.scale_factor ** l
             reg_range = torch.as_tensor(self.regression_range[l], dtype=torch.float32) # (2,)
             fpn_stride = torch.as_tensor(stride, dtype=torch.float32)
             points = torch.arange(0, self.max_seq_len, stride)[:, None] # (N, 1)
-            # dời điểm nếu cần (mô hình hiện tại không dùng)
+            # shift the points if asked (the current model does not)
             if self.use_offset:
                 points += 0.5 * stride
-            # ghép thêm khoảng hồi quy và stride vào mỗi điểm
+            # append the regression range and the stride to every point
             #               (1, 2)          (N, 2)
             reg_range = reg_range[None].repeat(points.shape[0], 1) # (N, 2)
             #               (1, 1)          (N, 1)
             fpn_stride = fpn_stride[None].repeat(points.shape[0], 1) # (N, 1)
-            # kích thước: T x 4 (t, khoảng hồi quy, stride)
+            # size: T x 4 (t, regression range, stride)
             #                                       (N, 4)
             points_list.append(torch.cat((points, reg_range, fpn_stride), dim=1)) # (N, 4)
 
         return BufferList(points_list)
 
     def forward(self, fpn_strides, feats, is_training) -> list[torch.Tensor]:
-        """Trả về điểm của mọi tầng cho feats (C, T): list các tensor (T / stride, 4). Lúc train và với
-        video ngắn thì luôn dùng max_seq_len; video dài hơn lúc suy luận được làm tròn lên bội số của stride lớn nhất."""
+        """Points of every level for feats (C, T): a list of (T / stride, 4) tensors. Training and short videos
+        always use max_seq_len; longer videos at inference are rounded up to a multiple of the largest stride."""
         pts_list = []
         max_len = feats.shape[1] # T
         if is_training:
@@ -88,7 +87,7 @@ class PointGenerator(nn.Module):
             if max_len <= self.max_seq_len_ori:
                 max_len = self.max_seq_len_ori
             else:
-                # làm tròn lên bội số gần nhất của stride lớn nhất
+                # round up to the nearest multiple of the largest stride
                 stride = self.max_div_factor
                 max_len = (max_len + (stride - 1)) // stride * stride
 

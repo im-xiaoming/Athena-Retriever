@@ -10,31 +10,31 @@ from .blocks import (get_sinusoid_encoding, TransformerBlock,
 @register_multimodal_backbone("convTransformer")
 class ConvTransformerBackbone(nn.Module):
     """
-        kết hợp conv với transformer, mỗi modality một luồng riêng.
+        Conv + transformer, one stream per modality.
 
-        Feature video (V) và audio (A) mỗi bên đi qua: conv embedding -> arch[1] - 1 block self-attention
-        -> một block cross-modal ở độ phân giải gốc -> arch[2] block cross-modal, mỗi block giảm độ dài
-        đi một nửa. Kết quả là arch[2] + 1 tầng pyramid cho mỗi luồng, kèm mask.
+        Video (V) and audio (A) features each go through: conv embedding -> arch[1] - 1 self-attention blocks
+        -> one cross-modal block at the original resolution -> arch[2] cross-modal blocks, each halving
+        the length. The result is arch[2] + 1 pyramid levels per stream, with their masks.
 
-        Block cross-modal của luồng X với luồng còn lại Y (TransformerBlock(x1=X, x2=Y)):
-        out = X + Attention(query = Y, key = X, value = X), tức là X được đánh trọng số lại theo thời gian
-        dựa vào chỗ nào Y thấy liên quan.
+        Cross-modal block of stream X with the other stream Y (TransformerBlock(x1=X, x2=Y)):
+        out = X + Attention(query = Y, key = X, value = X), i.e. X is re-weighted over time
+        by where Y finds it relevant.
     """
     def __init__(
         self,
-        n_in_V,                # số kênh feature video đầu vào
-        n_in_A,                # số kênh feature audio đầu vào
-        n_embd,                # số kênh sau conv embedding
-        n_head,                # số head attention trong transformer
-        n_embd_ks,             # kernel size của conv embedding
-        max_len,               # độ dài chuỗi tối đa
-        arch = (2, 3, 5),      # (#conv, #transformer ở stem, #transformer ở nhánh pyramid)
-        scale_factor = 2,      # hệ số giảm độ dài giữa hai tầng
-        with_ln = False,       # có LayerNorm sau conv không
-        attn_pdrop = 0.0,      # dropout trên ma trận attention
-        proj_pdrop = 0.0,      # dropout ở phép chiếu / MLP
-        path_pdrop = 0.0,      # tỉ lệ drop path
-        use_abs_pe = False,    # dùng position embedding tuyệt đối
+        n_in_V,                # input video channels
+        n_in_A,                # input audio channels
+        n_embd,                # channels after the conv embedding
+        n_head,                # attention heads in the transformer
+        n_embd_ks,             # kernel size of the conv embedding
+        max_len,               # maximum sequence length
+        arch = (2, 3, 5),      # (#conv, #transformer in the stem, #transformer in the pyramid branch)
+        scale_factor = 2,      # length ratio between two levels
+        with_ln = False,       # LayerNorm after the convs
+        attn_pdrop = 0.0,      # dropout on the attention matrix
+        proj_pdrop = 0.0,      # dropout of the projection / MLP
+        path_pdrop = 0.0,      # drop path rate
+        use_abs_pe = False,    # absolute position embedding
     ):
         super().__init__()
         self.arch = arch
@@ -43,12 +43,12 @@ class ConvTransformerBackbone(nn.Module):
         self.scale_factor = scale_factor
         self.use_abs_pe = use_abs_pe
 
-        # position embedding (1, C, T), chia cho sqrt(n_embd)
+        # position embedding (1, C, T), divided by sqrt(n_embd)
         if self.use_abs_pe:
             pos_embd = get_sinusoid_encoding(self.max_len, n_embd) / (n_embd**0.5)
             self.register_buffer("pos_embd", pos_embd, persistent=False)
 
-        # mạng embedding bằng conv
+        # conv embedding network
         # 768 -> 512
         self.embd_V = nn.ModuleList()
         self.embd_A = nn.ModuleList()
@@ -82,7 +82,7 @@ class ConvTransformerBackbone(nn.Module):
                 self.embd_norm_V.append(nn.Identity())
                 self.embd_norm_A.append(nn.Identity())
 
-        # stem: transformer thường (self-attention)
+        # stem: plain transformer (self-attention)
         self.self_att_V = nn.ModuleList()
         self.self_att_A = nn.ModuleList()
 
@@ -103,7 +103,7 @@ class ConvTransformerBackbone(nn.Module):
                     path_pdrop=path_pdrop,
                 )
             )
-        # cross-attention ở độ phân giải thời gian gốc
+        # cross-attention at the original time resolution
         self.ori_cross_att_Va = TransformerBlock(
                     n_embd, n_head,
                     n_ds_strides=(1, 1),
@@ -119,7 +119,7 @@ class ConvTransformerBackbone(nn.Module):
                     path_pdrop=path_pdrop,
                 )
 
-        # cross-attention sau mỗi lần giảm độ dài
+        # cross-attention after every downsampling
         self.cross_att_Va = nn.ModuleList()
         self.cross_att_Av = nn.ModuleList()
         for idx in range(arch[2]):
@@ -140,21 +140,21 @@ class ConvTransformerBackbone(nn.Module):
                 )
             )
 
-        # khởi tạo trọng số
+        # weight init
         self.apply(self.__init_weights__)
 
     def __init_weights__(self, module):
-        # đặt bias của nn.Linear / nn.Conv1d về 0
+        # zero the bias of nn.Linear / nn.Conv1d
         if isinstance(module, (nn.Linear, nn.Conv1d)):
             if module.bias is not None:
                 torch.nn.init.constant_(module.bias, 0.)
 
     def forward(self, x_V, x_A, mask):
-        # x_V / x_A: (batch, số kênh, độ dài chuỗi)
-        # mask: (batch, 1, độ dài chuỗi), kiểu bool
+        # x_V / x_A: (batch, channels, sequence length)
+        # mask: (batch, 1, sequence length), bool
         B, _, T = x_V.size()
         mask_V = mask_A = mask
-        # mạng embedding
+        # embedding network
         for idx in range(len(self.embd_V)):
             x_V, mask_V = self.embd_V[idx](x_V, mask_V) 
             x_V = self.relu(self.embd_norm_V[idx](x_V))
@@ -162,21 +162,21 @@ class ConvTransformerBackbone(nn.Module):
             x_A, mask_A = self.embd_A[idx](x_A, mask_A)
             x_A = self.relu(self.embd_norm_A[idx](x_A))
 
-        # dùng position embedding độ dài cố định
+        # fixed-length position embedding
         if self.use_abs_pe and self.training:
             pe = self.pos_embd
-            # cộng pe vào x
+            # add pe to x
             x_V = x_V + pe[:, :, :T] * mask_V.to(x_V.dtype)
             x_A = x_A + pe[:, :, :T] * mask_A.to(x_A.dtype)
 
-        # lúc suy luận: nếu chuỗi dài hơn max_len thì nội suy lại position embedding
+        # inference: resample the position embedding if the sequence is longer than max_len
         if self.use_abs_pe and (not self.training):
             if T >= self.max_len:
                 pe = F.interpolate(
                     self.pos_embd, T, mode='linear', align_corners=False)
             else:
                 pe = self.pos_embd
-            # cộng pe vào x
+            # add pe to x
             x_V = x_V + pe[:, :, :T] * mask_V.to(x_V.dtype)
             x_A = x_A + pe[:, :, :T] * mask_A.to(x_A.dtype)
 
@@ -184,20 +184,20 @@ class ConvTransformerBackbone(nn.Module):
             x_V, mask_V = self.self_att_V[idx](x_V, x_V, mask_V)
             x_A, mask_A = self.self_att_A[idx](x_A, x_A, mask_A)
 
-        # tầng 0: x_Va = V được cập nhật theo query từ audio, x_Av = A được cập nhật theo query từ video
+        # level 0: x_Va = V updated by audio queries, x_Av = A updated by video queries
         x_Va, mask_V = self.ori_cross_att_Va(x_V, x_A, mask_V)
         x_Av, mask_A = self.ori_cross_att_Av(x_A, x_V, mask_A)
 
-        # chuẩn bị đầu ra
+        # prepare the outputs
         out_feats_V = tuple()
         out_feats_A = tuple()
         out_masks_V = tuple()
-        # độ phân giải gốc
+        # original resolution
         out_feats_V += (x_Va, )
         out_masks_V += (mask_V, )
         out_feats_A += (x_Av, )
 
-        # nhánh chính có giảm độ dài: tầng idx + 1 tạo từ tầng idx của cả hai luồng
+        # main branch with downsampling: level idx + 1 is built from level idx of both streams
         for idx in range(len(self.cross_att_Va)):
             x_V, mask_V = self.cross_att_Va[idx](out_feats_V[idx], out_feats_A[idx], mask_V)
             x_A, mask_A = self.cross_att_Av[idx](out_feats_A[idx], out_feats_V[idx], mask_A)

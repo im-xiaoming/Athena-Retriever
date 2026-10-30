@@ -1,0 +1,25 @@
+chunk,plan,n_videos,ok,failed,retry,failed_page_reload,video_shard,video_gb,in_manifest,feats_shard,feats_mb,status,fetched_by,claims
+1000,plan,100,90,10,0,0,videos/htstep_videos_1000.tar,1.79,True,feats/htstep_feats_1000.tar,141,extracted,pc,pc
+2001,plan_retry,34,31,0,3,0,videos/htstep_videos_2001.tar,0.65,True,,,downloaded,colab,colab
+3005,plan_full,100,90,10,0,0,videos/htstep_videos_3005.tar,2.36,True,,,downloaded,pc3,pc3
+3017,plan_full,100,0,100,0,0,,,,,,all_failed,colab,colab
+3021,plan_full,100,87,13,0,0,videos/htstep_videos_3021.tar,2.26,True,,,downloaded,pc2,pc2
+3032,plan_full,100,0,100,0,0,,,,,,all_failed,colab,colab
+3035,plan_full,100,30,70,0,0,videos/htstep_videos_3035.tar,0.75,True,,,downloaded,pc3,pc3
+3044,plan_full,100,0,100,0,89,,,,,,all_failed,colab,colab
+3052,plan_full,100,0,100,0,0,,,,,,all_failed,colab,colab
+3055,plan_full,100,80,20,0,0,videos/htstep_videos_3055.tar,2.05,True,,,downloaded,pc2,pc2
+3073,plan_full,100,0,100,0,78,,,,,,all_failed,colab,colab
+3091,plan_full,100,0,100,0,82,,,,,,all_failed,colab,colab
+3095,plan_full,100,88,12,0,0,videos/htstep_videos_3095.tar,2.12,True,,,downloaded,pc3,pc3
+3101,plan_full,100,0,100,0,85,,,,,,all_failed,colab,colab
+4002,plan_retry2,100,80,20,0,0,videos/htstep_videos_4002.tar,1.87,True,,,downloaded,r1,r1 r2
+4004,plan_retry2,100,89,11,0,0,videos/htstep_videos_4004.tar,2.22,True,,,downloaded,r2,r2
+4008,plan_retry2,100,85,15,0,0,videos/htstep_videos_4008.tar,2.2,True,,,downloaded,r1,r1
+4030,plan_retry2,100,92,8,0,0,videos/htstep_videos_4030.tar,2.58,False,,,downloaded,r2,r2
+4042,plan_retry2,100,87,13,0,0,videos/htstep_videos_4042.tar,2.31,False,,,downloaded,r2,r2
+4044,plan_retry2,100,85,15,0,0,videos/htstep_videos_4044.tar,2.09,False,,,downloaded,r2,r2
+4049,plan_retry2,100,,,,,,,,,,todo,,
+4057,plan_retry2,100,,,,,,,,,,todo,,
+4065,plan_retry2,100,,,,,,,,,,todo,,
+4073,plan_retry2,100,,,,,,,,,,todo,,

@@ -9,7 +9,7 @@ def register_dataset(name):
        return cls
    return decorator
 
-# bộ sinh vị trí (điểm, đoạn, ...)
+# location generators (points, segments, ...)
 generators = {}
 def register_generator(name):
     def decorator(cls):
@@ -22,14 +22,14 @@ def register_generator(name):
 #                     regression_range=cfg['model']['regression_range'], backbone_arch=cfg['model']['backbone_arch'])
 def make_dataset(name, is_training: bool, split: Literal['training', 'validation'], **kwargs):
    """
-       Tạo dataset từ tên đã đăng ký
+       Build a registered dataset by name
    """
    dataset = datasets[name](is_training, split, **kwargs)
    return dataset
 
 def make_data_loader(dataset, is_training, generator, batch_size, num_workers, sampler):
     """
-        Tạo DataLoader. Lúc train bỏ batch cuối nếu thiếu, và đặt lại seed cho từng worker
+        Build the DataLoader. Training drops the last incomplete batch and reseeds every worker
     """
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -40,7 +40,7 @@ def make_data_loader(dataset, is_training, generator, batch_size, num_workers, s
         worker_init_fn=(worker_init_reset_seed if is_training else None),
         drop_last=is_training,
         generator=generator,
-        persistent_workers=True
+        persistent_workers=num_workers > 0
     )
     return loader
 

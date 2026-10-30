@@ -1,65 +1,55 @@
-# NMS cho đoạn 1D, sửa từ:
-# https://github.com/open-mmlab/mmcv/blob/master/mmcv/ops/nms.py
+# 1D NMS for segments, in numpy (it replaces the C++ extension of ActionFormer, ported from
+# https://github.com/open-mmlab/mmcv/blob/master/mmcv/ops/csrc/pytorch/nms.cpp, with the same results)
+import numpy as np
 import torch
 
-import nms_1d_cpu
+
+def _overlap(seg, x1, x2, areas):
+    """IoU of one segment (x1, x2, area) with every segment of x1 / x2 / areas, float32 as the C++ code."""
+    inter = np.maximum(np.float32(0), np.minimum(seg[1], x2) - np.maximum(seg[0], x1))
+    return inter / (seg[2] + areas - inter)
 
 
-class NMSop(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx, segs, scores, cls_idxs,
-        iou_threshold, min_score, max_num
-    ):
-        # NMS thường không đổi điểm, nên lọc theo điểm trước được
-        is_filtering_by_score = (min_score > 0)
-        if is_filtering_by_score:
-            valid_mask = scores > min_score
-            segs, scores = segs[valid_mask], scores[valid_mask]
-            cls_idxs = cls_idxs[valid_mask]
-
-        # gọi nms (C++), trả về chỉ số đã xếp theo điểm giảm dần
-        inds = nms_1d_cpu.nms(
-            segs.contiguous().cpu(),
-            scores.contiguous().cpu(),
-            iou_threshold=float(iou_threshold))
-        # giữ tối đa max_num đoạn
-        if max_num > 0:
-            inds = inds[:min(max_num, len(inds))]
-        # trả về đoạn / điểm đã sắp xếp
-        sorted_segs = segs[inds]
-        sorted_scores = scores[inds]
-        sorted_cls_idxs = cls_idxs[inds]
-        return sorted_segs.clone(), sorted_scores.clone(), sorted_cls_idxs.clone()
+def nms(segs, scores, iou_threshold):
+    """Plain NMS: indices of the kept segments, best first."""
+    x1, x2 = segs[:, 0], segs[:, 1]
+    areas = x2 - x1 + np.float32(1e-6)
+    order = np.argsort(-scores, kind='stable')
+    keep = []
+    while order.size:
+        i = order[0]
+        keep.append(i)
+        ovr = _overlap((x1[i], x2[i], areas[i]), x1[order[1:]], x2[order[1:]], areas[order[1:]])
+        order = order[1:][ovr < iou_threshold]
+    return np.array(keep, dtype=np.int64)
 
 
-class SoftNMSop(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx, segs, scores, cls_idxs,
-        iou_threshold, sigma, min_score, method, max_num
-    ):
-        # cấp phát trước chỗ cho kết quả
-        dets = segs.new_empty((segs.size(0), 3), device='cpu')
-        # gọi soft-NMS (C++), dets chứa đoạn / điểm đã sắp xếp
-        inds = nms_1d_cpu.softnms(
-            segs.cpu(),
-            scores.cpu(),
-            dets.cpu(),
-            iou_threshold=float(iou_threshold),
-            sigma=float(sigma),
-            min_score=float(min_score),
-            method=int(method))
-        # giữ tối đa max_num đoạn
-        if max_num > 0:
-            n_segs = min(len(inds), max_num)
+def soft_nms(segs, scores, iou_threshold, sigma, min_score, method):
+    """Soft-NMS: repeatedly take the best remaining segment and lower the scores of the others by their
+    overlap with it (method 0: plain NMS, 1: linear, 2: Gaussian with sigma); a segment whose score falls
+    below min_score is dropped. Returns the indices of the kept segments in the order they were taken,
+    and their (lowered) scores."""
+    x1, x2 = segs[:, 0], segs[:, 1]
+    areas = x2 - x1 + np.float32(1e-6)
+    sc = scores.copy()
+    alive = np.arange(len(sc))
+    keep, keep_sc = [], []
+    while alive.size:
+        best = int(np.argmax(sc[alive]))
+        i = alive[best]
+        keep.append(i)
+        keep_sc.append(sc[i])
+        alive = np.delete(alive, best)
+        ovr = _overlap((x1[i], x2[i], areas[i]), x1[alive], x2[alive], areas[alive])
+        if method == 0:
+            weight = np.where(ovr >= iou_threshold, np.float32(0), np.float32(1))
+        elif method == 1:
+            weight = np.where(ovr >= iou_threshold, np.float32(1) - ovr, np.float32(1))
         else:
-            n_segs = len(inds)
-        sorted_segs = dets[:n_segs, :2]
-        sorted_scores = dets[:n_segs, 2]
-        sorted_cls_idxs = cls_idxs[inds]
-        sorted_cls_idxs = sorted_cls_idxs[:n_segs]
-        return sorted_segs.clone(), sorted_scores.clone(), sorted_cls_idxs.clone()
+            weight = np.exp(-(ovr * ovr) / np.float32(sigma))
+        sc[alive] *= weight.astype(np.float32)
+        alive = alive[sc[alive] >= min_score]
+    return np.array(keep, dtype=np.int64), np.array(keep_sc, dtype=np.float32)
 
 
 def batched_nms(
@@ -72,32 +62,26 @@ def batched_nms(
     use_soft_nms=True,
     sigma=0.5,
 ):
-    """NMS 1D không phân lớp trên segs (N, 2) với scores (N,). Trả về (segs, scores, cls_idxs) của các đoạn
-    được giữ, tốt nhất đứng trước, tối đa max_seg_num đoạn. use_soft_nms: soft-NMS kiểu Gaussian (điểm giảm
-    dần theo độ chồng lấn, sigma) thay vì bỏ hẳn đoạn chồng lấn quá iou_threshold. cls_idxs đi kèm từng đoạn."""
-    # dựa theo cách làm của Detectron2
-    num_segs = segs.shape[0]
-    # trường hợp không có dự đoán nào
-    if num_segs == 0:
+    """Class-agnostic 1D NMS of segs (N, 2) with scores (N,). Returns (segs, scores, cls_idxs) of the kept
+    segments, best first, at most max_seg_num of them. use_soft_nms: Gaussian soft-NMS (scores decay with the
+    overlap, sigma) instead of dropping segments that overlap more than iou_threshold. cls_idxs follow their segment."""
+    # no predictions
+    if segs.shape[0] == 0:
         return torch.zeros([0, 2]),\
                torch.zeros([0,]),\
                torch.zeros([0,], dtype=cls_idxs.dtype)
 
+    s = segs.detach().cpu().float().numpy()
+    p = scores.detach().cpu().float().numpy()
     if use_soft_nms:
-        new_segs, new_scores, new_cls_idxs = SoftNMSop.apply(
-            segs, scores, cls_idxs, iou_threshold,
-            sigma, min_score, 2, max_seg_num
-        )
+        inds, new_p = soft_nms(s, p, iou_threshold, sigma, min_score, 2)
     else:
-        new_segs, new_scores, new_cls_idxs = NMSop.apply(
-            segs, scores, cls_idxs, iou_threshold,
-            min_score, max_seg_num
-        )
+        # plain NMS does not change the scores, so it can filter by score first
+        cand = np.nonzero(p > min_score)[0] if min_score > 0 else np.arange(len(p))
+        inds = cand[nms(s[cand], p[cand], iou_threshold)]
+        new_p = p[inds]
 
-    # sắp xếp theo điểm rồi chỉ giữ tối đa max_seg_num đoạn
-    _, idxs = new_scores.sort(descending=True)
-    max_seg_num = min(max_seg_num, new_segs.shape[0])
-    new_segs = new_segs[idxs[:max_seg_num]]
-    new_scores = new_scores[idxs[:max_seg_num]]
-    new_cls_idxs = new_cls_idxs[idxs[:max_seg_num]]
-    return new_segs, new_scores, new_cls_idxs
+    # sort by score, keep at most max_seg_num segments
+    order = np.argsort(-new_p, kind='stable')[:max_seg_num]
+    inds = torch.from_numpy(inds[order])
+    return segs.cpu()[inds], torch.from_numpy(new_p[order]), cls_idxs.cpu()[inds]

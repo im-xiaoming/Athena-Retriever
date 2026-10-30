@@ -1,4 +1,3 @@
-from __future__ import annotations
 import copy
 import random
 import numpy as np
@@ -8,87 +7,87 @@ from torch.nn import functional as F
 
 def trivial_batch_collator(batch):
     """
-        Không gộp gì cả: một batch chỉ là list các dict
+        No collation: a batch is just a list of dicts
     """
     return batch
 
 def worker_init_reset_seed(worker_id):
     """
-        Đặt lại seed ngẫu nhiên cho từng worker của DataLoader
+        Reseed the random generators of every DataLoader worker
     """
     seed = torch.initial_seed() % (2 ** 31)
     np.random.seed(seed)
     random.seed(seed)
 
 def truncate_feats(
-    data_dict,           # dict của một video (xem bên dưới)
-    max_seq_len,         # độ dài tối đa (số bước)
-    trunc_thresh,        # một đoạn GT được giữ nếu ít nhất tỉ lệ này của nó nằm trong cửa sổ
-    offset,              # 0.5: bước i phủ khoảng [i - 0.5, i + 0.5]
-    crop_ratio,          # (0.9, 1.0): cửa sổ dài từ 90% đến 100% video
-    max_num_trials=200,  # số lần thử tối đa để tìm cửa sổ còn ít nhất một đoạn
+    data_dict,           # dict of one video (see below)
+    max_seq_len,         # maximum length (steps)
+    trunc_thresh,        # a GT segment is kept if at least this fraction of it lies in the window
+    offset,              # 0.5: step i covers [i - 0.5, i + 0.5]
+    crop_ratio,          # (0.9, 1.0): the window covers 90% to 100% of the video
+    max_num_trials=200,  # maximum attempts to find a window that keeps at least one segment
 ):
     """
-    Tăng cường dữ liệu lúc train: cắt ngẫu nhiên một cửa sổ của feature và cắt các đoạn GT theo cửa sổ đó.
+    Training augmentation: crop a random window of the features and cut the GT segments to it.
 
-    Cửa sổ dài từ crop_ratio[0] đến crop_ratio[1] độ dài video. Một đoạn được giữ nếu ít nhất trunc_thresh
-    của nó nằm trong cửa sổ. Thử tối đa max_num_trials lần cho tới khi còn ít nhất một đoạn.
+    The window is crop_ratio[0] to crop_ratio[1] of the video long. A segment is kept if at least trunc_thresh
+    of it lies in the window. Up to max_num_trials attempts until at least one segment is left.
 
     data_dict = {'video_id'        : str
                  'feats'           : {'visual': Tensor C x T, 'audio': Tensor C x T}
-                 'segments'        : Tensor N x 2 (đơn vị bước)
+                 'segments'        : Tensor N x 2 (in steps)
                  'labels'          : Tensor N
                  'fps'             : float
                  'feat_stride'     : float
                  'feat_num_frames' : float}
     """
-    # lấy thông tin; feats = {'visual': C x T, 'audio': C x T}
+    # get the meta info; feats = {'visual': C x T, 'audio': C x T}
     feat_len = data_dict['feats']['visual'].shape[1] # T=256
 
     num_segs = data_dict['segments'].shape[0] # n
 
-    # chọn ngẫu nhiên độ dài cửa sổ trong [l, r]
+    # random window length in [l, r]
     assert crop_ratio[0] <= crop_ratio[1], "crop_ratio[0] must be <= crop_ratio[1]"
     max_seq_len = random.randint(
         max(round(crop_ratio[0] * feat_len), 1),
         min(round(crop_ratio[1] * feat_len), feat_len),
     )
-    # cửa sổ dài bằng cả video thì không cần cắt
+    # a window as long as the video needs no crop
     if feat_len == max_seq_len:
         return data_dict
 
-    # còn lại thì copy dict ra để sửa
+    # otherwise copy the dict before editing it
     data_dict = copy.deepcopy(data_dict)
 
-    # thử vài lần cho tới khi cửa sổ còn ít nhất một đoạn
+    # try a few times until the window keeps at least one segment
     for _ in range(max_num_trials):
 
-        # chọn ngẫu nhiên vị trí cửa sổ
+        # random window position
         st = random.randint(0, feat_len - max_seq_len)
         ed = st + max_seq_len
         window = torch.as_tensor([st, ed], dtype=torch.float32) # (2,); st <= 26, 26 <= ed <= 256
 
-        # tính phần giao giữa cửa sổ và từng đoạn
+        # intersection of the window with every segment
         #              (1, 2)       (n, 1)
         window = window[None].repeat(num_segs, 1) # (n, 2)
-        left = torch.maximum(window[:, 0] - offset, data_dict['segments'][:, 0]) 
-        right = torch.minimum(window[:, 1] + offset, data_dict['segments'][:, 1])  
+        left = torch.maximum(window[:, 0] - offset, data_dict['segments'][:, 0])
+        right = torch.minimum(window[:, 1] + offset, data_dict['segments'][:, 1])
         inter = (right - left).clamp(min=0)
         area_segs = torch.abs(data_dict['segments'][:, 1] - data_dict['segments'][:, 0])
         inter_ratio = inter / area_segs
 
-        # chỉ giữ các đoạn có phần giao vượt ngưỡng
+        # keep the segments whose intersection passes the threshold
         seg_idx = (inter_ratio >= trunc_thresh)
 
-        # có ít nhất một đoạn thì dừng
+        # stop once at least one segment is left
         if seg_idx.sum().item() > 0:
             break
 
     data_dict['feats']['visual'] = data_dict['feats']['visual'][:, st:ed].clone()
     data_dict['feats']['audio'] = data_dict['feats']['audio'][:, st:ed].clone()
-    # segments: N x 2, đơn vị bước
+    # segments: N x 2, in steps
     data_dict['segments'] = torch.stack((left[seg_idx], right[seg_idx]), dim=1) # (n, 2)
-    # dời mốc thời gian theo điểm bắt đầu cửa sổ
+    # shift the time stamps to the window start
     data_dict['segments'] = data_dict['segments'] - st
     # labels: N
     data_dict['labels'] = data_dict['labels'][seg_idx].clone()
@@ -97,30 +96,30 @@ def truncate_feats(
 
 
 def label_points(
-    points: list[torch.Tensor],       # list các tầng, mỗi tầng (T_l, 4): (t, cận dưới, cận trên của khoảng hồi quy, stride)
-    gt_segments,  # (n, 2) các đoạn GT, đơn vị bước
-    gt_labels,    # (n,) chỉ số caption của từng đoạn trong video
-    num_classes: int = 16,  # số caption tối đa trong một video (16)
+    points: list[torch.Tensor],       # one entry per level, each (T_l, 4): (t, regression range low, high, stride)
+    gt_segments,  # (n, 2) GT segments, in steps
+    gt_labels,    # (n,) caption index of every segment within the video
+    num_classes: int = 16,  # at most this many captions per video (16)
 ):
-        """Nhãn train cho mọi điểm của pyramid (theo ActionFormer).
+        """Training targets of every pyramid point (as in ActionFormer).
 
-        Một điểm là dương cho một đoạn GT nếu nó nằm trong đoạn và khoảng cách xa nhất từ nó tới hai biên
-        nằm trong khoảng hồi quy của tầng. Nếu nhiều đoạn cùng thỏa thì lấy đoạn ngắn nhất.
-        Trả về, với P là tổng số điểm của mọi tầng:
-          cls_targets (P, num_classes)  one-hot chỉ số caption của đoạn chứa điểm, toàn 0 nếu là nền
-          reg_targets (P, 2)            khoảng cách tới đầu và cuối đoạn, chia cho stride
+        A point is positive for a GT segment if it lies inside the segment and its largest distance to the
+        two boundaries falls in the regression range of its level. If several segments qualify, the shortest wins.
+        Returns, with P the number of points over all levels:
+          cls_targets (P, num_classes)  one-hot caption index of the segment holding the point, all 0 for background
+          reg_targets (P, 2)            distances to the segment start and end, divided by the stride
         """
-        # nối điểm của mọi tầng: List[T x 4] -> (F T, 4)
+        # concat the points of all levels: List[T x 4] -> (F T, 4)
         concat_points = torch.cat(points, dim=0)
         num_pts = concat_points.shape[0] # F T
         num_gts = gt_segments.shape[0] # n
 
-        # độ dài của mọi đoạn -> F T x N
+        # length of every segment -> F T x N
         lens = gt_segments[:, 1] - gt_segments[:, 0] # (n,)
         #       (1, n)          (F T)
         lens = lens[None, :].repeat(num_pts, 1) # (F T, n)
 
-        # khoảng cách từ mỗi điểm tới hai biên của mỗi đoạn -> (F T, n, 2)
+        # distance of every point to the two boundaries of every segment -> (F T, n, 2)
         #           (1, n, 2)               F T         n
         gt_segs = gt_segments[None].expand(num_pts, num_gts, 2)
         #           (F T, 1)                (F T, n)
@@ -128,10 +127,10 @@ def label_points(
         right = gt_segs[:, :, 1] - concat_points[:, 0, None] # right - points
         reg_targets = torch.stack((left, right), dim=-1) # (F T, n, 2)
 
-        # điểm nằm trong đoạn GT
+        # point inside a GT segment
         inside_gt_seg_mask = reg_targets.min(-1)[0] > 0 # (F T, n)
 
-        # giới hạn khoảng hồi quy theo tầng của điểm
+        # limit the regression range by the level of the point
         max_regress_distance = reg_targets.max(-1)[0] # (F T, n)
         # F T x N
         inside_regress_range = torch.logical_and(
@@ -143,10 +142,10 @@ def label_points(
         lens.masked_fill_(inside_gt_seg_mask==0, float('inf'))
         lens.masked_fill_(inside_regress_range==0, float('inf'))
 
-        # nếu một điểm vẫn thuộc nhiều đoạn thì chọn đoạn ngắn nhất (dễ hồi quy nhất)
+        # a point still in several segments takes the shortest one (easiest to regress)
         # F T x n -> (F T,)
         min_len, min_len_inds = lens.min(dim=1)
-        # trường hợp nhiều đoạn có độ dài gần như bằng nhau
+        # several segments of almost the same length
         min_len_mask = torch.logical_and(
         #   (F T, n)       (F T, 1)
             (lens <= (min_len[:, None] + 1e-3)), # (F T, n)
@@ -156,12 +155,12 @@ def label_points(
         # cls_targets: F T x C; reg_targets F T x 2
         gt_label_one_hot = F.one_hot(gt_labels, num_classes).to(reg_targets.dtype) # (n, 16); sub-identity matrix
         cls_targets = min_len_mask @ gt_label_one_hot # (F T, 16)
-        # tránh trường hợp nhiều đoạn GT trùng nhãn và trùng biên
+        # several GT segments with the same label and the same boundaries
         cls_targets.clamp_(min=0.0, max=1.0)
 
-        # lấy khoảng cách tới đoạn được chọn
+        # distances to the chosen segment
         reg_targets = reg_targets[range(num_pts), min_len_inds] # (F T, 2)
-        # chia cho stride của tầng
+        # divided by the stride of the level
         #                   (F T, 1)
         reg_targets /= concat_points[:, 3, None]
         return cls_targets, reg_targets

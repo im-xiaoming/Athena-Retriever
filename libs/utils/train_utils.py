@@ -6,42 +6,41 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
-from pycocoevalcap.cider.cider import Cider
 
+from .cider import cider
 from .lr_schedulers import LinearWarmupCosineAnnealingLR
 
 
 def fix_random_seed(seed, include_cuda=True):
-    """Cố định seed cho python, numpy, torch; nếu include_cuda thì cho cuDNN / cuBLAS chạy tất định.
-    Trả về torch generator để DataLoader dùng."""
+    """Seed python, numpy and torch; with include_cuda also make cuDNN / cuBLAS deterministic.
+    Returns the torch generator for the DataLoader."""
     rng_generator = torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     if include_cuda:
-        # tắt cudnn benchmark để chạy lại ra cùng kết quả
+        # no cudnn benchmark, so a rerun gives the same results
         cudnn.enabled = True
         cudnn.benchmark = False
         cudnn.deterministic = True
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        # cần cho CUDA >= 10.2
+        # needed for CUDA >= 10.2
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         torch.use_deterministic_algorithms(True, warn_only=True)
     return rng_generator
 
 
 def save_checkpoint(state, file_folder, file_name):
-    """lưu checkpoint ra file"""
-    if not os.path.exists(file_folder):
-        os.makedirs(file_folder)
+    """write a checkpoint to a file"""
+    os.makedirs(file_folder, exist_ok=True)
     torch.save(state, os.path.join(file_folder, file_name))
 
 
 def make_optimizer(model, optimizer_config):
-    """AdamW với ba nhóm tham số (giống ActionFormer, thêm một nhóm cho phép chiếu caption):
-      decay    : weight của các lớp Linear / Conv, có weight decay
-      no_decay : bias, LayerNorm, các hệ số scale và tham số khác, không weight decay
-      clip     : clip_proj (chiếu vector caption sang không gian event), learning rate riêng clip_proj_lr
+    """AdamW with three parameter groups (as ActionFormer, plus one for the caption projection):
+      decay    : weights of the Linear / Conv layers, with weight decay
+      no_decay : biases, LayerNorm, scales and other parameters, no weight decay
+      clip     : clip_proj (caption vectors into the event space), its own learning rate clip_proj_lr
     """
     decay, no_decay, clip = [], [], []
     for mod_name, mod in model.named_modules():
@@ -61,19 +60,19 @@ def make_optimizer(model, optimizer_config):
 
 
 def make_scheduler(optimizer, optimizer_config, num_iters_per_epoch):
-    """Warm-up tuyến tính trong warmup_epochs, sau đó giảm theo cosine; cập nhật sau mỗi iteration."""
+    """Linear warm-up over warmup_epochs, then a cosine decay; steps after every iteration."""
     warmup_steps = optimizer_config['warmup_epochs'] * num_iters_per_epoch
     max_steps = (optimizer_config['epochs'] + optimizer_config['warmup_epochs']) * num_iters_per_epoch
     return LinearWarmupCosineAnnealingLR(optimizer, warmup_steps, max_steps)
 
 
 class ModelEma(torch.nn.Module):
-    """Trung bình trượt (EMA) của trọng số, giống ActionFormer: đánh giá và lưu checkpoint đều dùng
-    trọng số trung bình này."""
+    """Exponential moving average (EMA) of the weights, as ActionFormer: evaluation and checkpoints
+    both use these averaged weights."""
 
     def __init__(self, model, decay=0.999):
         super().__init__()
-        # copy model ra một bản để cộng dồn trung bình trượt
+        # a copy of the model accumulates the moving average
         self.module = copy.deepcopy(model)
         self.module.eval()
         self.decay = decay
@@ -81,8 +80,9 @@ class ModelEma(torch.nn.Module):
 
     @torch.no_grad()
     def update(self, model):
-        # decay tăng dần lúc đầu: nếu để cố định 0.999 thì sau epoch đầu trọng số vẫn gần như là lúc khởi tạo,
-        # đánh giá mấy epoch đầu sẽ ra điểm của một model chưa học gì
+        # the decay ramps up: with a fixed 0.999 the weights are still almost the initial ones after the
+        # first epoch, and the first evaluations would score a model that has learnt nothing
+        model = getattr(model, 'module', model)   # the model inside DistributedDataParallel
         self.updates += 1
         d = min(self.decay, (1 + self.updates) / (10 + self.updates))
         for ema_v, model_v in zip(self.module.state_dict().values(), model.state_dict().values()):
@@ -93,15 +93,15 @@ class ModelEma(torch.nn.Module):
 
 
 def train_one_epoch(
-    train_loader,      # DataLoader, mỗi batch là list các dict (xem YouCook2Dataset.__getitem__)
-    model,
+    train_loader,      # DataLoader, every batch is a list of dicts (see HTStepDataset.__getitem__)
+    model,             # the model, or the DistributedDataParallel around it
     optimizer,
     scheduler,
-    model_ema,         # ModelEma, cập nhật sau mỗi bước
-    clip_grad_l2norm,  # norm L2 tối đa của gradient
+    model_ema,         # ModelEma, updated after every step
+    clip_grad_l2norm,  # maximum L2 norm of the gradients
     device,
 ):
-    """Train một epoch, trả về trung bình của từng loss."""
+    """Train one epoch, returns the mean of every loss (over this process's batches)."""
     model.train()
     losses = {}
     for video_list in train_loader:
@@ -112,7 +112,7 @@ def train_one_epoch(
         losses_dict['final_loss'].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_l2norm)
         optimizer.step()
-        scheduler.step()   # learning rate cập nhật sau mỗi iteration, không phải mỗi epoch
+        scheduler.step()   # the learning rate steps after every iteration, not every epoch
         model_ema.update(model)
         for k, v in losses_dict.items():
             losses[k] = losses.get(k, 0.0) + v.item() / len(train_loader)
@@ -120,24 +120,24 @@ def train_one_epoch(
 
 
 def iou(a, b):
-    """IoU của hai đoạn (đầu, cuối)."""
+    """IoU of two segments (start, end)."""
     i = max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
     u = (a[1] - a[0]) + (b[1] - b[0]) - i
     return i / u if u > 0 else 0.0
 
 
 def mbr_pick(
-    s,       # (N,) điểm của từng caption trong pool cho một đoạn
-    pool_n,  # (N, 512) vector caption của pool đã chuẩn hóa L2
-    scale,   # nhiệt độ của softmax (logit scale của model)
-    k=20,    # số caption điểm cao nhất được đem ra "bầu"
+    s,       # (N,) score of every pool caption for one segment
+    pool_n,  # (N, 512) L2-normalised caption vectors of the pool
+    scale,   # softmax temperature (the model's logit scale)
+    k=20,    # number of top-scoring captions that "vote"
 ):
-    """Chọn caption theo số đông thay vì lấy caption điểm cao nhất.
+    """Pick a caption by consensus instead of taking the top-scoring one.
 
-    Lấy k caption điểm cao nhất, đổi điểm thành xác suất, rồi chọn caption giống cả nhóm nhất
-    (minimum Bayes risk). Caption được nhiều ứng viên mạnh ủng hộ sẽ thắng caption chỉ tình cờ đứng đầu.
+    Take the k best captions, turn their scores into probabilities and pick the caption most similar to the
+    whole group (minimum Bayes risk). A caption backed by many strong candidates beats one that is on top by chance.
     """
-    top = s.topk(k)
+    top = s.topk(min(k, len(s)))
     p = F.softmax(scale * top.values, dim=0)
     cand = pool_n[top.indices]
     agree = (cand @ cand.t()) @ p
@@ -146,16 +146,16 @@ def mbr_pick(
 
 @torch.no_grad()
 def valid_one_epoch(
-    val_loader,  # DataLoader của tập validation
-    model,       # model EMA
-    pool_text,   # [N] text của pool caption train, đúng thứ tự trong pool
+    val_loader,  # DataLoader of the validation split
+    model,       # the EMA model
+    pool_text,   # [N] text of the training caption pool, in pool order
     device,
 ):
-    """Chấm điểm tách bước và gán caption trên tập validation.
+    """Score step detection and captioning on the validation split.
 
-    R@0.5 : tỉ lệ bước GT khớp với một trong top-k dự đoán (k = số bước GT của video) với IoU >= 0.5
-    CIDEr : độ đo caption thông dụng, dựa trên từ trùng nhau; chỉ chấm trên các bước GT
-            có dự đoán khớp với IoU >= 0.3
+    R@0.5 : share of GT steps matched by one of the top-k predictions (k = GT steps of the video) with IoU >= 0.5
+    CIDEr : the usual word-overlap caption metric; only scored on the GT steps
+            that a prediction matches with IoU >= 0.3
     """
     model.eval()
     pool_f = model.embed_head.embed_captions(model.pool_raw)
@@ -169,18 +169,18 @@ def valid_one_epoch(
             x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
         for r, x in zip(model(video_list), video_list):
             gts = r['gt_segments']
-            # giữ số dự đoán (điểm cao trước) bằng số bước GT của video
+            # keep as many predictions (best first) as the video has GT steps
             k = min(len(gts), len(r['segments']))
             preds = r['segments'][:k].tolist()
-            for i, gt in enumerate(gts):
+            for gi, gt in enumerate(gts):
                 vals = [iou(p, gt) for p in preds] or [0.0]
-                j = int(np.argmax(vals))   # dự đoán khớp với bước GT này nhất
+                j = int(np.argmax(vals))   # the prediction matching this GT step best
                 best_ious.append(vals[j])
-                if vals[j] < 0.3:          # chỉ chấm caption ở các bước đã khớp
+                if vals[j] < 0.3:          # captions are only scored on matched steps
                     continue
                 i = mbr_pick(pool_f @ r['embeds'][j].to(device), pool_n, scale)
-                gts_txt[len(gts_txt)] = [x['cap_text'][i]]
+                gts_txt[len(gts_txt)] = [x['cap_text'][gi]]
                 hyp[len(hyp)] = [pool_text[i]]
 
-    return {'R@0.5': 100 * np.mean(np.array(best_ious) >= 0.5),
-            'CIDEr': Cider().compute_score(gts_txt, hyp)[0] * 100}
+    return {'R@0.5': float(100 * np.mean(np.array(best_ious) >= 0.5)),
+            'CIDEr': cider(gts_txt, hyp) * 100 if hyp else 0.0}
