@@ -98,8 +98,8 @@ def truncate_feats(
 def label_points(
     points: list[torch.Tensor],       # one entry per level, each (T_l, 4): (t, regression range low, high, stride)
     gt_segments,  # (n, 2) GT segments, in steps
-    gt_labels,    # (n,) caption index of every segment within the video
-    num_classes: int = 16,  # at most this many captions per video (16)
+    gt_labels,    # (n,) index of every segment within the video
+    num_classes: int = 48,  # at most this many GT segments per video (48)
 ):
         """Training targets of every pyramid point (as in ActionFormer).
 

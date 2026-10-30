@@ -1,9 +1,12 @@
 # HT-Step step detection and captioning (minimal)
 
-Finds the steps of an instructional video and picks a caption for each step. The model is the
-[UniAV](https://arxiv.org/abs/2404.03179) backbone (one ConvTransformer stream for video, one for audio, with
-cross-attention, 6-level pyramid) with class-agnostic heads: an event score, the step boundaries and an embedding that
-picks the caption out of the pool of training captions.
+Finds the steps of an instructional video and classifies each one among the 4958 steps of the HT-Step taxonomy; the
+caption of a segment is the headline of its step. The model is the [UniAV](https://arxiv.org/abs/2404.03179) backbone
+(one ConvTransformer stream for video, one for audio, with cross-attention, 6-level pyramid) with an event score, the
+step boundaries and the language-aware classifier of UniAV: the segment vector is compared with the text vectors of
+the steps. As in [OV-AVEL](https://arxiv.org/abs/2411.11278) a class is only its text, so any list of steps can be
+scored at inference (by default the steps of the video's article, as the HT-Step article grounding task), and with
+`model.audio_text` the audio stream gets its own step classifier that has to agree with the video one.
 
 Python 3.13 and PyTorch 2.14, the versions of Google Colab. One or several GPUs (DistributedDataParallel).
 
@@ -22,28 +25,30 @@ libs/
     blocks.py                UniAV blocks: MaskedConv1D, LayerNorm, attention, Transformer block
     multimodal_backbones.py  UniAV backbone: video and audio streams, cross-attention, 6-level pyramid
     losses.py                focal loss, DIoU loss
-    event_archs.py           the heads (event, boundary, embedding, optional omni), losses, inference
+    event_archs.py           the heads (event, boundary, step classifier, optional omni / audio), losses, inference
     models.py                registry of backbones and models (as UniAV)
   utils/                     training helpers
-    train_utils.py           seed, optimizer, EMA, one training epoch, validation (R@0.5, CIDEr)
+    train_utils.py           seed, optimizer, EMA, one training epoch, validation (R@0.5, CIDEr, Acc, mAP)
     nms.py                   1D soft-NMS (numpy)
     cider.py                 CIDEr metric (same numbers as pycocoevalcap)
     lr_schedulers.py         linear warm-up then cosine decay
     run_record.py            run record: experiments/runs/<host>-<time>.json
 tools/                       data preparation, not needed for training once data/ is filled
-  htstep_data.py             build: annotations + caption vectors; fetch: download them and the features from HF
-  iv2_text.py                InternVideo2 text encoder (caption -> 512-d vector), used by htstep_data.py build
+  htstep_data.py             build: step text vectors; fetch: official files, step vectors and features
+  iv2_text.py                InternVideo2 text encoder (text -> 512-d vector), used by htstep_data.py build
   pipeline/                  video download + feature extraction for HT-Step, see "Feature pipeline" below
-data/htstep/                 (not in git) annotations.json, caption_emb_iv2j.npz, k400_feats/<video_id>.npz
+data/htstep/                 (not in git) official repo clone (data/annotations.json, data/taxonomy.csv, evaluation/),
+                             step_emb_iv2j.npz, k400_feats/<video_id>.npz
 ckpt/                        (not in git) checkpoints; ckpt/internvideo2/ holds the extractor weights
 experiments/runs/            (created by train.py) one JSON record per training run
 ```
 
 ## Setup
 
-    uv venv -p 3.13 ~/uniav-py313
-    VIRTUAL_ENV=~/uniav-py313 uv pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu130 \
+    uv venv -p 3.13 .venv
+    VIRTUAL_ENV=.venv uv pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu130 \
         --extra-index-url https://pypi.org/simple
+    source .venv/bin/activate
 
 On Colab the default runtime already has Python 3.13 and PyTorch; only `pip install huggingface_hub` is needed.
 
@@ -51,10 +56,13 @@ On Colab the default runtime already has Python 3.13 and PyTorch; only `pip inst
 
     python tools/htstep_data.py fetch
 
-downloads `annotations.json` and `caption_emb_iv2j.npz` (InternVideo2 text vectors of the captions) from
+clones the official [HT-Step repo](https://github.com/facebookresearch/htstep) into `data/htstep` (annotations of
+the train / val_seen splits, taxonomy, evaluation script), downloads `step_emb_iv2j.npz` (InternVideo2 text vectors
+of `"<activity>: <headline>"` for every step, made by `python tools/htstep_data.py build`) from
 `nguyenminh04/htstep-feats`, and the k400_f16 features of the annotated videos from `nguyenminh04/htstep-feats-k400`
-into `data/htstep/k400_feats/`. One file per video: `k768` (InternVideo2-1B K400 f16, 4 fps, ~4 s window) and `a768`
-(BEATs audio, zeros if the video has no audio), one row per second. Needs `HF_TOKEN` in the environment or `.env`.
+(train) and `nguyenminh04/htstep-val-seen-feats` (val_seen) into `data/htstep/k400_feats/`. One file per video:
+`k768` (InternVideo2-1B K400 f16, 4 fps, ~4 s window) and `a768` (BEATs audio, zeros if the video has no audio), one
+row per second. Videos without features are skipped. Needs `HF_TOKEN` in the environment or `.env`.
 
 ## Train
 
@@ -62,13 +70,15 @@ into `data/htstep/k400_feats/`. One file per video: `k768` (InternVideo2-1B K400
     torchrun --nproc_per_node=4 train.py          # 4 GPUs: one process each, batch_size videos per GPU
     python train.py --eval ckpt/htstep/model_best.pth.tar   # score a checkpoint
 
-Every epoch prints the loss, R@0.5 (GT steps matched by one of the top-k predictions with IoU >= 0.5) and CIDEr of
-the captions of the matched steps, both on the validation split. The checkpoint with the best R@0.5 goes to
+Every epoch prints, on val_seen: the loss, R@0.5 (GT steps matched by one of the top-k predictions with IoU >= 0.5),
+CIDEr of the captions (headlines) of the matched steps, Acc (matched steps given the right step) and mAP (official
+article grounding mAP, tIoU 0.3-0.7, same numbers as `data/htstep/evaluation/eval_article_grounding.py` on the
+videos that have features). The checkpoint with the best R@0.5 goes to
 `ckpt/htstep/model_best.pth.tar`. Training stops when neither R@0.5 nor CIDEr has improved for `--patience` epochs
 (default 3). Other parameters are edited in `libs/core/config.py`.
 
-The omni head (an extra embedding loss against OmniRetriever caption vectors, 3584-d) is off while
-`dataset.omni_emb_file` is `''`; set it to an npz with the keys `<video_id>#<caption index>` to turn it on.
+The omni head (an extra embedding loss against OmniRetriever step vectors, 3584-d) is off while
+`dataset.omni_emb_file` is `''`; set it to an npz laid out as `step_emb_iv2j.npz` (`ids`, `emb`) to turn it on.
 
 ## Feature pipeline (`tools/pipeline/`)
 

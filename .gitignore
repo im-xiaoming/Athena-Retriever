@@ -4,6 +4,7 @@
 cookies/
 
 # generated
+.venv/
 __pycache__/
 *.pyc
 *.log

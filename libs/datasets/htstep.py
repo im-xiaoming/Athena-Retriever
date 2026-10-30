@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 
 import numpy as np
@@ -12,22 +13,34 @@ from .data_utils import truncate_feats, label_points
 from typing import Literal
 
 
+def load_step_vectors(
+    path,      # npz with 'ids' (global_step_index) and 'emb' (N, D), tools/htstep_data.py build
+    step_row,  # {global_step_index: pool row}
+):
+    """(4958, D) vectors in pool order."""
+    z = np.load(path)
+    emb = np.zeros((len(step_row), z['emb'].shape[1]), dtype=np.float32)
+    emb[[step_row[int(i)] for i in z['ids']]] = z['emb']
+    return emb
+
+
 @register_dataset("htstep")
 class HTStepDataset(Dataset):
     def __init__(
         self,
-        is_training,      # True: training split (random crops and the caption pool)
-        split: Literal['training', 'validation'],            # list of subsets to keep, e.g. ['training']
+        is_training,      # True: training split (random crops)
+        split: Literal['train', 'val_seen'],            # list of subsets to keep, e.g. ['train']
         feat_folder,      # feature folder, one <id>.npz per video
         video_key,        # key of the video rows in the npz (k768)
-        json_file,        # annotation json
-        caption_emb_file, # caption vectors and text
-        omni_emb_file,    # OmniRetriever caption vectors; '' = none
+        json_file,        # official HT-Step annotations: {id: {subset, duration, activity, annotations: [{segment, id}]}}
+        taxonomy_file,    # taxonomy.csv: one row per step (global_step_index, activity, variation, headline)
+        step_emb_file,    # text vectors of every step, "<activity>: <headline>"
+        omni_emb_file,    # OmniRetriever vectors of every step, same layout; '' = none
         default_fps,      # nominal fps (16), converts seconds <-> steps
         max_seq_len,      # steps per video (256)
         trunc_thresh,     # a cropped segment is kept only if at least this fraction is left (0.5)
         crop_ratio,       # (0.9, 1.0): a random crop keeps 90-100% of the video
-        num_classes: int,      # at most this many captions per video (16)
+        num_classes: int,      # at most this many GT segments per video (48)
         scale_factor,     # length ratio between two pyramid levels
         regression_range, # regression range of every pyramid level
         backbone_arch,    # (#conv, #stem, #pyramid branch), gives the number of levels
@@ -42,21 +55,27 @@ class HTStepDataset(Dataset):
         self.crop_ratio = crop_ratio
         self.num_classes = num_classes
 
-        # caption vectors and text, keys "<video_id>#<segment index>"
-        # ['keys', 'emb', 'sentences', 'other', 'mean']
-        # emb = (11594, 512)
-        z = np.load(caption_emb_file, allow_pickle=True)
-        self.cap_emb = {k: v for k, v in zip(z['keys'], z['emb'])}
-        self.cap_text = {k: str(s) for k, s in zip(z['keys'], z['sentences'])}
-        self.omni_emb = None
-        if omni_emb_file:
-            t = np.load(omni_emb_file, allow_pickle=True)
-            self.omni_emb = {k.replace('__text', ''): np.array(v) for k, v in t.items()}
+        # The classes are the 4958 steps of the taxonomy, each defined by its text (open vocabulary, as OV-AVEL).
+        # Steps never seen in training are still in the pool. The step ids (global_step_index) run from 0 to 5784
+        # with gaps, so the model works with pool rows and pool_ids maps a row back to its step id.
+        
+        # This line converts each row in CSV file into dictionary.
+        with open(taxonomy_file, newline='') as f:
+            rows = sorted(csv.DictReader(f), key=lambda r: int(r['global_step_index']))
+            
+        self.pool_ids = [int(r['global_step_index']) for r in rows]
+        self.step_row = {s: i for i, s in enumerate(self.pool_ids)}
+        self.pool_text = [r['headline'].strip() for r in rows]
+        self.pool_emb = load_step_vectors(step_emb_file, self.step_row)   # (4958, 512)
+        self.pool_omni_emb = load_step_vectors(omni_emb_file, self.step_row) if omni_emb_file else None
+        # article = activity + variation (one recipe); its steps are the candidates of a video at inference
+        self.article_steps, self.step_article = {}, {}
+        for i, r in enumerate(rows):
+            self.article_steps.setdefault((r['activity'], r['variation']), []).append(i)
+            self.step_article[i] = (r['activity'], r['variation'])
 
         # read the annotations, keep the videos of the split
         self.data_list = self._load_json_db(json_file)
-        if is_training:
-            self._build_pool()
 
         # point generator of the pyramid
         self.fpn_strides = [scale_factor**i for i in range(backbone_arch[-1]+1)] # [1, 2, 4, 8, 16, 32]
@@ -72,52 +91,31 @@ class HTStepDataset(Dataset):
             }
         )
 
-    def _load_json_db(self, json_file) -> tuple[dict[Literal["id", 'fps', 'duration', 'labels', 'n_cap']]]:
+    def _load_json_db(self, json_file) -> tuple[dict[Literal["id", 'fps', 'duration', 'segments', 'labels', 'steps', 'activity', 'cand']]]:
         with open(json_file, 'r') as f:
-            json_db = json.load(f)['database']
+            json_db = json.load(f)
         dict_db = tuple()
         for key, value in json_db.items():
-            if value['subset'].lower() not in self.split: # split = ['traning' or 'validation']
+            if value['subset'].lower() not in self.split: # split = ['train'] or ['val_seen']
                 continue
-            anns = value['annotations'][:self.num_classes]
+            anns = [a for a in value['annotations'] if a['segment'][1] > a['segment'][0]][:self.num_classes]
             if len(anns) == 0:
                 continue
-            # keys: --bv0V6ZjWI#0', '--bv0V6ZjWI#1', '--bv0V6ZjWI#2,...
-            if any('%s#%d' % (key, i) not in self.cap_emb for i in range(len(anns))):
-                continue
-            if self.omni_emb is not None:
-                if any('%s#%d' % (key, i) not in self.omni_emb for i in range(len(anns))):
-                    continue
             if not os.path.exists(os.path.join(self.feat_folder, key + '.npz')):
                 continue   # not extracted (yet)
             segments = np.array([a['segment'] for a in anns], dtype=np.float32) # (N, 2)
+            steps = np.array([self.step_row[a['id']] for a in anns], dtype=np.int64)
             dict_db += ({'id': key,
                          'fps': self.default_fps,
                          'duration': value['duration'], # None
                          'segments': segments, # (n, 2)
-                         'labels': np.arange(len(anns), dtype=np.int64),   # caption index; (n,)
-                         'n_cap': len(anns), # n
+                         'labels': np.arange(len(anns), dtype=np.int64),   # segment index; (n,)
+                         'steps': steps,   # step (pool row) of every segment; (n,)
+                         'activity': value['activity'],
+                         # every step of the video's article (all its segments share one article)
+                         'cand': np.array(self.article_steps[self.step_article[int(steps[0])]], dtype=np.int64),
             }, )
         return dict_db
-
-    def _build_pool(self):
-        self.pool_text, self.pool_index, emb, omi_emb_ = [], {}, [], []
-        self.cap_pool_idx = {}
-        for item in self.data_list: # tuple dict_db
-            for i in range(item['n_cap']):
-                k = '%s#%d' % (item['id'], i)
-                t = self.cap_text[k]
-                if t not in self.pool_index:   # first time this sentence is seen: new pool entry
-                    self.pool_index[t] = len(self.pool_text)
-                    self.pool_text.append(t)
-                    emb.append(self.cap_emb[k])
-                    if self.omni_emb is not None:
-                        omi_emb_.append(self.omni_emb[k])
-                self.cap_pool_idx[k] = self.pool_index[t]
-        self.pool_emb = np.stack(emb).astype(np.float32) # (N, 512)
-        self.pool_omni_emb = None
-        if self.omni_emb is not None:
-            self.pool_omni_emb = np.stack(omi_emb_).astype(np.float32) # (N, 3584)
 
     def __len__(self):
         return len(self.data_list)
@@ -178,24 +176,14 @@ class HTStepDataset(Dataset):
             points, data_dict['segments'], data_dict['labels'], self.num_classes)
         data_dict['points'] = points
 
-        # caption matrix of the video, padded to NMAX (16)
-        emb = np.zeros((self.num_classes, 512), dtype=np.float32)
-        pidx = np.full((self.num_classes,), -1, dtype=np.int64)
-        texts = []
-        for i in range(video_item['n_cap']): # n
-            k = '%s#%d' % (vid_id, i)
-            emb[i] = self.cap_emb[k]
-            texts.append(self.cap_text[k])
-            if self.is_training:
-                pidx[i] = self.cap_pool_idx[k]
-        data_dict['cap_emb'] = torch.from_numpy(emb) # (n, 512)
-        if self.omni_emb is not None:
-            emb_ = np.zeros((self.num_classes, 3584), dtype=np.float32)
-            for i in range(video_item['n_cap']):
-                emb_[i] = self.omni_emb['%s#%d' % (vid_id, i)]
-            data_dict['omni_emb'] = torch.from_numpy(emb_) # (n, 3584)
-        data_dict['cap_pool_idx'] = torch.from_numpy(pidx) # (n,)
-        data_dict['cap_text'] = texts
+        # step of every GT segment (pool row), padded to num_classes with -1
+        sidx = np.full((self.num_classes,), -1, dtype=np.int64)
+        sidx[:len(video_item['steps'])] = video_item['steps']
+        data_dict['step_idx'] = torch.from_numpy(sidx) # (48,)
+        data_dict['cand'] = torch.from_numpy(video_item['cand'])   # steps of the video's article, ~8
+        data_dict['activity'] = video_item['activity']
+        data_dict['gt_steps'] = video_item['steps'].tolist()
+        data_dict['cap_text'] = [self.pool_text[s] for s in video_item['steps']]   # GT headlines
         # original boundaries in seconds, only used for scoring
         data_dict['segments_sec'] = video_item['segments'].tolist()
         return data_dict

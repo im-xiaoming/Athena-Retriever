@@ -214,7 +214,13 @@ class BoundaryHead(nn.Module):
 
 @register_multimodal_meta_arch("EventCaptionTransformer")
 class EventCaptionTransformer(nn.Module):
-    """Finds the steps of a video and picks a caption for each. No classification layer."""
+    """Finds the steps of a video and classifies each one among the steps of the taxonomy.
+
+    The classifier is the language-aware one of UniAV: logits = scale * segment vector @ text vectors of the
+    steps, so a class is only its text and any list of steps can be scored at inference (open vocabulary,
+    as OV-AVEL). The caption of a segment is the headline of its step. With audio_text, the audio stream
+    gets its own step classifier and the two must agree (the training-free baseline of OV-AVEL, made soft).
+    """
 
     def __init__(
         self,
@@ -228,7 +234,8 @@ class EventCaptionTransformer(nn.Module):
         embd_with_ln,        # LayerNorm after the embedding convs
         head_dim,            # channels in every head, also the size D of the step / segment vectors
         omni_head_dim,       # size of the OmniRetriever caption vectors (3584), 0 = no omni head
-        regression_range,    # each level handles the segments whose largest distance to a boundary falls in this range
+        audio_text,          # True: audio stream -> step text classifier too (OV-AVEL agreement)
+        regression_range,   # each level handles the segments whose largest distance to a boundary falls in this range
         head_num_layers,     # conv layers of every head
         head_kernel_size,    # kernel size of the heads
         head_with_ln,        # LayerNorm in the heads
@@ -236,8 +243,8 @@ class EventCaptionTransformer(nn.Module):
         train_cfg,           # loss weights, dropout, droppath, cls_prior_prob
         test_cfg,            # inference settings: thresholds, maximum segments, NMS
         max_seq_len,         # steps of every video (256)
-        nmax=16,             # at most this many captions per video
-        clip_dim=512,        # size of the caption vectors,
+        nmax=48,             # at most this many GT segments per video
+        clip_dim=512,        # size of the step text vectors,
     ):
         super().__init__()
         self.fpn_strides = [scale_factor ** i for i in range(backbone_arch[-1] + 1)] # [1, 2, 4, 8, 16, 32]
@@ -263,11 +270,14 @@ class EventCaptionTransformer(nn.Module):
         self.embed_head = EmbedHead(D, head_dim, head_num_layers, head_kernel_size,
                                     head_with_ln, clip_dim, omni_head_dim)
         self.seg_ctx = SegmentContext(head_dim)
+        # audio stream only (embd_dim channels), its own projection of the step texts
+        self.audio_head = EmbedHead(embd_dim, head_dim, head_num_layers, head_kernel_size,
+                                    head_with_ln, clip_dim, 0) if audio_text else None
 
-    def set_caption_pool(
+    def set_step_pool(
         self,
-        pool_raw,  # (N, clip_dim) InternVideo2 vectors of the distinct training captions
-        omni_pool_raw=None,  # (N, omni_head_dim) their OmniRetriever vectors, None = no omni head
+        pool_raw,  # (4958, clip_dim) InternVideo2 text vectors of the steps, row i = step i
+        omni_pool_raw=None,  # (4958, omni_head_dim) their OmniRetriever vectors, None = no omni head
     ):
         self.pool_raw = pool_raw # pool_emb
         self.omni_pool_raw = omni_pool_raw
@@ -327,13 +337,19 @@ class EventCaptionTransformer(nn.Module):
         em = torch.cat(em, dim=1)                                        # (B, P, D)
         omni_em = torch.cat(omni_em, dim=1) if omni_em else None         # (B, P, 3584)
 
+        # Audio Embedding Head (audio stream only)
+        au = None
+        if self.audio_head is not None:
+            aem, _, araw0 = self.audio_head(fA, msk)
+            au = (torch.cat(aem, dim=1), araw0)                         # (B, P, D), (B, D, T0)
+
         #       (B, 1, T)
         len0 = msk[0].squeeze(1).sum(-1)                                 # (B,)
         #                         (B, T)
         fpn_masks = torch.cat([m.squeeze(1) for m in msk], dim=1)        # (B, P)
         if self.training:
-            return self.losses(video_list, fpn_masks, ev, bd, qu, em, omni_em, raw0, len0)
-        return self.inference(video_list, fpn_masks, ev, bd, qu, em, raw0, len0)
+            return self.losses(video_list, fpn_masks, ev, bd, qu, em, omni_em, raw0, len0, au)
+        return self.inference(video_list, fpn_masks, ev, bd, qu, raw0, len0, au)
 
     def losses(
         self,
@@ -346,12 +362,13 @@ class EventCaptionTransformer(nn.Module):
         omni_em,     # (B, P, D)
         raw0,        # (B, D, T) level-0 features of the embedding head, not normalised (for the span means)
         len0,        # (B,) real level-0 steps of every video
+        au,          # audio_text: (audio embedding of every point (B, P, D), its level-0 features (B, D, T)); else None
     ):
         dev = ev.device
         w = self.train_cfg
-        gt_cls = torch.stack([x['gt_cls_labels'].to(dev) for x in video_list])   # (B, P, 16)
+        gt_cls = torch.stack([x['gt_cls_labels'].to(dev) for x in video_list])   # (B, P, 48)
         gt_off = torch.stack([x['gt_offsets'].to(dev) for x in video_list])      # (B, P, 2)
-        cap_pool = torch.stack([x['cap_pool_idx'] for x in video_list]).to(dev)  # (B, 16)
+        cap_pool = torch.stack([x['step_idx'] for x in video_list]).to(dev)      # (B, 48) step of every GT segment
 
         is_event = gt_cls.sum(-1) > 0                                    # (B, P)
         pos = is_event & valid # (B, P)
@@ -392,13 +409,24 @@ class EventCaptionTransformer(nn.Module):
             gs.append(cap_pool[i, x['labels'].to(dev)])
         span_loss = F.cross_entropy(scale * torch.cat(qs) @ pool_f.t(), torch.cat(gs))
 
+        # 6. audio_text (OV-AVEL): the audio stream alone must pick the same step, per point and per GT segment
+        audio_loss = torch.zeros((), device=dev)
+        if au is not None:
+            aem, araw0 = au
+            pool_a = self.audio_head.embed_captions(self.pool_raw)
+            scale_a = self.audio_head.logit_scale.exp().clamp(max=100)
+            qa = [F.normalize(span_mean(araw0[i], int(len0[i]), x['segments'].to(dev).float()), dim=-1)
+                  for i, x in enumerate(video_list)]
+            audio_loss = (F.cross_entropy(scale_a * aem[ri, ci] @ pool_a.t(), gt)
+                          + F.cross_entropy(scale_a * torch.cat(qa) @ pool_a.t(), torch.cat(gs)))
 
         total = (ev_loss + w['loss_weight_reg'] * rg_loss + w['loss_weight_iou'] * iou_loss
                  + w['loss_weight_emb'] * emb_loss + w['loss_weight_omni_emb'] * omni_emb_loss
-                 + w['loss_weight_span'] * span_loss)
+                 + w['loss_weight_span'] * span_loss + w['loss_weight_audio'] * audio_loss)
 
         return {'ev_loss': ev_loss, 'reg_loss': rg_loss, 'iou_loss': iou_loss, 'emb_loss': emb_loss,
-                'omni_emb_loss': omni_emb_loss, 'span_loss': span_loss, 'final_loss': total}
+                'omni_emb_loss': omni_emb_loss, 'span_loss': span_loss, 'audio_loss': audio_loss,
+                'final_loss': total}
 
     @torch.no_grad()
     def inference(
@@ -408,17 +436,22 @@ class EventCaptionTransformer(nn.Module):
         ev,          # (B, P) event head logits
         bd,          # (B, P, 2) predicted distances to the start / end, in strides
         qu,          # (B, P) IoU-quality logits
-        em,          # (B, P, D) normalised embedding of every step
         raw0,        # (B, D, T) level-0 features of the embedding head (for the segment vectors)
         len0,        # (B,) real level-0 steps of every video
+        au,          # audio_text: (audio point embeddings, audio level-0 features); else None
     ):
         """Score of a segment = event score times IoU-quality score. Returns one dict per video:
-        segments (K, 2) in seconds, best first; embeds (K, D) the segment vectors;
-        gt_segments, gt_text the GT steps (seconds) and their captions.
+        segments (K, 2) in seconds, best first; labels (K,) the step of every segment, label_probs (K,) its
+        probability; gt_segments, gt_text the GT steps (seconds) and their captions.
         """
         t = self.test_cfg
         a = t['iou_power']
         prob = ev.sigmoid().pow(1 - a) * qu.sigmoid().pow(a) * valid.float() # (B, P)
+        pool_f = self.embed_head.embed_captions(self.pool_raw)              # (4958, D)
+        scale = self.embed_head.logit_scale.exp().clamp(max=100)
+        if au is not None:
+            pool_a = self.audio_head.embed_captions(self.pool_raw)
+            scale_a = self.audio_head.logit_scale.exp().clamp(max=100)
         out = []
         for b, v in enumerate(video_list):
             pts = torch.cat(v['points'], dim=0).to(ev.device)   # (P, 4): t, regression range low, high, stride
@@ -438,11 +471,27 @@ class EventCaptionTransformer(nn.Module):
             segs, scores, _ = batched_nms(segs, scores, torch.arange(len(segs)), 0.7, 0.001,
                                           t['max_seg_num'], use_soft_nms=True, sigma=t['nms_sigma'])
             # vector of the segment = mean over the whole segment, computed while it is still in steps
-            span = self.seg_ctx(raw0[b], int(len0[b]), segs.to(raw0.device)).cpu()
+            span = self.seg_ctx(raw0[b], int(len0[b]), segs.to(raw0.device))
+
+            # step of every segment, among the steps of the article (or all of them)
+            cand = v['cand'].to(ev.device) if t['article'] else torch.arange(len(pool_f), device=ev.device)
+            logp = F.log_softmax(scale * span @ pool_f[cand].t(), dim=-1)    # (K, C)
+            if au is not None:
+                aspan = F.normalize(span_mean(au[1][b], int(len0[b]), segs.to(raw0.device)), dim=-1)
+                logp_a = F.log_softmax(scale_a * aspan @ pool_a[cand].t(), dim=-1)
+                # OV-AVEL keeps a segment only if video and audio pick the same class; here, softly:
+                # score *= P(same step) ** av_power, and the step is the one both find likely
+                agree = (logp + logp_a).exp().sum(-1)
+                scores = scores * agree.cpu().pow(t['av_power'])
+                logp = F.log_softmax(logp + logp_a, dim=-1)
+                scores, order = scores.sort(descending=True)
+                segs, logp = segs[order], logp[order.to(logp.device)]
+            lp, j = logp.max(-1)
 
             # steps to seconds (see __getitem__ of the dataset)
             st, nf, fps = v['feat_stride'], v['feat_num_frames'], v['fps']
             segs = ((segs * st + 0.5 * nf) / fps).clamp(min=0.0, max=float(v['duration']))
-            out.append({'video_id': v['video_id'], 'segments': segs, 'scores': scores, 'embeds': span,
+            out.append({'video_id': v['video_id'], 'segments': segs, 'scores': scores,
+                        'labels': cand[j].cpu(), 'label_probs': lp.exp().cpu(),
                         'gt_segments': v['segments_sec'], 'gt_text': v['cap_text']})
         return out

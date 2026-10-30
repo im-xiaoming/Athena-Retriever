@@ -5,7 +5,6 @@ import random
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-import torch.nn.functional as F
 
 from .cider import cider
 from .lr_schedulers import LinearWarmupCosineAnnealingLR
@@ -126,44 +125,74 @@ def iou(a, b):
     return i / u if u > 0 else 0.0
 
 
-def mbr_pick(
-    s,       # (N,) score of every pool caption for one segment
-    pool_n,  # (N, 512) L2-normalised caption vectors of the pool
-    scale,   # softmax temperature (the model's logit scale)
-    k=20,    # number of top-scoring captions that "vote"
+def voc_ap(
+    tp,    # (N,) 1 = true positive, predictions sorted by score (best first)
+    n_gt,  # number of GT segments
 ):
-    """Pick a caption by consensus instead of taking the top-scoring one.
+    """Interpolated average precision (VOC 2011), as the HT-Step evaluation."""
+    tp_c = np.cumsum(tp)
+    mprec = np.hstack([[0], tp_c / np.arange(1, len(tp) + 1), [0]])
+    mrec = np.hstack([[0], tp_c / n_gt, [1]])
+    mprec = np.maximum.accumulate(mprec[::-1])[::-1]
+    idx = np.where(mrec[1:] != mrec[:-1])[0] + 1
+    return float(np.sum((mrec[idx] - mrec[idx - 1]) * mprec[idx]))
 
-    Take the k best captions, turn their scores into probabilities and pick the caption most similar to the
-    whole group (minimum Bayes risk). A caption backed by many strong candidates beats one that is on top by chance.
-    """
-    top = s.topk(min(k, len(s)))
-    p = F.softmax(scale * top.values, dim=0)
-    cand = pool_n[top.indices]
-    agree = (cand @ cand.t()) @ p
-    return int(top.indices[agree.argmax()])
+
+def article_grounding_map(
+    preds,  # per video: (video_id, activity, segments (K, 2) in s, scores (K,), steps (K,), steps of its article)
+    gts,    # per video: (video_id, activity, GT segments [[s, e], ...], their steps)
+    tious=np.linspace(0.3, 0.7, 5),
+):
+    """mAP of HT-Step article grounding, as data/htstep/evaluation/eval_article_grounding.py (on the videos given):
+    predictions whose step is not in the video's article, or is no GT step of any video, are dropped; one AP per
+    activity, where a prediction matches any GT segment of its video (the step itself is not compared);
+    mean over activities and tIoUs."""
+    gt_steps = {s for g in gts for s in g[3]}
+    aps = []
+    for act in sorted({g[1] for g in gts}):
+        gt = {v: np.asarray(s, dtype=float).reshape(-1, 2) for v, a, s, _ in gts if a == act}
+        rows = [(v, seg, sc) for v, a, segs, scs, labs, cand in preds if a == act
+                for seg, sc, lab in zip(segs.tolist(), scs.tolist(), labs.tolist())
+                if lab in cand and lab in gt_steps]
+        rows = [rows[i] for i in np.argsort([r[2] for r in rows])[::-1]]
+        ap = []
+        for thr in tious:
+            used = {v: np.zeros(len(g), dtype=bool) for v, g in gt.items()}
+            tp = np.zeros(len(rows))
+            for i, (v, (s, e), _) in enumerate(rows):
+                g = gt[v]
+                inter = (np.minimum(e, g[:, 1]) - np.maximum(s, g[:, 0])).clip(0)
+                tiou = inter / ((e - s) + (g[:, 1] - g[:, 0]) - inter)
+                for j in tiou.argsort()[::-1]:   # the free GT segment with the highest tIoU
+                    if tiou[j] < thr:
+                        break
+                    if not used[v][j]:
+                        used[v][j], tp[i] = True, 1
+                        break
+            ap.append(voc_ap(tp, sum(len(g) for g in gt.values())))
+        aps.append(ap)
+    return 100 * float(np.mean(aps)) if aps else 0.0
 
 
 @torch.no_grad()
 def valid_one_epoch(
     val_loader,  # DataLoader of the validation split
     model,       # the EMA model
-    pool_text,   # [N] text of the training caption pool, in pool order
+    pool_text,   # [4958] headline of every step, in pool order
     device,
 ):
-    """Score step detection and captioning on the validation split.
+    """Score step detection, step classification and captioning on the validation split.
 
     R@0.5 : share of GT steps matched by one of the top-k predictions (k = GT steps of the video) with IoU >= 0.5
-    CIDEr : the usual word-overlap caption metric; only scored on the GT steps
+    CIDEr : the usual word-overlap caption metric (headline of the predicted step); only scored on the GT steps
             that a prediction matches with IoU >= 0.3
+    Acc   : share of those matched GT steps whose predicted step is the GT one
+    mAP   : official HT-Step article grounding mAP (tIoU 0.3-0.7), on the validation videos that have features
     """
     model.eval()
-    pool_f = model.embed_head.embed_captions(model.pool_raw)
-    pool_n = F.normalize(model.pool_raw, dim=-1)
-    scale = float(model.embed_head.logit_scale.exp().clamp(max=100))
-
-    best_ious = []
+    best_ious, correct = [], []
     gts_txt, hyp = {}, {}
+    preds, gt_all = [], []
     for video_list in val_loader:
         for x in video_list:
             x['feats'] = {k: v.to(device) for k, v in x['feats'].items()}
@@ -171,16 +200,22 @@ def valid_one_epoch(
             gts = r['gt_segments']
             # keep as many predictions (best first) as the video has GT steps
             k = min(len(gts), len(r['segments']))
-            preds = r['segments'][:k].tolist()
+            top = r['segments'][:k].tolist()
             for gi, gt in enumerate(gts):
-                vals = [iou(p, gt) for p in preds] or [0.0]
+                vals = [iou(p, gt) for p in top] or [0.0]
                 j = int(np.argmax(vals))   # the prediction matching this GT step best
                 best_ious.append(vals[j])
                 if vals[j] < 0.3:          # captions are only scored on matched steps
                     continue
-                i = mbr_pick(pool_f @ r['embeds'][j].to(device), pool_n, scale)
+                step = int(r['labels'][j])
                 gts_txt[len(gts_txt)] = [x['cap_text'][gi]]
-                hyp[len(hyp)] = [pool_text[i]]
+                hyp[len(hyp)] = [pool_text[step]]
+                correct.append(step == x['gt_steps'][gi])
+            preds.append((x['video_id'], x['activity'], r['segments'], r['scores'], r['labels'],
+                          set(x['cand'].tolist())))
+            gt_all.append((x['video_id'], x['activity'], gts, x['gt_steps']))
 
     return {'R@0.5': float(100 * np.mean(np.array(best_ious) >= 0.5)),
-            'CIDEr': cider(gts_txt, hyp) * 100 if hyp else 0.0}
+            'CIDEr': cider(gts_txt, hyp) * 100 if hyp else 0.0,
+            'Acc': float(100 * np.mean(correct)) if correct else 0.0,
+            'mAP': article_grounding_map(preds, gt_all)}

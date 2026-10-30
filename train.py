@@ -49,8 +49,8 @@ def main(args):
     # ======================================= LOADER =======================================================
     data_cfg = dict(cfg['dataset'], scale_factor=cfg['model']['scale_factor'],
                     regression_range=cfg['model']['regression_range'], backbone_arch=cfg['model']['backbone_arch'])
-    train_dataset = make_dataset('htstep', True, ['training'], **data_cfg)
-    val_dataset = make_dataset('htstep', False, ['validation'], **data_cfg)
+    train_dataset = make_dataset('htstep', True, ['train'], **data_cfg)
+    val_dataset = make_dataset('htstep', False, ['val_seen'], **data_cfg)
     # every process trains on its own share of the training videos, reshuffled every epoch
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True,
                                        seed=cfg['init_rand_seed'], drop_last=True)
@@ -68,9 +68,9 @@ def main(args):
     # ======================================= MODEL CALLED HERE =======================================================
     model = make_multimodal_meta_arch('EventCaptionTransformer', **cfg['model'])
     model.to(device)
-    # the caption pool only comes from the TRAIN split, validation captions are never used
+    # the classes: text vectors of every step of the taxonomy (no annotation needed)
     omni = train_dataset.pool_omni_emb
-    model.set_caption_pool(
+    model.set_step_pool(
         torch.from_numpy(train_dataset.pool_emb).to(device), # (N, 512)
         torch.from_numpy(omni).to(device) if omni is not None else None # (N, 3584)
     )
@@ -80,7 +80,8 @@ def main(args):
         if is_main:
             model.load_state_dict(torch.load(args.eval, map_location=device)['state_dict'])
             m = valid_one_epoch(val_loader, model, train_dataset.pool_text, device)
-            print(f"{args.eval}: R@0.5 {m['R@0.5']:.2f}  CIDEr {m['CIDEr']:.2f}", flush=True)
+            print(f"{args.eval}: R@0.5 {m['R@0.5']:.2f}  CIDEr {m['CIDEr']:.2f}  Acc {m['Acc']:.2f}"
+                  f"  mAP {m['mAP']:.2f}", flush=True)
         if world_size > 1:
             dist.destroy_process_group()
         return
@@ -92,7 +93,7 @@ def main(args):
     optimizer = make_optimizer(model, cfg['opt'])
     scheduler = make_scheduler(optimizer, cfg['opt'], len(train_loader))
     model_ema = ModelEma(model, cfg['train_cfg']['ema_decay'])
-    model_ema.module.set_caption_pool(model.pool_raw, model.omni_pool_raw )
+    model_ema.module.set_step_pool(model.pool_raw, model.omni_pool_raw )
     record = RunRecord(cfg, world_size) if is_main else None
 
     """4. train / evaluate loop"""
@@ -116,7 +117,8 @@ def main(args):
                 save_checkpoint({'epoch': epoch + 1, 'state_dict': model_ema.module.state_dict(), 'metrics': m},
                                 ckpt_folder, 'model_best.pth.tar')
             print(f"epoch {epoch + 1:2d}/{max_epochs}  {time.time() - start:4.0f}s  loss {losses['final_loss']:.3f}"
-                  f" | R@0.5 {m['R@0.5']:.2f}  CIDEr {m['CIDEr']:.2f}{mark}", flush=True)
+                  f" | R@0.5 {m['R@0.5']:.2f}  CIDEr {m['CIDEr']:.2f}  Acc {m['Acc']:.2f}  mAP {m['mAP']:.2f}{mark}",
+                  flush=True)
             record.add_epoch(epoch + 1, time.time() - start, losses, m,
                              {k: {'value': v, 'epoch': e + 1} for k, (v, e) in best.items()})
             # early stop: neither the best R@0.5 nor the best CIDEr has improved for `patience` epochs

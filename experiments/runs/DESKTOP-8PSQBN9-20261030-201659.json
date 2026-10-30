@@ -1,0 +1,166 @@
+{
+ "host": "DESKTOP-8PSQBN9",
+ "gpu": "cpu",
+ "gpus": 1,
+ "started": "20261030-201659",
+ "finished": "20261030-201720",
+ "git": {
+  "commit": "cd5ebda",
+  "branch": "htstep-ov",
+  "dirty": true
+ },
+ "argv": [
+  "smoke_ov.py",
+  "smoke_b",
+  "audio"
+ ],
+ "config": {
+  "output_folder": "smoke_b/ckpt",
+  "init_rand_seed": 1234567891,
+  "num_workers": 0,
+  "batch_size": 2,
+  "dataset": {
+   "json_file": "./data/htstep/data/annotations.json",
+   "taxonomy_file": "./data/htstep/data/taxonomy.csv",
+   "step_emb_file": "smoke_b/step.npz",
+   "omni_emb_file": "",
+   "feat_folder": "smoke_b/feats",
+   "video_key": "k768",
+   "default_fps": 16,
+   "max_seq_len": 256,
+   "trunc_thresh": 0.5,
+   "crop_ratio": [
+    0.9,
+    1.0
+   ],
+   "num_classes": 48
+  },
+  "model": {
+   "backbone_arch": [
+    2,
+    3,
+    5
+   ],
+   "scale_factor": 2,
+   "input_dim_V": 768,
+   "input_dim_A": 768,
+   "n_head": 4,
+   "embd_kernel_size": 3,
+   "embd_dim": 512,
+   "embd_with_ln": true,
+   "head_dim": 512,
+   "omni_head_dim": 0,
+   "audio_text": true,
+   "regression_range": [
+    [
+     0,
+     4
+    ],
+    [
+     4,
+     8
+    ],
+    [
+     8,
+     16
+    ],
+    [
+     16,
+     32
+    ],
+    [
+     32,
+     64
+    ],
+    [
+     64,
+     10000
+    ]
+   ],
+   "head_num_layers": 3,
+   "head_kernel_size": 3,
+   "head_with_ln": true,
+   "use_abs_pe": true,
+   "max_seq_len": 256,
+   "nmax": 48,
+   "clip_dim": 512,
+   "train_cfg": {
+    "loss_weight_reg": 1.0,
+    "loss_weight_iou": 1.0,
+    "loss_weight_emb": 0.2,
+    "loss_weight_omni_emb": 0.2,
+    "loss_weight_span": 0.2,
+    "loss_weight_audio": 0.2,
+    "cls_prior_prob": 0.01,
+    "dropout": 0.0,
+    "droppath": 0.1
+   },
+   "test_cfg": {
+    "score_thresh": 0.05,
+    "duration_thresh": 0.05,
+    "max_seg_num": 100,
+    "iou_power": 0.3,
+    "nms_sigma": 0.5,
+    "article": true,
+    "av_power": 0.5
+   }
+  },
+  "train_cfg": {
+   "clip_grad_l2norm": 1.0,
+   "ema_decay": 0.999
+  },
+  "opt": {
+   "learning_rate": 0.0001,
+   "clip_proj_lr": 0.001,
+   "weight_decay": 0.0001,
+   "epochs": 1,
+   "warmup_epochs": 1
+  }
+ },
+ "history": [
+  {
+   "epoch": 1,
+   "seconds": 10.4,
+   "R@0.5": 3.225806451612903,
+   "CIDEr": 334.1534152847052,
+   "Acc": 33.33333333333333,
+   "mAP": 11.498083341019099,
+   "ev_loss": 0.8210688879092535,
+   "reg_loss": 0.5520974497000376,
+   "iou_loss": 0.697846511999766,
+   "emb_loss": 8.845821221669516,
+   "omni_emb_loss": 0.0,
+   "span_loss": 8.824484189351399,
+   "audio_loss": 17.635718981424965,
+   "final_loss": 9.13221804300944
+  },
+  {
+   "epoch": 2,
+   "seconds": 11.3,
+   "R@0.5": 3.225806451612903,
+   "CIDEr": 39.87789311873524,
+   "Acc": 0.0,
+   "mAP": 6.9352768705097185,
+   "ev_loss": 0.48811358710130054,
+   "reg_loss": 0.40970756610234577,
+   "iou_loss": 0.7098303536574047,
+   "emb_loss": 6.8821578820546465,
+   "omni_emb_loss": 0.0,
+   "span_loss": 6.810731569925943,
+   "audio_loss": 13.628846009572348,
+   "final_loss": 7.071998755137126
+  }
+ ],
+ "best": {
+  "R@0.5": {
+   "value": 3.225806451612903,
+   "epoch": 1
+  },
+  "CIDEr": {
+   "value": 334.1534152847052,
+   "epoch": 1
+  }
+ },
+ "stopped_early": false,
+ "ckpt": "smoke_b/ckpt/model_best.pth.tar"
+}
