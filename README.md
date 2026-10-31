@@ -59,7 +59,7 @@ On Colab the default runtime already has Python 3.13 and PyTorch; only `pip inst
 clones the official [HT-Step repo](https://github.com/facebookresearch/htstep) into `data/htstep` (annotations of
 the train / val_seen splits, taxonomy, evaluation script), downloads `step_emb_iv2j.npz` (InternVideo2 text vectors
 of `"<activity>: <headline>"` for every step, made by `python tools/htstep_data.py build`) from
-`nguyenminh04/htstep-feats`, and the k400_f16 features of the annotated videos from `nguyenminh04/htstep-feats-k400`
+`nguyenminh04/htstep-text-feats`, and the k400_f16 features of the annotated videos from `nguyenminh04/htstep-feats-k400`
 (train) and `nguyenminh04/htstep-val-seen-feats` (val_seen) into `data/htstep/k400_feats/`. One file per video:
 `k768` (InternVideo2-1B K400 f16, 4 fps, ~4 s window) and `a768` (BEATs audio, zeros if the video has no audio), one
 row per second. Videos without features are skipped. Needs `HF_TOKEN` in the environment or `.env`.

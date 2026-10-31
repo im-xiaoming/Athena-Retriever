@@ -1,8 +1,3 @@
-# in_dim=1024
-# feat_dim=512
-# clip_dim=512
-
-
 import numpy as np
 import torch
 from torch import nn

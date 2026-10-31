@@ -24,7 +24,7 @@ import tarfile
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO = 'nguyenminh04/htstep-feats'          # step vectors
+REPO = 'nguyenminh04/htstep-text-feats'     # step vectors
 FEATS_REPOS = ('nguyenminh04/htstep-feats-k400', 'nguyenminh04/htstep-val-seen-feats')  # k400_f16 features
 OUT = os.path.join(ROOT, 'data', 'htstep')
 OFFICIAL = 'https://github.com/facebookresearch/htstep'
